@@ -51,6 +51,9 @@ public class DVarrDbContext : DbContext
         {
             e.HasIndex(c => c.SourceId);
             e.HasIndex(c => c.LogicalKey);
+            // (SourceId, StreamId) is the channel's natural identity. NOT unique at the DB layer — the ingest upsert
+            // (IngestService) already dedups within a provider response; a unique index would also break the
+            // test-recording flow (test channels share StreamId=0) and risk orphaning rows on a dedup migration.
             e.HasIndex(c => new { c.SourceId, c.StreamId });
             e.HasOne(c => c.Source).WithMany().HasForeignKey(c => c.SourceId).OnDelete(DeleteBehavior.Cascade);
         });

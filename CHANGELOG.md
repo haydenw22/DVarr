@@ -12,6 +12,21 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.15.0] — 2026-06-17
+Correct, tournament-accurate episode numbering, plus a batch of reviewed reliability fixes.
+
+### Fixed
+- **Episode numbers are now the true tournament game number** (e.g. the 8th match of the World Cup = `E08`), so Plex matches each recording to the right game name + thumbnail. The cause was two-fold: the manual **Import** flow numbered by day-of-year (Spain v Cape Verde came out `E167`), and — more fundamentally — event ingestion only saw a partial schedule, so even chronological numbering was wrong.
+- **Manual Import now links the recording to its local event** and numbers it through the exact same path as auto-import and the Plex agent — no more day-of-year. If the league isn't tracked locally it falls back to a chronological season position rather than day-of-year.
+- **Event ingestion now pulls the *complete* backdated schedule.** TheSportsDB's free tier caps the season endpoint at ~5 matches and its per-day endpoint silently *drops* games (confirmed: Australia v Turkey, Sweden v Tunisia, Netherlands v Japan vanished from the day feed). Ingestion now sweeps per-day from the competition's first match through the horizon **and gap-fills missing fixtures by `lookupevent`** (the per-id endpoint hits the full DB), so the local schedule — and therefore every episode number — is complete and stable. Decoupled from the arming horizon; past games are never re-recorded.
+
+### Fixed (reviewed batch — two adversarial review rounds)
+- **EPG sync is now last-known-good** — a failed/partial guide refresh keeps the previous guide instead of blanking it.
+- **Recording start is atomic** (no double-start race); **stop/delete waits for finalize** and reports `finalizing` (409) rather than deleting underneath a running capture.
+- **Stale event-status sweep** cancels Pending/Conflict recordings when an event is Cancelled/Postponed (never on Completed — full race endings kept); **event/league delete** also cancels `Conflict` recordings, not just `Pending`.
+- **Per-source `User-Agent`** is wired end-to-end (seed → CRUD → UI); **duplicate source labels / league TheSportsDB ids return a clean 409**; manual recordings on a disabled source are rejected up-front.
+- **HA `free_credentials`** counts only enabled sources; the Sonarr-emulation API key is logged only when first generated; episode `.nfo` `uniqueid` includes the season/year; reverted an over-aggressive unique channel index.
+
 ## [1.14.0] — 2026-06-16
 Manual-recording staging + an Import/assign flow.
 

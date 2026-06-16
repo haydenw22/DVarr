@@ -66,6 +66,7 @@ public sealed class RecorderSupervisor
         bool contentVerify,
         int contentDeadTimeoutS,
         bool cleanEofInstantRelaunch,
+        string? userAgent,
         TunerLease lease,
         Func<int, Task<(int channelId, int streamId, string url)?>> getNextFallbackUrl,
         CancellationToken stopToken)
@@ -84,7 +85,7 @@ public sealed class RecorderSupervisor
             {
                 try
                 {
-                    var exit = await CaptureUntilStopOrStallAsync(recordingId, url, segDir, windowEndUtc, stallTimeoutS, nativeRate, contentVerify, contentDeadTimeoutS, lease, stopToken);
+                    var exit = await CaptureUntilStopOrStallAsync(recordingId, url, segDir, windowEndUtc, stallTimeoutS, nativeRate, contentVerify, contentDeadTimeoutS, userAgent, lease, stopToken);
 
                     // Normal end of window or explicit stop → leave the capture loop and finalize.
                     if (stopToken.IsCancellationRequested || EpochTime.Now() >= windowEndUtc)
@@ -242,7 +243,7 @@ public sealed class RecorderSupervisor
     /// <summary>Launch one ffmpeg, watch output growth, return a typed reason when it exits or stalls.</summary>
     private async Task<CaptureExit> CaptureUntilStopOrStallAsync(
         int recordingId, string url, string segDir, long windowEndUtc, int stallTimeoutS, bool nativeRate,
-        bool contentVerify, int contentDeadTimeoutS, TunerLease lease, CancellationToken stopToken)
+        bool contentVerify, int contentDeadTimeoutS, string? userAgent, TunerLease lease, CancellationToken stopToken)
     {
         var pattern = Path.Combine(segDir, "seg-%Y%m%d-%H%M%S.ts");
         var psi = new ProcessStartInfo(_d.Ffmpeg.Ffmpeg)
@@ -257,9 +258,11 @@ public sealed class RecorderSupervisor
         // Manual/test inputs (VOD) are read at native rate so they behave like a live feed
         // instead of being slurped at full speed; real provider feeds are already live.
         if (nativeRate) args.Add("-re");
+        // Use the source's configured user-agent if set (some IPTV providers require a specific UA); else the VLC default.
+        args.Add("-user_agent");
+        args.Add(string.IsNullOrWhiteSpace(userAgent) ? "VLC/3.0.18 LibVLC/3.0.18" : userAgent!);
         args.AddRange(new[]
         {
-            "-user_agent", "VLC/3.0.18 LibVLC/3.0.18",
             "-reconnect", "1", "-reconnect_streamed", "1",
             "-reconnect_on_network_error", "1", "-reconnect_delay_max", "10", "-rw_timeout", "15000000",
         });
@@ -277,8 +280,9 @@ public sealed class RecorderSupervisor
             "-i", url,
             // Explicit 1 video + 1 audio. NOT -map 0 — on a multi-variant HLS master that would pull every
             // bitrate rendition at once and choke startup. Explicit mapping is also deterministic if the
-            // provider emits a transient extra stream/PMT mid-feed.
-            "-map", "0:v", "-map", "0:a", "-c", "copy", "-max_muxing_queue_size", "4096",
+            // provider emits a transient extra stream/PMT mid-feed. Audio is OPTIONAL (0:a?) so a video-only or
+            // delayed-audio feed records instead of ffmpeg exiting "Stream map '0:a' matches no streams".
+            "-map", "0:v", "-map", "0:a?", "-c", "copy", "-max_muxing_queue_size", "4096",
             // Self-heal a corrupt source PTS AT CAPTURE: rewrite PTS from the (good) DTS only when they diverge
             // by >10s (900000 ticks). Real B-frame reorder is <0.15s, so this is a pure no-op on healthy frames
             // (a ~700x safety margin) and preserves legitimate PTS ordering — but a single rogue source PTS can
@@ -581,7 +585,7 @@ public sealed class RecorderSupervisor
         {
             "-hide_banner", "-loglevel", "warning", "-y",
             "-f", "concat", "-safe", "0", "-i", listPath,
-            "-map", "0:v:0", "-map", "0:a:0",
+            "-map", "0:v:0", "-map", "0:a:0?",
             // VIDEO stays LOSSLESS copy; the setts BSF rewrites only a rogue >10s PTS outlier (no-op on healthy
             // frames), so a corrupt source timestamp can't inflate the container to bogus hours. DROPPED +genpts:
             // it can't repair a present-but-wrong PTS and extrapolates across source discontinuities.
@@ -601,7 +605,11 @@ public sealed class RecorderSupervisor
             using var p = Process.Start(psi)!;
             _ = Task.Run(async () => { try { while (await p.StandardError.ReadLineAsync() is not null) { } } catch { } });
             _ = Task.Run(async () => { try { while (await p.StandardOutput.ReadLineAsync() is not null) { } } catch { } });
-            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+            // Scale the hang-guard by footage length (≈75 8s-segments per 10 min) so a long motorsport finalize
+            // can't be clipped, while still bounding a wedged ffmpeg. Copy-video + CPU-AAC runs well faster than
+            // realtime, so this is generous: ~10 min floor, ~60 min ceiling.
+            var capMin = Math.Clamp(10 + segs.Count / 10, 10, 60);
+            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(capMin));
             await p.WaitForExitAsync(cts.Token);
             if (p.ExitCode != 0 || !File.Exists(outputPath)) return (false, 0, 0, null);
             var bytes = new FileInfo(outputPath).Length;

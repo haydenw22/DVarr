@@ -47,8 +47,15 @@ public sealed class RecorderService
     /// <summary>Resolve, acquire the credential slot, and launch the supervisor. Returns null on success or a reason string.</summary>
     public async Task<string?> TryStartAsync(int recordingId, CancellationToken stoppingToken)
     {
-        if (_active.ContainsKey(recordingId)) return "already running";
-
+        // ATOMIC start guard (#1): reserve the id in _active BEFORE any async work, so two concurrent start calls
+        // (scheduler tick + manual /start) for the same recording can't both pass a check-then-act and launch two
+        // supervisors / hold two leases. The real linked cts is reserved now (cancellation works during setup); on
+        // success the placeholder is swapped for the running task, on ANY failure the reservation is removed (finally).
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        if (!_active.TryAdd(recordingId, (Task.CompletedTask, cts))) { cts.Dispose(); return "already running"; }
+        var started = false;
+        try
+        {
         string url, segDir, outputPath;
         long windowEnd;
         int stall, contentDeadTimeout;
@@ -147,11 +154,11 @@ public sealed class RecorderService
                         ? Task.FromResult<(int, int, string)?>(fallbacks[fbIndex++])
                         : Task.FromResult<(int, int, string)?>(null);
 
-                var cts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
                 var sup = new RecorderSupervisor(new RecorderSupervisor.Deps(_scopes, _gate, _ffmpeg, _tuner, _bus, _lf));
-                var task = Task.Run(() => sup.RunAsync(recordingId, url, segDir, outputPath, windowEnd, stall, nativeRate, contentVerify, contentDeadTimeout, cleanEof, lease, next, cts.Token), CancellationToken.None);
-                _active[recordingId] = (task, cts);
+                var task = Task.Run(() => sup.RunAsync(recordingId, url, segDir, outputPath, windowEnd, stall, nativeRate, contentVerify, contentDeadTimeout, cleanEof, src?.UserAgent, lease, next, cts.Token), CancellationToken.None);
+                _active[recordingId] = (task, cts); // swap the reservation placeholder for the running task (same cts)
                 _ = task.ContinueWith(t => { _active.TryRemove(recordingId, out _); cts.Dispose(); }, TaskScheduler.Default);
+                started = true;
 
                 _log.LogInformation("[Recorder] Started recording {Id} on '{Url}' (window ends {End})", recordingId, Mask(url), windowEnd);
                 return null;
@@ -163,16 +170,27 @@ public sealed class RecorderService
                 return "start failed: " + ex.Message;
             }
         }
+        }
+        finally
+        {
+            // Any non-success path (early return, busy, or setup exception) frees the reservation + cts. On success
+            // started=true and the running task owns the cts (disposed by its ContinueWith), so this is a no-op.
+            if (!started) { _active.TryRemove(recordingId, out _); cts.Dispose(); }
+        }
     }
 
-    public Task StopAsync(int recordingId)
+    /// <summary>Cancel an active recording and wait (bounded) for the supervisor to fully unwind — finalize,
+    /// persist/abandon segments, and release the tuner lease. Returns true if it actually SETTLED within the wait
+    /// (so callers like delete can avoid removing the row mid-finalize). Returns true immediately if not active.</summary>
+    public async Task<bool> StopAsync(int recordingId)
     {
-        if (_active.TryGetValue(recordingId, out var entry))
-        {
-            _log.LogInformation("[Recorder] Stop requested for recording {Id}", recordingId);
-            try { entry.cts.Cancel(); } catch { }
-        }
-        return Task.CompletedTask;
+        if (!_active.TryGetValue(recordingId, out var entry)) return true; // nothing running → already settled
+        _log.LogInformation("[Recorder] Stop requested for recording {Id}", recordingId);
+        try { entry.cts.Cancel(); } catch { }
+        // Capture stops within seconds; finalize (concat + AAC) can legitimately run minutes for a long recording,
+        // so report whether it actually completed in the wait window rather than assuming "settled".
+        try { await entry.task.WaitAsync(TimeSpan.FromSeconds(60)); } catch { }
+        return entry.task.IsCompleted;
     }
 
     /// <summary>Boot recovery (docs/05 §3.4): resume open windows; mark fully-passed non-terminal rows MISSED.</summary>

@@ -31,7 +31,9 @@ public static class HealthEndpoints
             try { dbOk = await db.Database.CanConnectAsync(); }
             catch (Exception ex) { dbOk = false; dbErr = ex.Message; }
 
-            var sources = await db.Sources.CountAsync();
+            // Only ENABLED sources count toward the concurrency ceiling — a disabled source can never hold a lease,
+            // so it must not inflate total/free_credentials (the off-limits Source 1 was over-counting before).
+            var sources = await db.Sources.CountAsync(s => s.Enabled);
             var busyCredentials = await db.TunerLeases
                 .Where(l => l.State == LeaseState.Active)
                 .Select(l => l.SourceId)

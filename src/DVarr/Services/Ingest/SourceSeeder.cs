@@ -52,12 +52,15 @@ public sealed class SourceSeeder
 
         var now = EpochTime.Now();
         var created = 0;
+        var seenLabels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         await _gate.WriteAsync(async () =>
         {
             foreach (var r in rows)
             {
                 var (proto, host, port) = ParseEndpoint(r.Url);
                 var label = string.IsNullOrWhiteSpace(r.Name) ? $"src{r.Id}" : r.Name!.Trim();
+                // Label has a UNIQUE index — suffix a duplicate import name so one collision can't fail the whole seed.
+                if (!seenLabels.Add(label)) { label = $"{label} (#{r.Id})"; seenLabels.Add(label); }
                 _db.Sources.Add(new ProviderSource
                 {
                     Label = label,
@@ -66,6 +69,7 @@ public sealed class SourceSeeder
                     Port = port,
                     Username = r.Username ?? "",
                     Password = r.Password ?? "",
+                    UserAgent = string.IsNullOrWhiteSpace(r.UserAgent) ? null : r.UserAgent!.Trim(), // preserve Sportarr UA
                     MaxStreams = 1,                       // provider-fixed (D6) regardless of source value
                     Enabled = r.IsActive != 0,
                     Healthy = false,                       // unknown until first auth (deferred until safe)

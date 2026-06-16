@@ -98,6 +98,13 @@ public sealed class AutoScheduleService : BackgroundService
         var committed = await db.Recordings.Where(r => SlotHolding.Contains(r.State)).ToListAsync(ct);
         var conflicts = await db.Recordings.Where(r => r.State == RecordingState.Conflict).ToListAsync(ct);
 
+        // Pending recordings keyed by event, so a re-synced event that MOVED can retime its already-created recording
+        // (else it would record at the stale time). Only Pending is safe to retime — never an in-progress capture.
+        var pendingByEvent = committed
+            .Where(r => r.State == RecordingState.Pending && r.EventId != null)
+            .GroupBy(r => r.EventId!.Value)
+            .ToDictionary(g => g.Key, g => g.First());
+
         // League priority for ranking existing recordings (their event's league) — for the conflict ladder.
         var rankEventIds = committed.Concat(conflicts).Where(r => r.EventId != null).Select(r => r.EventId!.Value).Distinct().ToList();
         var evLeague = await db.Events.Where(e => rankEventIds.Contains(e.Id)).ToDictionaryAsync(e => e.Id, e => e.LeagueId, ct);
@@ -128,6 +135,35 @@ public sealed class AutoScheduleService : BackgroundService
         }
 
         int placed = 0, conflicted = 0, promoted = 0;
+
+        // 1b) Stale-status cleanup: an event that flipped to Cancelled/Postponed after its recording was created is
+        // no longer a candidate (the query excludes those statuses), so cancel its not-yet-started recordings here.
+        // NOT Completed — "FT" often arrives mid-broadcast and we keep full endings ([[keep-full-race-endings]]).
+        var deadEventIds = await db.Events
+            .Where(e => e.Status == EventStatus.Cancelled || e.Status == EventStatus.Postponed)
+            .Select(e => e.Id).ToListAsync(ct);
+        if (deadEventIds.Count > 0)
+        {
+            var staleRecIds = await db.Recordings
+                .Where(r => r.EventId != null && deadEventIds.Contains(r.EventId.Value)
+                            && (r.State == RecordingState.Pending || r.State == RecordingState.Conflict))
+                .Select(r => r.Id).ToListAsync(ct);
+            foreach (var rid in staleRecIds)
+            {
+                await _gate.WriteAsync(async () =>
+                {
+                    var rec = await db.Recordings.FindAsync(rid);
+                    if (rec is null || rec.State is not (RecordingState.Pending or RecordingState.Conflict)) return;
+                    rec.State = RecordingState.Cancelled; rec.FailureReason = "event cancelled/postponed"; rec.UpdatedUtc = now;
+                    db.Notifications.Add(new Notification { RecordingId = rid, TsUtc = now, Kind = NotificationKind.Cancelled, Severity = Severity.Info, ToState = "Cancelled", Message = "event cancelled/postponed" });
+                    await db.SaveChangesAsync(ct);
+                }, ct);
+                slots.RemoveAll(s => s.RecordingId == rid);
+            }
+            // Don't re-process the ones we just cancelled in the conflict re-evaluation below.
+            var staleSet = staleRecIds.ToHashSet();
+            conflicts = conflicts.Where(c => !staleSet.Contains(c.Id)).ToList();
+        }
 
         // 2a) Re-evaluate parked conflicts FIRST (they have been waiting): a freed slot promotes one back to Pending.
         foreach (var r in conflicts.OrderBy(r => r.StartUtc))
@@ -172,7 +208,30 @@ public sealed class AutoScheduleService : BackgroundService
             {
                 var l = monitoredLeagues[e.LeagueId];
                 if (e.StartUtc > now + (long)l.ScheduleHorizonDays * 86400) continue; // beyond this league's horizon
-                if (handledEventIds.Contains(e.Id)) continue;
+                if (handledEventIds.Contains(e.Id))
+                {
+                    // Already has a recording — but if the event MOVED/retitled on re-sync, retime its Pending recording
+                    // (the auto-scheduler is the only place this reconciliation happens; the scheduler arms off the
+                    // recording row, not the event). Only Pending is touched; channel re-resolution is left as-is.
+                    if (pendingByEvent.TryGetValue(e.Id, out var pend))
+                    {
+                        var newEnd = e.EndUtc ?? e.StartUtc + await settings.GetEventDurationSecondsAsync(l.Sport);
+                        if (pend.StartUtc != e.StartUtc || pend.EndUtc != newEnd || pend.Title != e.Title)
+                        {
+                            await _gate.WriteAsync(async () =>
+                            {
+                                var rec = await db.Recordings.FindAsync(pend.Id);
+                                if (rec is not null && rec.State == RecordingState.Pending)
+                                {
+                                    rec.StartUtc = e.StartUtc; rec.EndUtc = newEnd; rec.Title = e.Title; rec.UpdatedUtc = now;
+                                    await db.SaveChangesAsync(ct);
+                                }
+                            }, ct);
+                            _log.LogInformation("[AutoSchedule] reconciled recording {Id} to moved event {Eid} '{Title}'", pend.Id, e.Id, e.Title);
+                        }
+                    }
+                    continue;
+                }
 
                 var opts = await planner.OptionsForEventAsync(e.Id, ct);
                 if (opts.Count == 0) { _log.LogDebug("[AutoSchedule] event {Id} '{Title}' not resolvable", e.Id, e.Title); continue; }

@@ -86,7 +86,7 @@ public sealed class IngestService
                     }
                     else
                     {
-                        _db.Channels.Add(new Channel
+                        var newCh = new Channel
                         {
                             SourceId = sourceId,
                             StreamId = st.StreamId,
@@ -102,7 +102,11 @@ public sealed class IngestService
                             Enabled = true,
                             CreatedUtc = now,
                             UpdatedUtc = now,
-                        });
+                        };
+                        _db.Channels.Add(newCh);
+                        // Register it so a duplicate stream_id later in the SAME provider response updates this row
+                        // instead of inserting a second one (the (SourceId, StreamId) unique index would otherwise abort the batch).
+                        existing[st.StreamId] = newCh;
                         added++;
                     }
                 }

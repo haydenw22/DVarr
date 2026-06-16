@@ -35,42 +35,82 @@ public sealed class EventFetcher
         var leagueId = l.ExternalLeagueId!;
         var byId = new Dictionary<string, IngestedEvent>(StringComparer.Ordinal); // dedupe by stable idEvent; first writer wins
 
+        var seasons = new HashSet<string>(StringComparer.OrdinalIgnoreCase); // season strings seen, for gap-fill scoping
+
         void Merge(IReadOnlyList<TsdbEvent> evs)
         {
             foreach (var e in evs)
             {
                 if (e.StartUtc is not { } st) continue;
+                if (!string.IsNullOrWhiteSpace(e.Season)) seasons.Add(e.Season!);
                 // TheSportsDB never returns an end time — leave it null here; EventIngestService fills in the
                 // per-sport default duration (2h soccer / 3h motorsport) so it's tunable in one place.
                 byId.TryAdd(e.Id, new IngestedEvent(e.Id, e.Title, st, null, e.DateOnly, e.Status, e.Thumb ?? e.Poster, e.Round, e.Season));
             }
         }
 
-        // 1) Season endpoint — richest metadata (round/season) but TheSportsDB's FREE tier now caps it to a
-        //    season's first few matches (changed mid-2026), so on its own it misses upcoming fixtures.
+        // 1) Season endpoint — richest metadata (round/season) but TheSportsDB's FREE tier caps it to a season's
+        //    first few matches, so it's only a seed. It also anchors the competition start for the day-sweep below.
         var year = EpochTime.ToBrisbane(EpochTime.Now()).Year;
         foreach (var season in new[] { year.ToString(), $"{year}-{year + 1}", $"{year - 1}-{year}" })
         {
             var evs = await _tsdb.GetSeasonEventsAsync(leagueId, season, ct);
             if (evs.Count == 0) continue;
-            Merge(evs); // season metadata wins on dedupe
-            break;
+            Merge(evs);
+            break; // first non-empty season wins (don't mix adjacent seasons' fixtures)
         }
 
-        // 2) Per-day endpoint across the league's horizon (UTC days, matching TheSportsDB's dateEvent). This is
-        //    NOT capped like eventsseason, so it's what actually pulls the upcoming fixtures on the free key —
-        //    one call per day from yesterday to now+horizon. 429s degrade gracefully (that day yields nothing).
+        // 2) Per-day sweep from the competition START (earliest season event, else 45 days back) through the league's
+        //    horizon. eventsday isn't capped like eventsseason — but it DROPS games unpredictably. Sweeping from the
+        //    start (not just yesterday) is what makes the episode ordinal the true tournament game number instead of a
+        //    position in a partial window. 429s degrade gracefully (that day yields nothing).
         var horizon = Math.Clamp(l.ScheduleHorizonDays, 1, 30);
-        var day = DateTimeOffset.FromUnixTimeSeconds(EpochTime.Now()).UtcDateTime.Date.AddDays(-1);
-        for (var i = 0; i <= horizon + 1; i++, day = day.AddDays(1))
+        var nowUtc = DateTimeOffset.FromUnixTimeSeconds(EpochTime.Now()).UtcDateTime.Date;
+        var earliest = byId.Values.Count > 0 ? byId.Values.Min(e => e.StartUtc) : (long?)null;
+        var startDate = earliest is { } es ? DateTimeOffset.FromUnixTimeSeconds(es).UtcDateTime.Date.AddDays(-1) : nowUtc.AddDays(-45);
+        var endDate = nowUtc.AddDays(horizon + 1);
+        if ((endDate - startDate).TotalDays > 120) startDate = endDate.AddDays(-120); // safety cap on the sweep span
+        for (var day = startDate; day <= endDate; day = day.AddDays(1))
         {
             try { Merge(await _tsdb.GetDayEventsAsync(leagueId, day.ToString("yyyy-MM-dd"), ct)); }
-            catch (OperationCanceledException) { break; }
+            catch (OperationCanceledException) { return byId.Values.ToList(); }
             catch (Exception ex) { _log.LogDebug(ex, "[Events] eventsday {Day:yyyy-MM-dd} failed for league {Id}", day, l.Id); }
-            try { await Task.Delay(200, ct); } catch (OperationCanceledException) { break; } // gentle on the 30/min free limit
+            try { await Task.Delay(200, ct); } catch (OperationCanceledException) { return byId.Values.ToList(); }
         }
 
-        _log.LogInformation("[Events] TheSportsDB league {Id} ({Ext}): {Count} events (season + {H}-day horizon)", l.Id, leagueId, byId.Count, horizon);
+        // 3) Gap-fill via lookupevent. eventsday/eventsseason on the free tier silently omit some fixtures (confirmed:
+        //    Australia v Turkey, Sweden v Tunisia, Netherlands v Japan), which would corrupt the chronological episode
+        //    numbering. TheSportsDB numbers a competition's games near-sequentially by idEvent, so a SMALL gap between
+        //    two observed ids is a dropped game — look each one up directly (the per-id endpoint hits the full DB).
+        //    Bounded by gap size + a hard cap so a sparse league can't trigger a huge sweep, and the large gap between
+        //    a competition's separate id blocks is never crossed.
+        const int maxFillGap = 50, maxFills = 250;
+        var ids = byId.Keys.Select(k => long.TryParse(k, out var n) ? n : -1L).Where(n => n > 0).Distinct().OrderBy(n => n).ToList();
+        var fills = 0;
+        for (var i = 0; i + 1 < ids.Count && fills < maxFills; i++)
+        {
+            var gap = ids[i + 1] - ids[i];
+            if (gap <= 1 || gap > maxFillGap) continue;
+            for (var id = ids[i] + 1; id < ids[i + 1] && fills < maxFills; id++)
+            {
+                var key = id.ToString();
+                if (byId.ContainsKey(key)) continue;
+                fills++;
+                try
+                {
+                    var ev = await _tsdb.GetEventByIdAsync(key, ct);
+                    if (ev?.StartUtc is { } st && string.Equals(ev.LeagueId, leagueId, StringComparison.Ordinal)
+                        && (string.IsNullOrWhiteSpace(ev.Season) || seasons.Count == 0 || seasons.Contains(ev.Season!)))
+                        byId.TryAdd(ev.Id, new IngestedEvent(ev.Id, ev.Title, st, null, ev.DateOnly, ev.Status, ev.Thumb ?? ev.Poster, ev.Round, ev.Season));
+                }
+                catch (OperationCanceledException) { return byId.Values.ToList(); }
+                catch (Exception ex) { _log.LogDebug(ex, "[Events] gap-fill lookupevent {Id} failed for league {Lid}", id, l.Id); }
+                try { await Task.Delay(200, ct); } catch (OperationCanceledException) { return byId.Values.ToList(); }
+            }
+        }
+
+        _log.LogInformation("[Events] TheSportsDB league {Id} ({Ext}): {Count} events (season + day-sweep {Start:yyyy-MM-dd}..{End:yyyy-MM-dd} + {Fills} gap-fill lookups)",
+            l.Id, leagueId, byId.Count, startDate, endDate, fills);
         return byId.Values.ToList();
     }
 
@@ -136,8 +176,11 @@ public static class IcsParser
                 var dt = DateTime.ParseExact(value.TrimEnd('Z', 'z'), "yyyyMMddTHHmmss", CultureInfo.InvariantCulture);
                 return (new DateTimeOffset(dt, TimeSpan.Zero).ToUnixTimeSeconds(), false);
             }
+            // A no-Z, non-DATE time is either floating local or TZID-qualified (e.g. DTSTART;TZID=Australia/Brisbane:...).
+            // We don't parse TZID, but this is a Brisbane-based deployment, so interpret it as Brisbane local rather
+            // than UTC (the old TimeSpan.Zero assumption shifted such events by 10h). (ICS is a legacy/dormant path.)
             if (DateTime.TryParseExact(value, "yyyyMMddTHHmmss", CultureInfo.InvariantCulture, DateTimeStyles.None, out var n))
-                return (new DateTimeOffset(n, TimeSpan.Zero).ToUnixTimeSeconds(), false);
+                return (new DateTimeOffset(n, EpochTime.BrisbaneOffset).ToUnixTimeSeconds(), false);
         }
         catch { }
         return (null, false);

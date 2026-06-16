@@ -78,13 +78,73 @@ public sealed class MediaImportService
         var ev = await _tsdb.GetEventByIdAsync(eventId, ct);
         if (ev is null) return (false, null, "TheSportsDB event not found");
         var resolvedLeagueId = string.IsNullOrWhiteSpace(ev.LeagueId) ? leagueId : ev.LeagueId!;
+
+        // Prefer a LOCAL event. The DVarr Plex agent numbers episodes by a game's position among the LOCAL events
+        // for the league+year (PlexEndpoints.SeasonEventsAsync), so for Plex to match the imported file its on-disk
+        // SxxExx MUST come from that same ordinal — NOT day-of-year (the old code's E167 bug) or intRound. Map the
+        // chosen TheSportsDB game to its local Event (by TheSportsDB id, else the nearest start in the same league),
+        // link the recording to it, and re-use the identical event-linked filing path as auto-import.
+        var league = await _db.Leagues.FirstOrDefaultAsync(l => l.ExternalLeagueId == resolvedLeagueId, ct);
+        if (league is not null)
+        {
+            var localEv = await _db.Events.FirstOrDefaultAsync(e => e.LeagueId == league.Id && e.TsdbEventId == eventId, ct);
+            if (localEv is null && ev.StartUtc is { } su)
+            {
+                // No TheSportsDB-id match (id drift / older ingest) → nearest start within 2 h in the same league.
+                var cands = await _db.Events.Where(e => e.LeagueId == league.Id)
+                    .Select(e => new { e.Id, e.StartUtc }).ToListAsync(ct);
+                var near = cands.OrderBy(e => Math.Abs(e.StartUtc - su)).FirstOrDefault();
+                if (near is not null && Math.Abs(near.StartUtc - su) <= 2 * 3600)
+                    localEv = await _db.Events.FindAsync(new object?[] { near.Id }, ct);
+            }
+            if (localEv is not null)
+            {
+                // Link the recording to the event so BuildFilingAsync takes the event-linked branch (SeasonOrdinalAsync,
+                // == the Plex agent's index) — manual import now produces byte-identical numbering to auto-import.
+                await _gate.WriteAsync(async () =>
+                {
+                    var r = await _db.Recordings.FindAsync(recordingId);
+                    if (r is not null) { r.EventId = localEv.Id; r.UpdatedUtc = EpochTime.Now(); await _db.SaveChangesAsync(ct); }
+                }, ct);
+                rec.EventId = localEv.Id;
+                var ef = await BuildFilingAsync(rec, ct);
+                if (ef is not null)
+                {
+                    _log.LogInformation("[Media] Manual import {Rid} linked to event {Eid} ({Title}) → E{Ep:D2}", recordingId, localEv.Id, localEv.Title, ef.Episode);
+                    return (true, await FileRecordingAsync(rec, current!, ef, ct), null);
+                }
+            }
+        }
+
+        // No local event (league not monitored locally) → the DVarr Plex agent can't serve episodes for it anyway,
+        // so the number is cosmetic; still enrich from TheSportsDB and number by chronological season position
+        // (stable & sane) rather than day-of-year.
         var lk = await _tsdb.LookupLeagueAsync(resolvedLeagueId, ct);
         var bne = EpochTime.ToBrisbane(ev.StartUtc ?? rec.StartUtc);
+        var ordinal = await TsdbSeasonOrdinalAsync(resolvedLeagueId, ev, bne.Year, ct);
         var f = new Filing(
-            ev.League ?? lk?.Name ?? "Sports", ev.Sport ?? lk?.Sport, bne.Year, bne.DayOfYear, ev.Title, bne.ToString("yyyy-MM-dd"),
+            ev.League ?? lk?.Name ?? "Sports", ev.Sport ?? lk?.Sport, bne.Year, ordinal, ev.Title, bne.ToString("yyyy-MM-dd"),
             lk?.Poster ?? ev.Poster, ev.Thumb ?? ev.Poster ?? lk?.Poster, $"tsdb-league-{resolvedLeagueId}", null);
         var path = await FileRecordingAsync(rec, current!, f, ct);
         return (true, path, null);
+    }
+
+    /// <summary>Chronological 1-based position of a TheSportsDB event within its season's events (the manual-import
+    /// fallback used only when the league isn't local). Falls back to intRound, then day-of-year, if the season list
+    /// can't be read.</summary>
+    private async Task<int> TsdbSeasonOrdinalAsync(string leagueId, TsdbEvent ev, int year, CancellationToken ct)
+    {
+        try
+        {
+            var season = string.IsNullOrWhiteSpace(ev.Season) ? year.ToString() : ev.Season!;
+            var all = await _tsdb.GetSeasonEventsAsync(leagueId, season, ct);
+            var ordered = all.Where(e => e.StartUtc is not null)
+                .OrderBy(e => e.StartUtc).ThenBy(e => e.Id, StringComparer.Ordinal).ToList();
+            var idx = ordered.FindIndex(e => e.Id == ev.Id);
+            if (idx >= 0) return idx + 1;
+        }
+        catch (Exception ex) { _log.LogDebug(ex, "[Media] TheSportsDB season-ordinal lookup failed for league {Lid}", leagueId); }
+        return ev.Round is > 0 ? ev.Round!.Value : EpochTime.ToBrisbane(ev.StartUtc ?? 0L).DayOfYear;
     }
 
     /// <summary>Move + enrich the file into the Plex/Jellyfin per-game layout from a resolved Filing.
@@ -278,7 +338,9 @@ public sealed class MediaImportService
         sb.AppendLine($"  <title>{Xml(f.Title)}</title>");
         sb.AppendLine($"  <season>{f.Year}</season>");
         sb.AppendLine($"  <episode>{f.Episode}</episode>");
-        sb.AppendLine($"  <uniqueid type=\"dvarr\" default=\"true\">{Xml(f.ShowKey)}-{f.Episode}</uniqueid>");
+        // Include the season/year so the same E-number under two different seasons can't collide on one uniqueid
+        // (e.g. S2026E01 and S2027E01) — Plex/Kodi treat uniqueid as globally unique within the agent.
+        sb.AppendLine($"  <uniqueid type=\"dvarr\" default=\"true\">{Xml(f.ShowKey)}-{f.Year}-{f.Episode}</uniqueid>");
         sb.AppendLine("</episodedetails>");
         await File.WriteAllTextAsync(path, sb.ToString(), ct);
     }

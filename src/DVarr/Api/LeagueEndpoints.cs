@@ -33,6 +33,10 @@ public static class LeagueEndpoints
         app.MapPost("/api/leagues", async (LeagueUpsert req, DVarrDbContext db, TheSportsDbClient tsdb, DbWriteGate gate, CancellationToken ct) =>
         {
             if (string.IsNullOrWhiteSpace(req.ExternalLeagueId)) return Results.BadRequest(new { error = "a TheSportsDB league must be selected" });
+            var ext = req.ExternalLeagueId!.Trim();
+            // Don't create a duplicate league for the same TheSportsDB id (would double-sync events + show twice in Plex).
+            var dupLeague = await db.Leagues.FirstOrDefaultAsync(x => x.ExternalLeagueId == ext, ct);
+            if (dupLeague is not null) return Results.Json(new { dupLeague.Id, error = "that league is already added" }, statusCode: 409);
             var now = EpochTime.Now();
 
             // Pull canonical name/sport + artwork from TheSportsDB so the row is complete immediately (poster shows
@@ -75,12 +79,17 @@ public static class LeagueEndpoints
         {
             var l = await db.Leagues.FindAsync(id);
             if (l is null) return Results.NotFound();
+            // Mirror the POST guard: don't let two leagues point at the same TheSportsDB id (would double-ingest the
+            // same events). Only checked when a non-empty id is supplied; clearing it (null) is always allowed.
+            var newExt = string.IsNullOrWhiteSpace(req.ExternalLeagueId) ? null : req.ExternalLeagueId!.Trim();
+            if (newExt != null && await db.Leagues.AnyAsync(x => x.Id != id && x.ExternalLeagueId == newExt))
+                return Results.Json(new { error = "another league is already linked to that TheSportsDB id" }, statusCode: 409);
             await gate.WriteAsync(async () =>
             {
                 if (!string.IsNullOrWhiteSpace(req.Name)) l.Name = req.Name!.Trim();
                 if (req.Sport != null) l.Sport = req.Sport.Trim();
                 if (!string.IsNullOrWhiteSpace(req.Provider)) l.EventProvider = req.Provider!.Trim();
-                l.ExternalLeagueId = string.IsNullOrWhiteSpace(req.ExternalLeagueId) ? null : req.ExternalLeagueId!.Trim();
+                l.ExternalLeagueId = newExt;
                 // Legacy ICS field: only update when a valid absolute http(s) URL is supplied (SSRF guard); a normal
                 // edit (which omits icsUrl) preserves the existing value rather than nulling it.
                 if (req.IcsUrl != null && Uri.TryCreate(req.IcsUrl.Trim(), UriKind.Absolute, out var iu) && (iu.Scheme == Uri.UriSchemeHttp || iu.Scheme == Uri.UriSchemeHttps))
@@ -97,7 +106,17 @@ public static class LeagueEndpoints
         {
             var l = await db.Leagues.FindAsync(id);
             if (l is null) return Results.NotFound();
-            await gate.WriteAsync(async () => { db.Leagues.Remove(l); await db.SaveChangesAsync(); }); // events + mappings cascade
+            await gate.WriteAsync(async () =>
+            {
+                // Cancel not-yet-started recordings for this league's events before the events cascade away, so a
+                // deleted league can't leave an orphaned Pending/Conflict recording that still fires on the old channel.
+                var evIds = await db.Events.Where(e => e.LeagueId == id).Select(e => e.Id).ToListAsync();
+                if (evIds.Count > 0)
+                    await db.Recordings.Where(r => r.EventId != null && evIds.Contains(r.EventId.Value) && (r.State == RecordingState.Pending || r.State == RecordingState.Conflict))
+                        .ExecuteUpdateAsync(s => s.SetProperty(r => r.State, RecordingState.Cancelled).SetProperty(r => r.FailureReason, "league deleted"));
+                db.Leagues.Remove(l); // events + mappings cascade
+                await db.SaveChangesAsync();
+            });
             return Results.Json(new { deleted = true });
         });
 
@@ -159,7 +178,15 @@ public static class LeagueEndpoints
         {
             var ev = await db.Events.FindAsync(id);
             if (ev is null) return Results.NotFound();
-            await gate.WriteAsync(async () => { db.Events.Remove(ev); await db.SaveChangesAsync(); });
+            await gate.WriteAsync(async () =>
+            {
+                // Cancel any not-yet-started recording for this event so deleting the event doesn't leave a stranded
+                // Pending/Conflict recording that still fires (only those two — never touch an in-progress capture).
+                await db.Recordings.Where(r => r.EventId == id && (r.State == RecordingState.Pending || r.State == RecordingState.Conflict))
+                    .ExecuteUpdateAsync(s => s.SetProperty(r => r.State, RecordingState.Cancelled).SetProperty(r => r.FailureReason, "event deleted"));
+                db.Events.Remove(ev);
+                await db.SaveChangesAsync();
+            });
             return Results.Json(new { deleted = true });
         });
 
@@ -193,6 +220,8 @@ public static class LeagueEndpoints
             var ch = await db.Channels.FindAsync(req.ChannelId);
             if (ch is null) return Results.BadRequest(new { error = "channel not found" });
             if (await db.Leagues.FindAsync(req.LeagueId) is null) return Results.BadRequest(new { error = "league not found" });
+            if (await db.LeagueChannelMaps.AnyAsync(x => x.LeagueId == req.LeagueId && x.ChannelId == ch.Id))
+                return Results.Json(new { error = "that channel is already mapped to this league" }, statusCode: 409);
             var m = new LeagueChannelMap
             {
                 LeagueId = req.LeagueId, ChannelId = ch.Id, SourceId = ch.SourceId, // denormalised owning credential

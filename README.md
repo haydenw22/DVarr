@@ -13,9 +13,11 @@ Design docs live in [`../docs/`](../docs/); this README covers building and runn
 | Phase | State |
 |---|---|
 | **0 — Skeleton + multi-source foundation** | **Done.** Host + DI, SQLite WAL + single-writer gate, full data model + migrations, settings, `/api/health`, Dockerfile + Unraid template, Xtream client + per-source channel ingest (gated), multi-source seeding, source-toggle API. |
-| **1 — Manual bulletproof DVR** | **Functional.** Segmented recorder + supervisor relaunch + concat finalize, per-credential tuner-lease pool, durable scheduler (arm/resume/missed), SSE live status, web UI. Verified end-to-end (public test stream → playable `.mkv`). Remaining: populate `RecordingSegment` rows, fuller content-verification heuristics, conflict-spreading across credentials. |
-| 2 — Event data + EPG + resolver | Not started. EPG ingest (XMLTV) pending; Programmes table empty. |
-| 3–5 | Not started (see [roadmap](../docs/10-roadmap-and-phases.md)). |
+| **1 — Manual bulletproof DVR** | **Done.** Segmented recorder + supervisor relaunch + lossless concat (PTS de-overlap), per-credential tuner-lease pool + cross-login spreading, durable scheduler (arm/resume/missed), SSE live status, web UI. |
+| **2 — Event data + EPG + resolver** | **Done.** Full XMLTV EPG ingest + name-matching, churn-proof events, anti-hijack resolver, credit-aware conflict planner, auto-scheduler. |
+| **3–5** | **Done.** Media import (`.nfo`/artwork, Sportarr-style folders) + manual Import flow, Sonarr-v3/HA/credential-free export parity, Plex metadata provider, full SPA. |
+
+See [`CHANGELOG.md`](CHANGELOG.md) for the per-version history (current **v1.14.0**); [`../docs/10-roadmap-and-phases.md`](../docs/10-roadmap-and-phases.md) is the original sequencing plan.
 
 ### Run it
 ```powershell

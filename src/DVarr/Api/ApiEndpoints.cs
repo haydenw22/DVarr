@@ -24,7 +24,7 @@ public static class ApiEndpoints
                 s.Id, s.Label, s.Type, host = s.BaseUrl, s.Port, protocol = s.ServerProtocol,
                 username = Mask(s.Username), hasPassword = !string.IsNullOrEmpty(s.Password),
                 maxStreams = s.MaxStreams, s.Enabled, s.Healthy,
-                epgUrl = s.EpgUrl, epgOverride = s.EpgOverride,
+                epgUrl = s.EpgUrl, epgOverride = s.EpgOverride, userAgent = s.UserAgent,
                 slotFree = tuner.IsFree(s.Id),
                 channels = db.Channels.Count(c => c.SourceId == s.Id),
                 programmes = db.Programmes.Count(p => p.SourceId == s.Id),
@@ -50,16 +50,20 @@ public static class ApiEndpoints
         {
             if (string.IsNullOrWhiteSpace(req.Host)) return Results.BadRequest(new { error = "host is required" });
             if (!ValidEpgUrl(req.EpgUrl)) return Results.BadRequest(new { error = "external EPG URL must be an absolute http(s) URL" });
+            var label = string.IsNullOrWhiteSpace(req.Label) ? "source" : req.Label.Trim();
+            // Label has a UNIQUE index — pre-check for a friendly 409 instead of a raw DB-constraint 500.
+            if (await db.Sources.AnyAsync(x => x.Label == label)) return Results.Json(new { error = $"a source named '{label}' already exists" }, statusCode: 409);
             var now = EpochTime.Now();
             var s = new ProviderSource
             {
-                Label = string.IsNullOrWhiteSpace(req.Label) ? "source" : req.Label.Trim(),
+                Label = label,
                 Type = string.IsNullOrWhiteSpace(req.Type) ? "xtream" : req.Type.Trim(),
                 ServerProtocol = string.IsNullOrWhiteSpace(req.Protocol) ? "http" : req.Protocol.Trim(),
                 BaseUrl = req.Host!.Trim(),
                 Port = req.Port ?? 0,
                 Username = req.Username ?? "",
                 Password = req.Password ?? "",
+                UserAgent = string.IsNullOrWhiteSpace(req.UserAgent) ? null : req.UserAgent!.Trim(),
                 EpgUrl = string.IsNullOrWhiteSpace(req.EpgUrl) ? null : req.EpgUrl!.Trim(),
                 EpgOverride = req.EpgOverride ?? false,
                 MaxStreams = req.MaxStreams is > 0 ? req.MaxStreams!.Value : 1,
@@ -76,6 +80,10 @@ public static class ApiEndpoints
             var s = await db.Sources.FindAsync(id);
             if (s is null) return Results.NotFound();
             if (!ValidEpgUrl(req.EpgUrl)) return Results.BadRequest(new { error = "external EPG URL must be an absolute http(s) URL" });
+            // Reject a rename onto another source's (unique) label with a friendly 409 rather than a DB 500.
+            if (!string.IsNullOrWhiteSpace(req.Label) && req.Label.Trim() != s.Label
+                && await db.Sources.AnyAsync(x => x.Id != id && x.Label == req.Label.Trim()))
+                return Results.Json(new { error = $"a source named '{req.Label.Trim()}' already exists" }, statusCode: 409);
             await gate.WriteAsync(async () =>
             {
                 if (!string.IsNullOrWhiteSpace(req.Label)) s.Label = req.Label.Trim();
@@ -85,7 +93,8 @@ public static class ApiEndpoints
                 if (req.Port.HasValue) s.Port = req.Port.Value;             // partial-update safe
                 if (!string.IsNullOrEmpty(req.Username)) s.Username = req.Username; // blank = keep existing
                 if (!string.IsNullOrEmpty(req.Password)) s.Password = req.Password!; // blank = keep existing
-                s.EpgUrl = string.IsNullOrWhiteSpace(req.EpgUrl) ? null : req.EpgUrl!.Trim();
+                if (req.UserAgent != null) s.UserAgent = string.IsNullOrWhiteSpace(req.UserAgent) ? null : req.UserAgent.Trim();
+                if (req.EpgUrl != null) s.EpgUrl = string.IsNullOrWhiteSpace(req.EpgUrl) ? null : req.EpgUrl.Trim(); // partial-safe (#17): only when sent
                 if (req.EpgOverride.HasValue) s.EpgOverride = req.EpgOverride.Value;
                 if (req.MaxStreams is > 0) s.MaxStreams = req.MaxStreams!.Value;
                 if (req.Enabled.HasValue) s.Enabled = req.Enabled.Value;
@@ -103,7 +112,7 @@ public static class ApiEndpoints
             {
                 DVarr.Data.RecordingState.Pending, DVarr.Data.RecordingState.Starting, DVarr.Data.RecordingState.Recording,
                 DVarr.Data.RecordingState.Recovering, DVarr.Data.RecordingState.FailingOver, DVarr.Data.RecordingState.Degraded,
-                DVarr.Data.RecordingState.Stopping, DVarr.Data.RecordingState.Finalizing,
+                DVarr.Data.RecordingState.Stopping, DVarr.Data.RecordingState.Finalizing, DVarr.Data.RecordingState.Conflict,
             };
             if (await db.Recordings.AnyAsync(r => r.SourceId == id && blocked.Contains(r.State)))
                 return Results.Json(new { error = "source has active or pending recordings" }, statusCode: 409);
@@ -258,6 +267,11 @@ public static class ApiEndpoints
         {
             var ch = await db.Channels.FindAsync(req.ChannelId);
             if (ch is null) return Results.BadRequest(new { error = "channel not found" });
+            // A recording on a disabled channel/source can never lease a tuner — reject at schedule time rather than
+            // letting it sit Pending and silently miss. (The test-recording flow uses its own always-enabled source.)
+            var recSrc = await db.Sources.FindAsync(ch.SourceId);
+            if (!ch.Enabled || recSrc is null || !recSrc.Enabled) return Results.BadRequest(new { error = "channel's source is disabled" });
+            if (req.EndUtc <= req.StartUtc) return Results.BadRequest(new { error = "end time must be after start time" });
             var pre = req.PrePadS ?? await settings.GetIntAsync("default_pre_pad_s");
             var post = req.PostPadS ?? await settings.GetIntAsync("default_post_pad_s");
             var now = EpochTime.Now();
@@ -294,8 +308,11 @@ public static class ApiEndpoints
                     await db.SaveChangesAsync();
                 }
                 var name = string.IsNullOrWhiteSpace(req.Name) ? "Test capture" : req.Name!;
-                var ch = new Channel { SourceId = src.Id, Name = name, NameNorm = name.ToLower(), LogicalKey = name.ToLower(), StreamId = 0, DirectUrl = req.Url, Enabled = true, CreatedUtc = now, UpdatedUtc = now };
-                db.Channels.Add(ch);
+                // Reuse the single (Manual/Test, StreamId 0) channel across tests (refresh its URL/name) instead of
+                // adding a new row every time — avoids accumulating throwaway test channels.
+                var ch = await db.Channels.FirstOrDefaultAsync(c => c.SourceId == src.Id && c.StreamId == 0);
+                if (ch is null) { ch = new Channel { SourceId = src.Id, StreamId = 0, CreatedUtc = now }; db.Channels.Add(ch); }
+                ch.Name = name; ch.NameNorm = name.ToLower(); ch.LogicalKey = name.ToLower(); ch.DirectUrl = req.Url; ch.Enabled = true; ch.UpdatedUtc = now;
                 await db.SaveChangesAsync();
                 rec = new Recording
                 {
@@ -388,7 +405,14 @@ public static class ApiEndpoints
         {
             var r = await db.Recordings.FindAsync(id);
             if (r is null) return Results.NotFound();
-            if (rec.IsActive(id)) await rec.StopAsync(id);
+            // If it's live, stop it and only remove the row once the supervisor has actually settled — otherwise a
+            // long finalize would keep running against a deleted row (orphaning the output file + no-op state writes).
+            if (rec.IsActive(id))
+            {
+                var settled = await rec.StopAsync(id);
+                if (!settled)
+                    return Results.Json(new { deleted = false, finalizing = true, error = "recording is still finalizing — try delete again in a moment" }, statusCode: 409);
+            }
             await gate.WriteAsync(async () => { db.Recordings.Remove(r); await db.SaveChangesAsync(); });
             return Results.Json(new { deleted = true });
         });
@@ -458,6 +482,7 @@ public static class ApiEndpoints
             await gate.WriteAsync(async () =>
             {
                 if (req.Priority is not null) r.Priority = ParsePriority(req.Priority);
+                var placed = false;
                 if (req.SourceId is { } sid && sid != r.SourceId)
                 {
                     var equiv = (await resolver.EquivalentChannelsAsync(r.ChannelId)).FirstOrDefault(x => x.SourceId == sid);
@@ -465,9 +490,14 @@ public static class ApiEndpoints
                     {
                         r.SourceId = equiv.SourceId; r.ChannelId = equiv.ChannelId; r.StreamId = equiv.StreamId;
                         await db.RecordingFallbacks.Where(f => f.RecordingId == id).ExecuteDeleteAsync();
+                        placed = true;
                     }
                 }
-                if (r.State == RecordingState.Conflict) { r.State = RecordingState.Pending; r.FailureReason = null; }
+                // Only unpark a Conflict to Pending on an EXPLICIT placement (the user picked a specific login). A
+                // bare priority bump keeps it in Conflict so the auto-scheduler's conflict re-evaluation re-plans it
+                // with the new priority next tick — and can preempt a lower-priority slot holder — instead of dropping
+                // it into Pending where nothing re-plans it and it would just sit until Missed.
+                if (r.State == RecordingState.Conflict && placed) { r.State = RecordingState.Pending; r.FailureReason = null; }
                 r.UpdatedUtc = now;
                 await db.SaveChangesAsync();
             });
@@ -542,4 +572,4 @@ public sealed record CreateRecordingRequest(int ChannelId, long StartUtc, long E
 public sealed record ReassignRequest(int? SourceId, string? Priority);
 public sealed record ImportAssignRequest(string? LeagueId, string? EventId);
 public sealed record TestRecordingRequest(string Url, string? Name, int? Minutes);
-public sealed record SourceUpsert(string? Label, string? Type, string? Protocol, string? Host, int? Port, string? Username, string? Password, string? EpgUrl, bool? EpgOverride, int? MaxStreams, bool? Enabled);
+public sealed record SourceUpsert(string? Label, string? Type, string? Protocol, string? Host, int? Port, string? Username, string? Password, string? EpgUrl, bool? EpgOverride, int? MaxStreams, bool? Enabled, string? UserAgent);

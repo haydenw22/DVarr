@@ -92,8 +92,12 @@ using (var scope = app.Services.CreateScope())
     await scope.ServiceProvider.GetRequiredService<SettingsService>().EnsureDefaultsAsync();
     await scope.ServiceProvider.GetRequiredService<SourceSeeder>().SeedFromFileAsync(configDir);
 
-    var apiKey = await DVarr.Api.ParityEndpoints.EnsureApiKeyAsync(db, scope.ServiceProvider.GetRequiredService<DbWriteGate>());
-    app.Logger.LogInformation("Sonarr-emulation API key (paste into Prowlarr): {Key}", apiKey);
+    var (apiKey, apiKeyCreated) = await DVarr.Api.ParityEndpoints.EnsureApiKeyAsync(db, scope.ServiceProvider.GetRequiredService<DbWriteGate>());
+    // Echo the secret only on the boot that generates it — don't re-print it into the log on every restart.
+    if (apiKeyCreated)
+        app.Logger.LogInformation("Sonarr-emulation API key generated (paste into Prowlarr): {Key}", apiKey);
+    else
+        app.Logger.LogInformation("Sonarr-emulation API key already configured.");
 
     var ff = scope.ServiceProvider.GetRequiredService<FfmpegLocator>();
     ff.CachedVersion = await ff.VersionAsync();

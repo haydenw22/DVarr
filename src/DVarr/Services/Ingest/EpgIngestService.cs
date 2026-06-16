@@ -48,14 +48,13 @@ public sealed class EpgIngestService
         var cap = await _settings.GetIntAsync("epg_max_programmes"); if (cap <= 0) cap = 3_000_000;
         long winStart = now - (long)pastH * 3600, winEnd = now + (long)futureD * 86400;
 
-        // Replace this source's programmes in one short delete (a guide refresh never affects a recording —
-        // recordings anchor to Event.start_utc, not programme ids; docs/06 §5.6), then stream inserts in
-        // bounded batches each taking the gate only briefly, so a recording start/finalize never stalls.
-        await _gate.WriteAsync(async () =>
-        {
-            await _db.Programmes.Where(p => p.SourceId == sourceId).ExecuteDeleteAsync(ct);
-        }, ct);
-
+        // LAST-KNOWN-GOOD swap: capture the highest existing programme Id for this source, stream the NEW rows in
+        // (their Ids are strictly above maxOldId), and only AFTER a fully successful parse delete the OLD rows
+        // (Id <= maxOldId). On ANY failure we instead delete the partial NEW rows, leaving the previous guide intact —
+        // a failed sync can never wipe the guide. A guide refresh never affects a recording (recordings anchor to
+        // Event.start_utc, not programme ids; docs/06 §5.6). Old+new briefly coexist mid-sync (a re-syncable cache),
+        // and inserts still stream in bounded batches each taking the gate only briefly so a recording never stalls.
+        var maxOldId = await _db.Programmes.Where(p => p.SourceId == sourceId).Select(p => (int?)p.Id).MaxAsync(ct) ?? 0;
         var total = 0;
         var channels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var truncated = false;
@@ -155,11 +154,14 @@ public sealed class EpgIngestService
             }
             Complete();             // flush a trailing <programme> whose <title> was the final child read
             await FlushBatchAsync();
+            // Full parse succeeded → swap: drop the OLD guide, leaving only this run's rows.
+            await _gate.WriteAsync(async () => { await _db.Programmes.Where(p => p.SourceId == sourceId && p.Id <= maxOldId).ExecuteDeleteAsync(ct); }, ct);
         }
         catch (Exception ex)
         {
-            _log.LogError(ex, "[EPG] Source {Id} fetch/parse failed", sourceId);
-            await FlushBatchAsync(); // persist whatever parsed before the error so a partial guide survives
+            _log.LogError(ex, "[EPG] Source {Id} fetch/parse failed — keeping the previous guide", sourceId);
+            // Discard this run's partial new rows; the OLD guide (Id <= maxOldId) is left untouched. Best-effort.
+            try { await _gate.WriteAsync(async () => { await _db.Programmes.Where(p => p.SourceId == sourceId && p.Id > maxOldId).ExecuteDeleteAsync(ct); }, ct); } catch { }
             return new EpgResult(sourceId, false, total, channels.Count, truncated, "EPG fetch/parse failed: " + ex.Message);
         }
 

@@ -3,7 +3,14 @@
 
 const $ = (s, r = document) => r.querySelector(s);
 // Tolerant of empty / non-JSON bodies (e.g. a 404 NotFound has no body) so handlers never throw on .json().
-async function _json(res) { const t = await res.text(); try { return t ? JSON.parse(t) : {}; } catch { return { _raw: t }; } }
+async function _json(res) {
+  const t = await res.text();
+  let body; try { body = t ? JSON.parse(t) : {}; } catch { body = { _raw: t }; }
+  // Surface non-2xx responses as an .error even when the body is empty/has no error field, so callers that check
+  // r.error never mistake a 4xx/5xx (or empty 404) for success.
+  if (!res.ok && body && typeof body === 'object' && body.error == null) body.error = body._raw || `request failed (${res.status})`;
+  return body;
+}
 const api = {
   get: async p => _json(await fetch(p)),
   post: async (p, b) => _json(await fetch(p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: b ? JSON.stringify(b) : undefined })),
@@ -550,7 +557,7 @@ PAGES.settings = {
   async render(el) {
     const s = await api.get('/api/settings');
     el.innerHTML = `<div class="card" style="max-width:760px"><div class="fields" style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
-      ${Object.entries(s).map(([k, v]) => `<label class="field">${k}<input data-k="${esc(k)}" value="${esc(v)}"/></label>`).join('')}
+      ${Object.entries(s).map(([k, v]) => `<label class="field">${esc(k)}<input data-k="${esc(k)}" value="${esc(v)}"/></label>`).join('')}
     </div><div class="row" style="margin-top:18px"><button onclick="saveSettings()">Save settings</button><span id="setMsg" class="muted"></span></div></div>`;
   },
 };
@@ -699,6 +706,7 @@ async function submitTest() {
   if (!url) return toast('URL required', 'err');
   closeModals();
   const r = await api.post('/api/test/recording', { url, name, minutes });
+  if (r.error) return toast(r.error, 'err');
   toast(`Scheduled test recording #${r.id} (${r.minutes} min)`, 'ok');
   location.hash = '#/recordings';
 }
@@ -800,7 +808,7 @@ async function submitImport(id) {
 }
 async function startRec(id) { const r = await api.post(`/api/recordings/${id}/start`); if (r.error) toast(r.error, 'err'); else toast(r.started ? 'Starting…' : 'Already running', 'ok'); render(); }
 async function stopRec(id) { const r = await api.post(`/api/recordings/${id}/stop`); toast(r.cancelled ? 'Cancelled' : r.stopping ? 'Stopping…' : 'No change', r.error ? 'err' : 'ok'); render(); }
-async function delRec(id) { if (!confirm('Delete this recording?')) return; await api.del(`/api/recordings/${id}`); toast('Deleted'); render(); }
+async function delRec(id) { if (!confirm('Delete this recording?')) return; const r = await api.del(`/api/recordings/${id}`); if (r.error) return toast(r.error, 'err'); toast('Deleted'); render(); }
 function ingest(id, label) {
   modal(`<h2>Ingest channels — ${esc(label)}</h2>
     <div class="note warn">This contacts your IPTV provider and uses <b>${esc(label)}</b>'s single stream slot. Only proceed if you're not using that stream right now.</div>
@@ -841,6 +849,7 @@ function openSourceModal(id) {
       <label class="field">Password${edit ? ' <span class="muted">(blank = keep)</span>' : ''}<input id="sPass" type="password" placeholder="${edit ? '••••••' : ''}"/></label>
       <label class="field" style="grid-column:1/3">External EPG URL (optional)<input id="sEpg" value="${esc(x?.epgUrl || '')}" placeholder="https://…/epg.xml.gz"/></label>
       <label class="field" style="grid-column:1/3;flex-direction:row;align-items:center;gap:8px"><input id="sEpgOv" type="checkbox" ${ck(x?.epgOverride)} style="width:auto"/> Override the source's EPG with the external EPG above</label>
+      <label class="field" style="grid-column:1/3">User-Agent (optional)<input id="sUa" value="${esc(x?.userAgent || '')}" placeholder="blank = VLC default; set if your provider requires a specific UA"/></label>
       <label class="field" style="flex-direction:row;align-items:center;gap:8px"><input id="sEnabled" type="checkbox" ${edit ? ck(x.enabled) : 'checked'} style="width:auto"/> Enabled</label>
     </div>
     <div class="foot"><button class="ghost" onclick="closeModals()">Cancel</button><button onclick="submitSource(${edit ? x.id : 'null'})">${edit ? 'Save' : 'Add'} source</button></div>`, 'min(620px,94vw)');
@@ -849,12 +858,12 @@ async function submitSource(id) {
   const body = {
     label: $('#sLabel').value, type: $('#sType').value, protocol: $('#sProto').value,
     host: $('#sHost').value, port: parseInt($('#sPort').value) || 0, maxStreams: parseInt($('#sMax').value) || 1,
-    username: $('#sUser').value, password: $('#sPass').value,
+    username: $('#sUser').value, password: $('#sPass').value, userAgent: $('#sUa').value,
     epgUrl: $('#sEpg').value, epgOverride: $('#sEpgOv').checked, enabled: $('#sEnabled').checked,
   };
   closeModals();
   if (id == null) { const r = await api.post('/api/sources', body); toast(r.error ? r.error : `Source added (#${r.id})`, r.error ? 'err' : 'ok'); }
-  else { await api.put('/api/sources/' + id, body); toast('Source saved', 'ok'); }
+  else { const r = await api.put('/api/sources/' + id, body); toast(r.error ? r.error : 'Source saved', r.error ? 'err' : 'ok'); }
   render();
 }
 async function deleteSource(id, label) {
@@ -865,7 +874,8 @@ async function deleteSource(id, label) {
 async function saveSettings() {
   const vals = {};
   document.querySelectorAll('#view [data-k]').forEach(i => vals[i.dataset.k] = i.value);
-  await api.put('/api/settings', vals);
+  const r = await api.put('/api/settings', vals);
+  if (r.error) { $('#setMsg').textContent = ''; toast(r.error, 'err'); return; }
   $('#setMsg').textContent = 'saved ✓';
   setTimeout(() => { const m = $('#setMsg'); if (m) m.textContent = ''; }, 1800);
 }
@@ -923,7 +933,7 @@ async function submitLeague(id) {
   else { await api.put('/api/leagues/' + id, body); toast('League saved', 'ok'); }
   render();
 }
-async function deleteLeague(id, name) { if (!confirm(`Delete league “${name}”? Removes its events & mappings.`)) return; await api.del('/api/leagues/' + id); toast('League deleted', 'ok'); render(); }
+async function deleteLeague(id, name) { if (!confirm(`Delete league “${name}”? Removes its events & mappings.`)) return; const r = await api.del('/api/leagues/' + id); if (r.error) return toast(r.error, 'err'); toast('League deleted', 'ok'); render(); }
 async function syncLeague(id) { toast('Syncing events…'); const r = await api.post('/api/leagues/' + id + '/sync'); toast(r.ok ? `Synced ${r.fetched} events (${r.added} new)` : `Sync failed: ${r.error}`, r.ok ? 'ok' : 'err'); render(); }
 
 function openMapModal(leagueId, name) {
@@ -944,7 +954,7 @@ async function submitMap(leagueId) {
   closeModals();
   const r = await api.post('/api/mappings', body); toast(r.error ? r.error : 'Mapping added', r.error ? 'err' : 'ok'); render();
 }
-async function deleteMapping(id) { await api.del('/api/mappings/' + id); toast('Mapping removed'); render(); }
+async function deleteMapping(id) { const r = await api.del('/api/mappings/' + id); if (r.error) return toast(r.error, 'err'); toast('Mapping removed'); render(); }
 
 function openEventModal() {
   const ls = window._leagues || [];
@@ -964,7 +974,7 @@ async function submitEvent() {
   closeModals();
   const r = await api.post('/api/events', body); toast(r.error ? r.error : 'Event added', r.error ? 'err' : 'ok'); render();
 }
-async function monitorEvent(id, mon) { await api.put('/api/events/' + id + '/monitor', { monitored: mon }); toast(mon ? 'Monitoring' : 'Unmonitored'); render(); }
+async function monitorEvent(id, mon) { const r = await api.put('/api/events/' + id + '/monitor', { monitored: mon }); if (r.error) return toast(r.error, 'err'); toast(mon ? 'Monitoring' : 'Unmonitored'); render(); }
 async function resolvePreview(id) { const r = await api.get('/api/events/' + id + '/resolve'); if (r.ok) toast(`Resolves to: ${r.primary.channelName} (score ${Math.round(r.primary.score)})`, 'ok'); else toast(`Cannot resolve: ${r.reason}`, 'err'); }
 
 // =========================================================================

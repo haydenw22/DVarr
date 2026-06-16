@@ -81,7 +81,9 @@ public static class ParityEndpoints
                 .Select(r => new { r.Id, r.Title, state = r.State.ToString() }).ToListAsync();
             var nextStart = await db.Recordings.Where(r => r.State == RecordingState.Pending && r.StartUtc > now)
                 .OrderBy(r => r.StartUtc).Select(r => (long?)r.StartUtc).FirstOrDefaultAsync();
-            var sources = await db.Sources.CountAsync();
+            // Only enabled sources can lease a tuner, so free_credentials must count enabled — not total — sources
+            // (otherwise a disabled login inflates the "free" figure HA shows).
+            var sources = await db.Sources.CountAsync(s => s.Enabled);
             var busy = await db.TunerLeases.Where(l => l.State == LeaseState.Active).Select(l => l.SourceId).Distinct().CountAsync();
             return Results.Json(new
             {
@@ -114,17 +116,19 @@ public static class ParityEndpoints
         v3.MapPost("/command", async (HttpContext ctx, DVarrDbContext db) => await Authed(ctx, db) ? Results.Json(new { id = 1, status = "completed" }) : Results.Unauthorized());
     }
 
-    public static async Task<string> EnsureApiKeyAsync(DVarrDbContext db, DbWriteGate gate)
+    /// <summary>Returns the Sonarr-emulation API key, generating it on first call. <c>Created</c> is true only on
+    /// the boot that generated it, so the caller can avoid echoing the secret into the log on every subsequent boot.</summary>
+    public static async Task<(string Key, bool Created)> EnsureApiKeyAsync(DVarrDbContext db, DbWriteGate gate)
     {
         var row = await db.Secrets.FirstOrDefaultAsync(s => s.Name == "sonarr_api_key");
-        if (row is not null) return row.Value;
+        if (row is not null) return (row.Value, false);
         var key = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
         await gate.WriteAsync(async () =>
         {
             db.Secrets.Add(new Data.Entities.SecretEntry { Name = "sonarr_api_key", Value = key, CreatedUtc = EpochTime.Now(), UpdatedUtc = EpochTime.Now() });
             await db.SaveChangesAsync();
         });
-        return key;
+        return (key, true);
     }
 
     private static async Task<bool> Authed(HttpContext ctx, DVarrDbContext db)
