@@ -185,7 +185,7 @@ function recTable(rows, withActions) {
       <td>${esc(r.channel)}</td><td class="muted">${esc(r.source)}</td>
       <td class="mono">${mb(r.bytesWritten)}</td>
       <td class="mono muted">${brisbane(r.startUtc)} – ${brisbane(r.endUtc)}</td>
-      ${withActions ? `<td class="row" style="gap:6px">${r.state === 'Pending' || r.state === 'Conflict' ? `<button class="sm" onclick="startRec(${r.id})" title="Start this recording now (early/manual)">start</button>` : ''}${ACTIVE.includes(r.state) || r.state === 'Pending' || r.state === 'Conflict' ? `<button class="ghost sm" onclick="stopRec(${r.id})">stop</button>` : ''}<button class="danger sm" onclick="delRec(${r.id})">delete</button></td>` : ''}
+      ${withActions ? `<td class="row" style="gap:6px">${r.state === 'Pending' || r.state === 'Conflict' ? `<button class="sm" onclick="startRec(${r.id})" title="Start this recording now (early/manual)">start</button>` : ''}${ACTIVE.includes(r.state) || r.state === 'Pending' || r.state === 'Conflict' ? `<button class="ghost sm" onclick="stopRec(${r.id})">stop</button>` : ''}${r.state === 'Done' && (r.outputPath || '').includes('.unsorted') ? `<button class="sm" onclick="openImportModal(${r.id}, ${r.startUtc}, '${jsq(r.title || '')}')" title="Sort this manual recording into the library">import</button>` : ''}<button class="danger sm" onclick="delRec(${r.id})">delete</button></td>` : ''}
     </tr>`).join('')}</tbody></table>`;
 }
 function notesList(notes) {
@@ -755,6 +755,49 @@ function scheduleFor(channelId) {
   openScheduleModal({ sourceId: c.sourceId, group: c.group, channelId, channelName: c.name });
 }
 
+// Manual import: sort a staged (.unsorted) recording onto a TheSportsDB game — Sport → League → Game.
+async function openImportModal(id, startUtc, title) {
+  const sports = await api.get('/api/tsdb/sports');
+  const dateStr = new Date(startUtc * 1000).toISOString().slice(0, 10);
+  modal(`<h2>Import recording</h2>
+    <div class="muted" style="margin-bottom:10px">${esc(title || ('Recording #' + id))} · ${brisbane(startUtc)}</div>
+    <div class="fields">
+      <label class="field">Sport<select id="impSport"><option value="">— pick a sport —</option>${sports.map(s => `<option value="${esc(s.name)}">${esc(s.name)}</option>`).join('')}</select></label>
+      <label class="field">League<select id="impLeague" disabled><option value="">— pick a sport first —</option></select></label>
+      <label class="field">Game<select id="impGame" disabled><option value="">— pick a league first —</option></select></label>
+    </div>
+    <div id="impMsg" class="muted" style="margin-top:8px;font-size:12px"></div>
+    <div class="foot"><button class="ghost" onclick="closeModals()">Cancel</button><button id="impGo" onclick="submitImport(${id})" disabled>Import</button></div>`, 'min(560px,94vw)');
+  window._impDate = dateStr;
+  $('#impSport').onchange = async () => {
+    const sport = $('#impSport').value, sel = $('#impLeague');
+    $('#impGame').disabled = true; $('#impGame').innerHTML = '<option value="">— pick a league first —</option>'; $('#impGo').disabled = true; $('#impMsg').textContent = '';
+    if (!sport) { sel.disabled = true; sel.innerHTML = '<option value="">— pick a sport first —</option>'; return; }
+    sel.disabled = true; sel.innerHTML = '<option value="">loading…</option>';
+    const leagues = await api.get(`/api/tsdb/leagues?sport=${encodeURIComponent(sport)}`);
+    sel.innerHTML = `<option value="">— pick a league —</option>` + leagues.map(l => `<option value="${esc(l.id)}">${esc(l.name)}</option>`).join('');
+    sel.disabled = false;
+  };
+  $('#impLeague').onchange = async () => {
+    const leagueId = $('#impLeague').value, sel = $('#impGame');
+    $('#impGo').disabled = true; $('#impMsg').textContent = '';
+    if (!leagueId) { sel.disabled = true; sel.innerHTML = '<option value="">— pick a league first —</option>'; return; }
+    sel.disabled = true; sel.innerHTML = '<option value="">loading…</option>';
+    const games = await api.get(`/api/import/events?leagueId=${encodeURIComponent(leagueId)}&date=${window._impDate}`);
+    if (!games.length) { sel.innerHTML = '<option value="">(no games near this date)</option>'; $('#impMsg').textContent = 'No games for that league near the recording date — try another league.'; return; }
+    sel.innerHTML = `<option value="">— pick the game —</option>` + games.map(g => `<option value="${esc(g.id)}">${esc(g.title)}${g.date ? ` — ${brisbane(g.date)}` : ''}</option>`).join('');
+    sel.disabled = false;
+  };
+  $('#impGame').onchange = () => { $('#impGo').disabled = !$('#impGame').value; };
+}
+async function submitImport(id) {
+  const leagueId = $('#impLeague').value, eventId = $('#impGame').value;
+  if (!leagueId || !eventId) return toast('Pick a sport, league and game', 'err');
+  $('#impGo').disabled = true; $('#impMsg').textContent = 'Filing…';
+  const r = await api.post(`/api/recordings/${id}/import`, { leagueId, eventId });
+  if (r.error) { toast(r.error, 'err'); $('#impGo').disabled = false; $('#impMsg').textContent = ''; }
+  else { toast('Imported into the library', 'ok'); closeModals(); render(); }
+}
 async function startRec(id) { const r = await api.post(`/api/recordings/${id}/start`); if (r.error) toast(r.error, 'err'); else toast(r.started ? 'Starting…' : 'Already running', 'ok'); render(); }
 async function stopRec(id) { const r = await api.post(`/api/recordings/${id}/stop`); toast(r.cancelled ? 'Cancelled' : r.stopping ? 'Stopping…' : 'No change', r.error ? 'err' : 'ok'); render(); }
 async function delRec(id) { if (!confirm('Delete this recording?')) return; await api.del(`/api/recordings/${id}`); toast('Deleted'); render(); }
@@ -946,6 +989,7 @@ window.addEventListener('keydown', e => { if (e.key === 'Escape') closeModals();
 window.render = render; window.openTestModal = openTestModal; window.submitTest = submitTest;
 window.openScheduleModal = openScheduleModal; window.submitSchedule = submitSchedule; window.scheduleFor = scheduleFor; window.scheduleFromGuide = scheduleFromGuide;
 window.openPreview = openPreview; window.stopRec = stopRec; window.startRec = startRec; window.delRec = delRec;
+window.openImportModal = openImportModal; window.submitImport = submitImport;
 window.ingest = ingest; window.doIngest = doIngest; window.saveSettings = saveSettings; window.closeModals = closeModals;
 window.syncEpg = syncEpg; window.doSyncEpg = doSyncEpg; window.openSourceModal = openSourceModal; window.submitSource = submitSource; window.deleteSource = deleteSource;
 window.openLeagueModal = openLeagueModal; window.submitLeague = submitLeague; window.deleteLeague = deleteLeague; window.syncLeague = syncLeague;

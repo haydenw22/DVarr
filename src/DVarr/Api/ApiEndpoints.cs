@@ -4,6 +4,7 @@ using DVarr.Infrastructure;
 using DVarr.Services;
 using DVarr.Services.Events;
 using DVarr.Services.Ingest;
+using DVarr.Services.Media;
 using DVarr.Services.Recording;
 using DVarr.Services.Tuner;
 using Microsoft.EntityFrameworkCore;
@@ -354,6 +355,35 @@ public static class ApiEndpoints
             return err is null ? Results.Json(new { started = true }) : Results.Json(new { error = err }, statusCode: 409);
         });
 
+        // ---- Manual import / assignment (sort a staged recording onto a TheSportsDB game) ----
+        // Candidate games for a league around a date (the recording's date ±1 day; falls back to the season list).
+        app.MapGet("/api/import/events", async (string leagueId, string? date, TheSportsDbClient tsdb, CancellationToken ct) =>
+        {
+            if (string.IsNullOrWhiteSpace(leagueId)) return Results.BadRequest(new { error = "leagueId required" });
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            var list = new List<TsdbEvent>();
+            if (DateTime.TryParse(date, out var d))
+                for (var i = -1; i <= 1; i++)
+                    foreach (var e in await tsdb.GetDayEventsAsync(leagueId, d.AddDays(i).ToString("yyyy-MM-dd"), ct))
+                        if (seen.Add(e.Id)) list.Add(e);
+            if (list.Count == 0) // day fetch empty (date-only / TZ edge) → fall back to the season list
+            {
+                var year = (DateTime.TryParse(date, out var dy) ? dy.Year : EpochTime.ToBrisbane(EpochTime.Now()).Year).ToString();
+                foreach (var e in await tsdb.GetSeasonEventsAsync(leagueId, year, ct))
+                    if (seen.Add(e.Id)) list.Add(e);
+            }
+            return Results.Json(list.OrderBy(e => e.StartUtc ?? 0L).Select(e => new { id = e.Id, title = e.Title, date = e.StartUtc, round = e.Round }));
+        });
+
+        // Re-file a staged (.unsorted) recording onto the chosen game → moves it into the Plex League/Season/Game layout.
+        app.MapPost("/api/recordings/{id:int}/import", async (int id, ImportAssignRequest req, MediaImportService media, CancellationToken ct) =>
+        {
+            if (string.IsNullOrWhiteSpace(req.LeagueId) || string.IsNullOrWhiteSpace(req.EventId))
+                return Results.BadRequest(new { error = "leagueId and eventId are required" });
+            var (ok, path, error) = await media.AssignAsync(id, req.LeagueId!.Trim(), req.EventId!.Trim(), ct);
+            return ok ? Results.Json(new { ok = true, path }) : Results.Json(new { error }, statusCode: 400);
+        });
+
         app.MapDelete("/api/recordings/{id:int}", async (int id, RecorderService rec, DVarrDbContext db, DbWriteGate gate) =>
         {
             var r = await db.Recordings.FindAsync(id);
@@ -510,5 +540,6 @@ public static class ApiEndpoints
 
 public sealed record CreateRecordingRequest(int ChannelId, long StartUtc, long EndUtc, int? PrePadS, int? PostPadS, string? Title, string? Priority, string? MatchQuery);
 public sealed record ReassignRequest(int? SourceId, string? Priority);
+public sealed record ImportAssignRequest(string? LeagueId, string? EventId);
 public sealed record TestRecordingRequest(string Url, string? Name, int? Minutes);
 public sealed record SourceUpsert(string? Label, string? Type, string? Protocol, string? Host, int? Port, string? Username, string? Password, string? EpgUrl, bool? EpgOverride, int? MaxStreams, bool? Enabled);

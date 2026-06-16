@@ -137,6 +137,16 @@ public sealed class TheSportsDbClient
         return list;
     }
 
+    /// <summary>Look up a single event by its TheSportsDB idEvent (lookupevent.php) — used by manual Import to file a
+    /// staged recording onto the exact game the user picked.</summary>
+    public async Task<TsdbEvent?> GetEventByIdAsync(string idEvent, CancellationToken ct = default)
+    {
+        using var doc = await GetAsync($"lookupevent.php?id={Uri.EscapeDataString(idEvent)}", ct);
+        if (doc != null && doc.RootElement.TryGetProperty("events", out var arr) && arr.ValueKind == JsonValueKind.Array)
+            foreach (var e in arr.EnumerateArray()) { var ev = MapEvent(e); if (ev != null) return ev; }
+        return null;
+    }
+
     /// <summary>Fuzzy-ish match: searchevents.php returns the SINGULAR "event" key (gotcha). Optional season scope.</summary>
     public async Task<List<TsdbEvent>> SearchEventsAsync(string name, string? season, CancellationToken ct = default)
     {

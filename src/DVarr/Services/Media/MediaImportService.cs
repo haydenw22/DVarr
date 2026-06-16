@@ -32,15 +32,66 @@ public sealed class MediaImportService
     private sealed record Filing(string ShowName, string? Sport, int Year, int Episode, string Title,
         string AiredDate, string? PosterUrl, string? ThumbUrl, string ShowKey, int? EventId);
 
-    /// <summary>Move + enrich the finished file. Returns the final path (== input if not filed).</summary>
+    /// <summary>Move + enrich the finished file. Event-linked / matched recordings file into the Plex layout;
+    /// an unmatched manual recording is parked in a Plex-ignored ".unsorted" folder for a later manual Import.</summary>
     public async Task<string> ImportAsync(int recordingId, string currentPath, CancellationToken ct = default)
     {
         var rec = await _db.Recordings.FindAsync(new object?[] { recordingId }, ct);
         if (rec is null || !File.Exists(currentPath)) return currentPath;
 
         var f = await BuildFilingAsync(rec, ct);
-        if (f is null) return currentPath; // no event + no match → leave flat
+        if (f is null) return await StageUnsortedAsync(recordingId, currentPath, ct); // no event + no match → stage for manual Import
+        return await FileRecordingAsync(rec, currentPath, f, ct);
+    }
 
+    /// <summary>Park an unmatched manual recording in a Plex-ignored "<MediaDir>/.unsorted" folder (Plex skips
+    /// dot-prefixed dirs on scan), awaiting a manual Import (sport → league → game) from the UI.</summary>
+    private async Task<string> StageUnsortedAsync(int recordingId, string currentPath, CancellationToken ct)
+    {
+        try
+        {
+            var stageDir = Path.Combine(_paths.MediaDir, ".unsorted");
+            var dest = Path.Combine(stageDir, Path.GetFileName(currentPath));
+            if (string.Equals(currentPath, dest, StringComparison.OrdinalIgnoreCase)) return currentPath; // already staged
+            Directory.CreateDirectory(stageDir);
+            File.Move(currentPath, dest, overwrite: true);
+            await _gate.WriteAsync(async () =>
+            {
+                var r = await _db.Recordings.FindAsync(recordingId);
+                if (r != null) { r.OutputPath = dest; r.UpdatedUtc = EpochTime.Now(); await _db.SaveChangesAsync(ct); }
+            }, ct);
+            _log.LogInformation("[Media] Recording {Id} staged for manual import → {Path}", recordingId, dest);
+            return dest;
+        }
+        catch (Exception ex) { _log.LogWarning(ex, "[Media] staging failed for {Id}; leaving at {Path}", recordingId, currentPath); return currentPath; }
+    }
+
+    /// <summary>Manual import: re-file a staged recording onto a user-chosen TheSportsDB event (sport → league → game).
+    /// Returns (ok, newPath, error). Reuses the same filing engine as auto-import.</summary>
+    public async Task<(bool ok, string? path, string? error)> AssignAsync(int recordingId, string leagueId, string eventId, CancellationToken ct = default)
+    {
+        var rec = await _db.Recordings.FindAsync(new object?[] { recordingId }, ct);
+        if (rec is null) return (false, null, "recording not found");
+        var current = rec.OutputPath;
+        if (string.IsNullOrWhiteSpace(current) || !File.Exists(current)) return (false, null, "recording file not found on disk");
+
+        var ev = await _tsdb.GetEventByIdAsync(eventId, ct);
+        if (ev is null) return (false, null, "TheSportsDB event not found");
+        var resolvedLeagueId = string.IsNullOrWhiteSpace(ev.LeagueId) ? leagueId : ev.LeagueId!;
+        var lk = await _tsdb.LookupLeagueAsync(resolvedLeagueId, ct);
+        var bne = EpochTime.ToBrisbane(ev.StartUtc ?? rec.StartUtc);
+        var f = new Filing(
+            ev.League ?? lk?.Name ?? "Sports", ev.Sport ?? lk?.Sport, bne.Year, bne.DayOfYear, ev.Title, bne.ToString("yyyy-MM-dd"),
+            lk?.Poster ?? ev.Poster, ev.Thumb ?? ev.Poster ?? lk?.Poster, $"tsdb-league-{resolvedLeagueId}", null);
+        var path = await FileRecordingAsync(rec, current!, f, ct);
+        return (true, path, null);
+    }
+
+    /// <summary>Move + enrich the file into the Plex/Jellyfin per-game layout from a resolved Filing.
+    /// Shared by auto-import (event/match) and manual assignment.</summary>
+    private async Task<string> FileRecordingAsync(Data.Entities.Recording rec, string currentPath, Filing f, CancellationToken ct)
+    {
+        var recordingId = rec.Id;
         // Resolution tag (HDTV-<height>p, e.g. HDTV-2160p) probed from the finished file BEFORE the move.
         var resTag = await ProbeResolutionTagAsync(currentPath, ct);
 

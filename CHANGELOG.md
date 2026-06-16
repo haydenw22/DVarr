@@ -12,7 +12,14 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
-## [1.13.0] — 2026-06-16
+## [1.14.0] — 2026-06-16
+Manual-recording staging + an Import/assign flow.
+
+### Added
+- **Manual recordings no longer land loose in the Sports library.** An unmatched manual recording is now parked in a Plex-ignored **`<media>/.unsorted/`** folder (Plex skips dot-prefixed dirs), instead of dropping into the library root where Plex would scan it.
+- **Import button** on finished, unsorted recordings → a **Sport → League → Game** picker (`/api/import/events` lists that league's fixtures around the recording's date). Choosing the game re-files it into the proper `League/Season/<Title> (date) ENN/… - HDTV-<height>p.mkv` layout with `.nfo` + artwork, and moves it out of `.unsorted` so Plex picks it up. Backed by `POST /api/recordings/{id}/import` + `TheSportsDbClient.GetEventByIdAsync`. (Event-linked and auto-matched recordings still file automatically as before.)
+
+
 Conflict-planning + stop bug fixes, plus a manual "Start now" control.
 
 ### Added
