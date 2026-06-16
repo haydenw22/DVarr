@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dvarr",
+      "runtimeExecutable": "dotnet",
+      "runtimeArgs": ["run", "-c", "Debug"],
+      "port": 1867
+    }
+  ]
+}

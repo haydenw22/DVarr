@@ -1,0 +1,32 @@
+# DVarr — Unraid deployment (build on the server: `docker compose up -d --build`).
+# Volume mapping rationale:
+#   /config   -> appdata (cache-only NVMe)  : SQLite DB (WAL) + settings — small, fast.
+#   /media    -> Media/Sports (array)        : finished recordings; Plex already scans /Media/Sports.
+#   /segments -> Media/.dvarr-segments (array): in-flight 8s TS scratch (6GB+/recording), auto-cleaned
+#               after finalize. On the array-only Media share so it never fills the 39GB cache pool;
+#               dot-prefixed so Plex ignores it; same volume as /media for an efficient finalize.
+services:
+  dvarr:
+    build:
+      context: .                # DVarr repo root (Dockerfile + src/)
+    image: dvarr:latest
+    container_name: DVarr
+    restart: unless-stopped
+    user: "99:100"              # nobody:users — matches Unraid/Plex file ownership (DVarr has no PUID/PGID)
+    runtime: nvidia             # GTX 1070 for the live-preview transcode (NVDEC + NVENC). Mirrors Plex's GPU access.
+    ports:
+      - "1867:1867"
+    environment:
+      - TZ=Australia/Brisbane   # ffmpeg -strftime segment names + log times (storage is UTC epoch regardless)
+      - HOME=/config            # keep .NET from writing to / when running as non-root
+      - NVIDIA_VISIBLE_DEVICES=0000:01:00.0               # pin to the GTX 1070 (same PCI id Plex uses)
+      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility  # 'video' = NVENC/NVDEC, 'compute' = CUDA (scale_cuda)
+    volumes:
+      - /mnt/user/appdata/dvarr:/config
+      - /mnt/user/Media/Sports:/media
+      - /mnt/user/Media/.dvarr-segments:/segments
+    labels:
+      # Surfaces DVarr in the Unraid Docker dashboard with its logo and a working WebUI menu item.
+      net.unraid.docker.webui: "http://[IP]:[PORT:1867]/"
+      net.unraid.docker.icon: "http://192.168.4.63:1867/dvarr-logo.png"
+    # The /api/health HEALTHCHECK is inherited from the Dockerfile.

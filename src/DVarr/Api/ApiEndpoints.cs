@@ -1,0 +1,482 @@
+using DVarr.Data;
+using DVarr.Data.Entities;
+using DVarr.Infrastructure;
+using DVarr.Services;
+using DVarr.Services.Events;
+using DVarr.Services.Ingest;
+using DVarr.Services.Recording;
+using DVarr.Services.Tuner;
+using Microsoft.EntityFrameworkCore;
+
+namespace DVarr.Api;
+
+public static class ApiEndpoints
+{
+    public static void MapDVarrApi(this WebApplication app)
+    {
+        // ---- Sources (credentials are masked; never returned in full) ----
+        app.MapGet("/api/sources", async (DVarrDbContext db, TunerLeaseManager tuner) =>
+        {
+            var sources = await db.Sources.OrderBy(s => s.Id).ToListAsync();
+            return Results.Json(sources.Select(s => new
+            {
+                s.Id, s.Label, s.Type, host = s.BaseUrl, s.Port, protocol = s.ServerProtocol,
+                username = Mask(s.Username), hasPassword = !string.IsNullOrEmpty(s.Password),
+                maxStreams = s.MaxStreams, s.Enabled, s.Healthy,
+                epgUrl = s.EpgUrl, epgOverride = s.EpgOverride,
+                slotFree = tuner.IsFree(s.Id),
+                channels = db.Channels.Count(c => c.SourceId == s.Id),
+                programmes = db.Programmes.Count(p => p.SourceId == s.Id),
+            }));
+        });
+
+        // Triggers a provider API call — invoked ONLY on explicit request, never on startup.
+        app.MapPost("/api/sources/{id:int}/ingest", async (int id, IngestService ingest, CancellationToken ct) =>
+        {
+            var r = await ingest.IngestSourceAsync(id, ct);
+            return r.Ok ? Results.Json(r) : Results.Json(r, statusCode: 502);
+        });
+
+        // Sync EPG (provider xmltv.php, or the source's external override URL) — contacts the provider.
+        app.MapPost("/api/sources/{id:int}/epg", async (int id, EpgIngestService epg, CancellationToken ct) =>
+        {
+            var r = await epg.SyncSourceEpgAsync(id, ct);
+            return r.Ok ? Results.Json(r) : Results.Json(r, statusCode: 502);
+        });
+
+        // ---- Source CRUD (set up / edit your own sources) ----
+        app.MapPost("/api/sources", async (SourceUpsert req, DVarrDbContext db, DbWriteGate gate) =>
+        {
+            if (string.IsNullOrWhiteSpace(req.Host)) return Results.BadRequest(new { error = "host is required" });
+            if (!ValidEpgUrl(req.EpgUrl)) return Results.BadRequest(new { error = "external EPG URL must be an absolute http(s) URL" });
+            var now = EpochTime.Now();
+            var s = new ProviderSource
+            {
+                Label = string.IsNullOrWhiteSpace(req.Label) ? "source" : req.Label.Trim(),
+                Type = string.IsNullOrWhiteSpace(req.Type) ? "xtream" : req.Type.Trim(),
+                ServerProtocol = string.IsNullOrWhiteSpace(req.Protocol) ? "http" : req.Protocol.Trim(),
+                BaseUrl = req.Host!.Trim(),
+                Port = req.Port ?? 0,
+                Username = req.Username ?? "",
+                Password = req.Password ?? "",
+                EpgUrl = string.IsNullOrWhiteSpace(req.EpgUrl) ? null : req.EpgUrl!.Trim(),
+                EpgOverride = req.EpgOverride ?? false,
+                MaxStreams = req.MaxStreams is > 0 ? req.MaxStreams!.Value : 1,
+                Enabled = req.Enabled ?? true,
+                CreatedUtc = now,
+                UpdatedUtc = now,
+            };
+            await gate.WriteAsync(async () => { db.Sources.Add(s); await db.SaveChangesAsync(); });
+            return Results.Json(new { s.Id });
+        });
+
+        app.MapPut("/api/sources/{id:int}", async (int id, SourceUpsert req, DVarrDbContext db, DbWriteGate gate) =>
+        {
+            var s = await db.Sources.FindAsync(id);
+            if (s is null) return Results.NotFound();
+            if (!ValidEpgUrl(req.EpgUrl)) return Results.BadRequest(new { error = "external EPG URL must be an absolute http(s) URL" });
+            await gate.WriteAsync(async () =>
+            {
+                if (!string.IsNullOrWhiteSpace(req.Label)) s.Label = req.Label.Trim();
+                if (!string.IsNullOrWhiteSpace(req.Type)) s.Type = req.Type.Trim();
+                if (!string.IsNullOrWhiteSpace(req.Protocol)) s.ServerProtocol = req.Protocol.Trim();
+                if (req.Host != null) s.BaseUrl = req.Host.Trim();
+                if (req.Port.HasValue) s.Port = req.Port.Value;             // partial-update safe
+                if (!string.IsNullOrEmpty(req.Username)) s.Username = req.Username; // blank = keep existing
+                if (!string.IsNullOrEmpty(req.Password)) s.Password = req.Password!; // blank = keep existing
+                s.EpgUrl = string.IsNullOrWhiteSpace(req.EpgUrl) ? null : req.EpgUrl!.Trim();
+                if (req.EpgOverride.HasValue) s.EpgOverride = req.EpgOverride.Value;
+                if (req.MaxStreams is > 0) s.MaxStreams = req.MaxStreams!.Value;
+                if (req.Enabled.HasValue) s.Enabled = req.Enabled.Value;
+                s.UpdatedUtc = EpochTime.Now();
+                await db.SaveChangesAsync();
+            });
+            return Results.Json(new { s.Id, updated = true });
+        });
+
+        app.MapDelete("/api/sources/{id:int}", async (int id, DVarrDbContext db, DbWriteGate gate) =>
+        {
+            var s = await db.Sources.FindAsync(id);
+            if (s is null) return Results.NotFound();
+            var blocked = new[]
+            {
+                DVarr.Data.RecordingState.Pending, DVarr.Data.RecordingState.Starting, DVarr.Data.RecordingState.Recording,
+                DVarr.Data.RecordingState.Recovering, DVarr.Data.RecordingState.FailingOver, DVarr.Data.RecordingState.Degraded,
+                DVarr.Data.RecordingState.Stopping, DVarr.Data.RecordingState.Finalizing,
+            };
+            if (await db.Recordings.AnyAsync(r => r.SourceId == id && blocked.Contains(r.State)))
+                return Results.Json(new { error = "source has active or pending recordings" }, statusCode: 409);
+            await gate.WriteAsync(async () =>
+            {
+                var chIds = await db.Channels.Where(c => c.SourceId == id).Select(c => c.Id).ToListAsync();
+                await db.Programmes.Where(p => p.SourceId == id).ExecuteDeleteAsync(); // EPG is keyed per source
+                // Drop the per-league mappings + health rows that point at these channels, or the resolver would
+                // later try to score a channel that no longer exists (and the rows would be silent orphans).
+                await db.LeagueChannelMaps.Where(m => chIds.Contains(m.ChannelId)).ExecuteDeleteAsync();
+                await db.ChannelHealth.Where(h => chIds.Contains(h.ChannelId)).ExecuteDeleteAsync();
+                await db.Channels.Where(c => c.SourceId == id).ExecuteDeleteAsync();
+                db.Sources.Remove(s);
+                await db.SaveChangesAsync();
+            });
+            return Results.Json(new { deleted = true });
+        });
+
+        // ---- Channels + source toggle (?source=all|<id>, ?q=) ----
+        app.MapGet("/api/channels", async (DVarrDbContext db, string? source, string? q, string? group, int? take) =>
+        {
+            var query = from c in db.Channels
+                        join s in db.Sources on c.SourceId equals s.Id
+                        select new { c, sourceLabel = s.Label };
+            if (!string.IsNullOrWhiteSpace(source) && source != "all" && int.TryParse(source, out var sid))
+                query = query.Where(x => x.c.SourceId == sid);
+            if (!string.IsNullOrWhiteSpace(group) && group != "all")
+                query = query.Where(x => x.c.GroupName == group);
+            if (!string.IsNullOrWhiteSpace(q))
+            {
+                var ql = q.ToLower();
+                query = query.Where(x => x.c.Name.ToLower().Contains(ql));
+            }
+            var rows = await query.OrderBy(x => x.c.Name).Take(take is > 0 and <= 2000 ? take.Value : 500).ToListAsync();
+            return Results.Json(rows.Select(x => new
+            {
+                x.c.Id, x.c.Name, x.c.SourceId, x.sourceLabel, x.c.StreamId,
+                quality = x.c.DetectedQuality, number = x.c.ChannelNumber, group = x.c.GroupName,
+                logicalKey = x.c.LogicalKey, manual = !string.IsNullOrEmpty(x.c.DirectUrl),
+            }));
+        });
+
+        // Distinct groups/categories, scoped to a source (drives the source-aware group filter).
+        app.MapGet("/api/channels/groups", async (DVarrDbContext db, string? source) =>
+        {
+            var q = db.Channels.Where(c => c.GroupName != null && c.GroupName != "");
+            if (!string.IsNullOrWhiteSpace(source) && source != "all" && int.TryParse(source, out var sid))
+                q = q.Where(c => c.SourceId == sid);
+            var groups = await q.Select(c => c.GroupName!).Distinct().OrderBy(g => g).ToListAsync();
+            return Results.Json(groups);
+        });
+
+        // ---- Guide (timeline EPG): channels + their programmes in a window, joined by epg_channel_id, with
+        //      a "now" anchor and overlapping recordings so the client can paint live=green / recording=red. ----
+        app.MapGet("/api/guide", async (DVarrDbContext db, string? source, string? group, string? q, long? start, int? hours, int? take) =>
+        {
+            var now = EpochTime.Now();
+            var winStart = start is > 0 ? start!.Value : now - 3600;        // default: 1h before now
+            var span = Math.Clamp(hours ?? 6, 1, 24) * 3600L;
+            var winEnd = winStart + span;
+
+            // Channels to show (a single source makes the timeline coherent since EPG is per-source).
+            var chq = db.Channels.AsQueryable();
+            int? sid = (!string.IsNullOrWhiteSpace(source) && source != "all" && int.TryParse(source, out var s0)) ? s0 : null;
+            if (sid is { } sv) chq = chq.Where(c => c.SourceId == sv);
+            if (!string.IsNullOrWhiteSpace(group) && group != "all") chq = chq.Where(c => c.GroupName == group);
+            if (!string.IsNullOrWhiteSpace(q)) { var ql = q.ToLower(); chq = chq.Where(c => c.Name.ToLower().Contains(ql)); }
+
+            // Surface channels that CAN have guide data first (provider tvg-id OR a name-matched one), so the default
+            // view isn't a wall of "no guide data".
+            var chans = await chq
+                .OrderByDescending(c => (c.EpgChannelId != null && c.EpgChannelId != "") || (c.MatchedEpgId != null && c.MatchedEpgId != ""))
+                .ThenBy(c => c.Name)
+                .Take(take is > 0 and <= 400 ? take.Value : 120)
+                .Select(c => new { c.Id, c.Name, c.SourceId, c.EpgChannelId, c.MatchedEpgId, c.StreamId, group = c.GroupName, manual = c.DirectUrl != null && c.DirectUrl != "" })
+                .ToListAsync();
+
+            // Effective tvg-id = provider's epg_channel_id, else the name-matched one. Programme.EpgChannelId is
+            // COLLATE NOCASE so the SQL IN is case-insensitive AND index-seekable; in-memory join key is lowercased.
+            static string? Eff(string? provider, string? matched) => !string.IsNullOrEmpty(provider) ? provider : (string.IsNullOrEmpty(matched) ? null : matched);
+            var epgIds = chans.Select(c => Eff(c.EpgChannelId, c.MatchedEpgId)).Where(e => e != null).Select(e => e!).Distinct().ToList();
+            var srcIds = chans.Select(c => c.SourceId).Distinct().ToList();
+            var progs = epgIds.Count == 0 ? new() : await db.Programmes
+                .Where(p => srcIds.Contains(p.SourceId) && epgIds.Contains(p.EpgChannelId) && p.StopUtc > winStart && p.StartUtc < winEnd)
+                .Select(p => new { p.Id, p.SourceId, p.EpgChannelId, p.StartUtc, p.StopUtc, p.Title })
+                .ToListAsync();
+            var progByKey = progs.GroupBy(p => (p.SourceId, key: p.EpgChannelId.ToLowerInvariant()))
+                .ToDictionary(g => g.Key, g => g.OrderBy(p => p.StartUtc).ToList());
+
+            // Recordings (any non-terminal/active or done) overlapping the window on the shown channels → red.
+            var chIds = chans.Select(c => c.Id).ToList();
+            var recs = await db.Recordings
+                .Where(r => chIds.Contains(r.ChannelId) && r.EndUtc + r.PostPadS > winStart && r.StartUtc - r.PrePadS < winEnd)
+                // start/end = padded window (pre-roll … post-roll); coreStart/coreEnd = the actual event window.
+                .Select(r => new { r.ChannelId, start = r.StartUtc - r.PrePadS, end = r.EndUtc + r.PostPadS, coreStart = r.StartUtc, coreEnd = r.EndUtc, state = r.State.ToString() })
+                .ToListAsync();
+
+            return Results.Json(new
+            {
+                now,
+                windowStart = winStart,
+                windowEnd = winEnd,
+                source = sid,
+                channels = chans.Select(c => new
+                {
+                    channelId = c.Id, c.Name, c.SourceId, c.StreamId, c.group, c.manual, epgChannelId = Eff(c.EpgChannelId, c.MatchedEpgId),
+                    programmes = (Eff(c.EpgChannelId, c.MatchedEpgId) is { } eff && progByKey.TryGetValue((c.SourceId, eff.ToLowerInvariant()), out var ps))
+                        ? ps.Select(p => new { p.Id, start = p.StartUtc, stop = p.StopUtc, p.Title })
+                        : Enumerable.Empty<object>().Select(_ => new { Id = 0, start = 0L, stop = 0L, Title = "" }),
+                    recordings = recs.Where(r => r.ChannelId == c.Id).Select(r => new { r.start, r.end, r.coreStart, r.coreEnd, r.state }),
+                }),
+            });
+        });
+
+        // ---- Recordings ----
+        app.MapGet("/api/recordings", async (DVarrDbContext db) =>
+        {
+            var rows = await (from r in db.Recordings
+                              join ch in db.Channels on r.ChannelId equals ch.Id into chj
+                              from ch in chj.DefaultIfEmpty()
+                              join s in db.Sources on r.SourceId equals s.Id into sj
+                              from s in sj.DefaultIfEmpty()
+                              orderby r.StartUtc descending
+                              select new
+                              {
+                                  r.Id, r.Title, state = r.State.ToString(),
+                                  channel = ch != null ? ch.Name : null, source = s != null ? s.Label : null,
+                                  r.StartUtc, r.EndUtc, r.PrePadS, r.PostPadS,
+                                  r.BytesWritten, r.AttemptCount, r.OutputPath, r.FailureReason,
+                              }).Take(200).ToListAsync();
+            return Results.Json(rows);
+        });
+
+        app.MapGet("/api/recordings/{id:int}", async (int id, DVarrDbContext db, RecorderService rec) =>
+        {
+            var r = await db.Recordings.FindAsync(id);
+            if (r is null) return Results.NotFound();
+            var segs = await db.RecordingSegments.CountAsync(s => s.RecordingId == id);
+            var notes = await db.Notifications.Where(n => n.RecordingId == id)
+                .OrderByDescending(n => n.TsUtc).Take(20)
+                .Select(n => new { n.TsUtc, kind = n.Kind.ToString(), severity = n.Severity.ToString(), n.Message })
+                .ToListAsync();
+            return Results.Json(new
+            {
+                r.Id, r.Title, state = r.State.ToString(), live = rec.IsActive(id),
+                r.SourceId, r.ChannelId, r.StreamId, r.StartUtc, r.EndUtc, r.PrePadS, r.PostPadS,
+                r.BytesWritten, r.AttemptCount, r.OutputPath, r.FailureReason, segments = segs, notifications = notes,
+            });
+        });
+
+        app.MapPost("/api/recordings", async (CreateRecordingRequest req, DVarrDbContext db, DbWriteGate gate, SettingsService settings) =>
+        {
+            var ch = await db.Channels.FindAsync(req.ChannelId);
+            if (ch is null) return Results.BadRequest(new { error = "channel not found" });
+            var pre = req.PrePadS ?? await settings.GetIntAsync("default_pre_pad_s");
+            var post = req.PostPadS ?? await settings.GetIntAsync("default_post_pad_s");
+            var now = EpochTime.Now();
+            var rec = new Recording
+            {
+                ChannelId = ch.Id, SourceId = ch.SourceId, StreamId = ch.StreamId,
+                StartUtc = req.StartUtc, EndUtc = req.EndUtc, PrePadS = pre, PostPadS = post,
+                Title = string.IsNullOrWhiteSpace(req.Title) ? ch.Name : req.Title,
+                // Optional TheSportsDB match for a Plex-clean rename at finalize (manual recordings have no Event).
+                MatchQuery = string.IsNullOrWhiteSpace(req.MatchQuery) ? null : req.MatchQuery!.Trim(),
+                Priority = ParsePriority(req.Priority), State = RecordingState.Pending,
+                CreatedUtc = now, UpdatedUtc = now,
+            };
+            await gate.WriteAsync(async () => { db.Recordings.Add(rec); await db.SaveChangesAsync(); });
+            return Results.Json(new { rec.Id, state = rec.State.ToString() });
+        });
+
+        // One-click test against a public stream — creates a "Manual / Test" source + channel,
+        // schedules a recording now for N minutes. Does NOT touch the provider.
+        app.MapPost("/api/test/recording", async (TestRecordingRequest req, DVarrDbContext db, DbWriteGate gate) =>
+        {
+            if (string.IsNullOrWhiteSpace(req.Url)) return Results.BadRequest(new { error = "url required" });
+            var now = EpochTime.Now();
+            var minutes = Math.Clamp(req.Minutes ?? 2, 1, 180);
+
+            Recording rec = null!;
+            await gate.WriteAsync(async () =>
+            {
+                var src = await db.Sources.FirstOrDefaultAsync(s => s.Label == "Manual / Test");
+                if (src is null)
+                {
+                    src = new ProviderSource { Label = "Manual / Test", ServerProtocol = "http", BaseUrl = "manual", Port = 0, MaxStreams = 1, Enabled = true, Healthy = true, CreatedUtc = now, UpdatedUtc = now };
+                    db.Sources.Add(src);
+                    await db.SaveChangesAsync();
+                }
+                var name = string.IsNullOrWhiteSpace(req.Name) ? "Test capture" : req.Name!;
+                var ch = new Channel { SourceId = src.Id, Name = name, NameNorm = name.ToLower(), LogicalKey = name.ToLower(), StreamId = 0, DirectUrl = req.Url, Enabled = true, CreatedUtc = now, UpdatedUtc = now };
+                db.Channels.Add(ch);
+                await db.SaveChangesAsync();
+                rec = new Recording
+                {
+                    ChannelId = ch.Id, SourceId = src.Id, StreamId = 0,
+                    StartUtc = now, EndUtc = now + minutes * 60, PrePadS = 0, PostPadS = 0,
+                    Title = name, Priority = RecordingPriority.Normal, State = RecordingState.Pending,
+                    CreatedUtc = now, UpdatedUtc = now,
+                };
+                db.Recordings.Add(rec);
+                await db.SaveChangesAsync();
+            });
+            return Results.Json(new { rec.Id, minutes, message = "scheduled now; the scheduler will start it within a few seconds" });
+        });
+
+        app.MapPost("/api/recordings/{id:int}/stop", async (int id, RecorderService rec, DVarrDbContext db, DbWriteGate gate) =>
+        {
+            var r = await db.Recordings.FindAsync(id);
+            if (r is null) return Results.NotFound();
+            if (rec.IsActive(id)) { await rec.StopAsync(id); return Results.Json(new { stopped = true }); }
+            if (r.State == RecordingState.Pending)
+            {
+                await gate.WriteAsync(async () => { r.State = RecordingState.Done; r.UpdatedUtc = EpochTime.Now(); r.FailureReason = "cancelled before start"; await db.SaveChangesAsync(); });
+                return Results.Json(new { cancelled = true });
+            }
+            return Results.Json(new { noop = true, state = r.State.ToString() });
+        });
+
+        app.MapDelete("/api/recordings/{id:int}", async (int id, RecorderService rec, DVarrDbContext db, DbWriteGate gate) =>
+        {
+            var r = await db.Recordings.FindAsync(id);
+            if (r is null) return Results.NotFound();
+            if (rec.IsActive(id)) await rec.StopAsync(id);
+            await gate.WriteAsync(async () => { db.Recordings.Remove(r); await db.SaveChangesAsync(); });
+            return Results.Json(new { deleted = true });
+        });
+
+        // ---- Conflict planning ----
+        // Per-credential timeline (each login = one stream slot) + the list of conflicted recordings with reasons.
+        app.MapGet("/api/conflicts", async (DVarrDbContext db) =>
+        {
+            var now = EpochTime.Now();
+            var horizonEnd = now + 14L * 86400;
+            var slotStates = new[] { RecordingState.Pending, RecordingState.Starting, RecordingState.Recording,
+                RecordingState.Recovering, RecordingState.FailingOver, RecordingState.Degraded, RecordingState.Stopping, RecordingState.Finalizing };
+            var sources = await db.Sources.Where(s => s.Enabled).OrderBy(s => s.Id).ToListAsync();
+            var recs = await db.Recordings
+                .Where(r => slotStates.Contains(r.State) && r.EndUtc + r.PostPadS > now && r.StartUtc - r.PrePadS < horizonEnd)
+                .ToListAsync();
+            var chNames = await db.Channels.Where(c => recs.Select(r => r.ChannelId).Contains(c.Id)).ToDictionaryAsync(c => c.Id, c => c.Name);
+            var credentials = sources.Select(s => new
+            {
+                s.Id, label = s.Label,
+                load = recs.Where(r => r.SourceId == s.Id).OrderBy(r => r.StartUtc).Select(r => new
+                {
+                    r.Id, r.Title, state = r.State.ToString(),
+                    channel = chNames.TryGetValue(r.ChannelId, out var n) ? n : null,
+                    winStart = r.StartUtc - r.PrePadS, winEnd = r.EndUtc + r.PostPadS, r.StartUtc, r.EndUtc,
+                }).ToList(),
+            }).ToList();
+            var conflicts = await db.Recordings.Where(r => r.State == RecordingState.Conflict)
+                .OrderBy(r => r.StartUtc)
+                .Select(r => new { r.Id, r.Title, r.StartUtc, r.EndUtc, reason = r.FailureReason })
+                .ToListAsync();
+            return Results.Json(new { now, credentials, conflicts });
+        });
+
+        // Read-only "where would this land?" for the Schedule modal: free credential, spread to the other login, or conflict.
+        app.MapGet("/api/recordings/plan-preview", async (int channelId, long startUtc, long endUtc, DVarrDbContext db, ResolverService resolver, SettingsService settings) =>
+        {
+            var ch = await db.Channels.FindAsync(channelId);
+            if (ch is null) return Results.Json(new { ok = false, badge = "channel not found" });
+            var pre = await settings.GetIntAsync("default_pre_pad_s");
+            var post = await settings.GetIntAsync("default_post_pad_s");
+            var winStart = startUtc - pre; var winEnd = endUtc + post;
+            var slotStates = new[] { RecordingState.Pending, RecordingState.Starting, RecordingState.Recording,
+                RecordingState.Recovering, RecordingState.FailingOver, RecordingState.Degraded, RecordingState.Stopping, RecordingState.Finalizing };
+            var committed = await db.Recordings.Where(r => slotStates.Contains(r.State))
+                .Select(r => new { r.SourceId, S = r.StartUtc - r.PrePadS, E = r.EndUtc + r.PostPadS }).ToListAsync();
+            bool Busy(int sid) => committed.Any(c => c.SourceId == sid && c.S < winEnd && winStart < c.E);
+
+            var labels = await db.Sources.ToDictionaryAsync(s => s.Id, s => s.Label);
+            string Lbl(int sid) => labels.TryGetValue(sid, out var l) ? l : $"#{sid}";
+
+            if (!Busy(ch.SourceId)) return Results.Json(new { ok = true, badge = $"will record on {Lbl(ch.SourceId)}" });
+            foreach (var e in await resolver.EquivalentChannelsAsync(ch.Id))
+                if (!Busy(e.SourceId))
+                    return Results.Json(new { ok = true, spread = true, badge = $"{Lbl(ch.SourceId)} busy → will record on {Lbl(e.SourceId)}" });
+            return Results.Json(new { ok = false, conflict = true, badge = "both logins busy → CONFLICT" });
+        });
+
+        // Manual override from the Conflicts view: move a pending/conflicted recording to another login and/or bump priority.
+        app.MapPost("/api/recordings/{id:int}/reassign", async (int id, ReassignRequest req, DVarrDbContext db, DbWriteGate gate, ResolverService resolver) =>
+        {
+            var r = await db.Recordings.FindAsync(id);
+            if (r is null) return Results.NotFound();
+            if (r.State is not (RecordingState.Pending or RecordingState.Conflict))
+                return Results.Json(new { error = "only pending or conflicted recordings can be reassigned" }, statusCode: 409);
+            var now = EpochTime.Now();
+            await gate.WriteAsync(async () =>
+            {
+                if (req.Priority is not null) r.Priority = ParsePriority(req.Priority);
+                if (req.SourceId is { } sid && sid != r.SourceId)
+                {
+                    var equiv = (await resolver.EquivalentChannelsAsync(r.ChannelId)).FirstOrDefault(x => x.SourceId == sid);
+                    if (equiv is not null)
+                    {
+                        r.SourceId = equiv.SourceId; r.ChannelId = equiv.ChannelId; r.StreamId = equiv.StreamId;
+                        await db.RecordingFallbacks.Where(f => f.RecordingId == id).ExecuteDeleteAsync();
+                    }
+                }
+                if (r.State == RecordingState.Conflict) { r.State = RecordingState.Pending; r.FailureReason = null; }
+                r.UpdatedUtc = now;
+                await db.SaveChangesAsync();
+            });
+            return Results.Json(new { ok = true, state = r.State.ToString(), r.SourceId, r.ChannelId });
+        });
+
+        // ---- Settings ----
+        app.MapGet("/api/settings", async (SettingsService settings) => Results.Json(await settings.GetAllAsync()));
+        app.MapPut("/api/settings", async (Dictionary<string, string> values, SettingsService settings) =>
+        {
+            foreach (var kv in values) await settings.SetAsync(kv.Key, kv.Value);
+            return Results.Json(await settings.GetAllAsync());
+        });
+
+        // ---- Activity feed ----
+        app.MapGet("/api/notifications", async (DVarrDbContext db, int? take) =>
+        {
+            var n = await db.Notifications
+                .OrderByDescending(x => x.TsUtc)
+                .Take(take is > 0 and <= 200 ? take.Value : 60)
+                .Select(x => new { x.Id, x.TsUtc, x.RecordingId, kind = x.Kind.ToString(), severity = x.Severity.ToString(), x.FromState, x.ToState, x.Message })
+                .ToListAsync();
+            return Results.Json(n);
+        });
+
+        app.MapGet("/api/ticks", async (DVarrDbContext db, int? take) =>
+        {
+            var t = await db.ScheduleTicks
+                .OrderByDescending(x => x.TickUtc)
+                .Take(take is > 0 and <= 100 ? take.Value : 20)
+                .Select(x => new { x.Id, x.TickUtc, x.RecordingsExamined, x.Started, x.Resumed, x.Finalized, x.Missed, x.Conflicts, x.DurationMs })
+                .ToListAsync();
+            return Results.Json(t);
+        });
+
+        // ---- SSE live recording status ----
+        app.MapGet("/api/stream/recordings", async (HttpContext ctx, RecordingEventBus bus, CancellationToken ct) =>
+        {
+            ctx.Response.Headers.ContentType = "text/event-stream";
+            ctx.Response.Headers.CacheControl = "no-cache";
+            ctx.Response.Headers.Append("X-Accel-Buffering", "no");
+            var (id, reader) = bus.Subscribe();
+            try
+            {
+                await ctx.Response.WriteAsync(": connected\n\n", ct);
+                await ctx.Response.Body.FlushAsync(ct);
+                await foreach (var msg in reader.ReadAllAsync(ct))
+                {
+                    await ctx.Response.WriteAsync($"data: {msg}\n\n", ct);
+                    await ctx.Response.Body.FlushAsync(ct);
+                }
+            }
+            catch (OperationCanceledException) { }
+            finally { bus.Unsubscribe(id); }
+        });
+    }
+
+    private static string Mask(string? s) => string.IsNullOrEmpty(s) ? "" : "***";
+
+    private static bool ValidEpgUrl(string? u)
+        => string.IsNullOrWhiteSpace(u) || (Uri.TryCreate(u, UriKind.Absolute, out var x) && (x.Scheme == "http" || x.Scheme == "https"));
+
+    private static RecordingPriority ParsePriority(string? p) => p?.ToLowerInvariant() switch
+    {
+        "cant_miss" or "cantmiss" => RecordingPriority.CantMiss,
+        "opportunistic" => RecordingPriority.Opportunistic,
+        _ => RecordingPriority.Normal,
+    };
+}
+
+public sealed record CreateRecordingRequest(int ChannelId, long StartUtc, long EndUtc, int? PrePadS, int? PostPadS, string? Title, string? Priority, string? MatchQuery);
+public sealed record ReassignRequest(int? SourceId, string? Priority);
+public sealed record TestRecordingRequest(string Url, string? Name, int? Minutes);
+public sealed record SourceUpsert(string? Label, string? Type, string? Protocol, string? Host, int? Port, string? Username, string? Password, string? EpgUrl, bool? EpgOverride, int? MaxStreams, bool? Enabled);

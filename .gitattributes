@@ -1,0 +1,10 @@
+# Normalise line endings: the repo stores LF, so the Linux Docker build never receives
+# CRLF (which can break shell/Dockerfile RUN lines). Windows checkouts still get CRLF locally.
+* text=auto eol=lf
+
+# Treat binary assets as binary (no EOL conversion).
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.gz binary
