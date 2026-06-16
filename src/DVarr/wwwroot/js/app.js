@@ -185,7 +185,7 @@ function recTable(rows, withActions) {
       <td>${esc(r.channel)}</td><td class="muted">${esc(r.source)}</td>
       <td class="mono">${mb(r.bytesWritten)}</td>
       <td class="mono muted">${brisbane(r.startUtc)} – ${brisbane(r.endUtc)}</td>
-      ${withActions ? `<td class="row" style="gap:6px">${ACTIVE.includes(r.state) || r.state === 'Pending' ? `<button class="ghost sm" onclick="stopRec(${r.id})">stop</button>` : ''}<button class="danger sm" onclick="delRec(${r.id})">delete</button></td>` : ''}
+      ${withActions ? `<td class="row" style="gap:6px">${r.state === 'Pending' || r.state === 'Conflict' ? `<button class="sm" onclick="startRec(${r.id})" title="Start this recording now (early/manual)">start</button>` : ''}${ACTIVE.includes(r.state) || r.state === 'Pending' || r.state === 'Conflict' ? `<button class="ghost sm" onclick="stopRec(${r.id})">stop</button>` : ''}<button class="danger sm" onclick="delRec(${r.id})">delete</button></td>` : ''}
     </tr>`).join('')}</tbody></table>`;
 }
 function notesList(notes) {
@@ -755,7 +755,8 @@ function scheduleFor(channelId) {
   openScheduleModal({ sourceId: c.sourceId, group: c.group, channelId, channelName: c.name });
 }
 
-async function stopRec(id) { const r = await api.post(`/api/recordings/${id}/stop`); toast(r.cancelled ? 'Recording cancelled' : r.stopped ? 'Stop requested' : 'No change'); liveRefresh && liveRefresh(); }
+async function startRec(id) { const r = await api.post(`/api/recordings/${id}/start`); if (r.error) toast(r.error, 'err'); else toast(r.started ? 'Starting…' : 'Already running', 'ok'); render(); }
+async function stopRec(id) { const r = await api.post(`/api/recordings/${id}/stop`); toast(r.cancelled ? 'Cancelled' : r.stopping ? 'Stopping…' : 'No change', r.error ? 'err' : 'ok'); render(); }
 async function delRec(id) { if (!confirm('Delete this recording?')) return; await api.del(`/api/recordings/${id}`); toast('Deleted'); render(); }
 function ingest(id, label) {
   modal(`<h2>Ingest channels — ${esc(label)}</h2>
@@ -944,7 +945,7 @@ window.addEventListener('hashchange', render);
 window.addEventListener('keydown', e => { if (e.key === 'Escape') closeModals(); }); // Esc closes modals + stops preview
 window.render = render; window.openTestModal = openTestModal; window.submitTest = submitTest;
 window.openScheduleModal = openScheduleModal; window.submitSchedule = submitSchedule; window.scheduleFor = scheduleFor; window.scheduleFromGuide = scheduleFromGuide;
-window.openPreview = openPreview; window.stopRec = stopRec; window.delRec = delRec;
+window.openPreview = openPreview; window.stopRec = stopRec; window.startRec = startRec; window.delRec = delRec;
 window.ingest = ingest; window.doIngest = doIngest; window.saveSettings = saveSettings; window.closeModals = closeModals;
 window.syncEpg = syncEpg; window.doSyncEpg = doSyncEpg; window.openSourceModal = openSourceModal; window.submitSource = submitSource; window.deleteSource = deleteSource;
 window.openLeagueModal = openLeagueModal; window.submitLeague = submitLeague; window.deleteLeague = deleteLeague; window.syncLeague = syncLeague;

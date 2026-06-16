@@ -72,8 +72,44 @@ public sealed class RecorderService
             // background auto-record pipeline. This is the structural enforcement of the "don't touch Source 1" rule.
             if (!src.Enabled) return $"source '{src.Label}' is disabled — refusing to contact it";
 
-            lease = (await _tuner.TryAcquireAsync(rec.SourceId, LeasePurpose.Recording, recordingId, rec.ChannelId, rec.StreamId, stoppingToken))!;
-            if (lease is null) return $"credential '{src.Label}' is busy (1 stream/login)";
+            // Acquire the credential's single slot. If THIS recording's credential is busy, SPREAD to the same
+            // logical channel on another enabled login that has a free slot (conflict planning, bug #7). This is what
+            // makes the schedule-modal "will record on <other login>" badge actually happen — manual recordings are
+            // otherwise pinned to one source with no fallbacks, so an overlap just sat in Pending until it Missed.
+            TunerLease? acquired = await _tuner.TryAcquireAsync(rec.SourceId, LeasePurpose.Recording, recordingId, rec.ChannelId, rec.StreamId, stoppingToken);
+            if (acquired is null)
+            {
+                var resolver = scope.ServiceProvider.GetRequiredService<DVarr.Services.Events.ResolverService>();
+                foreach (var eq in await resolver.EquivalentChannelsAsync(rec.ChannelId, stoppingToken))
+                {
+                    var eqSrc = await db.Sources.FindAsync(eq.SourceId);
+                    if (eqSrc is null || !eqSrc.Enabled) continue;
+                    var spread = await _tuner.TryAcquireAsync(eq.SourceId, LeasePurpose.Recording, recordingId, eq.ChannelId, eq.StreamId, stoppingToken);
+                    if (spread is null) continue;
+                    // Re-home: persist the new credential/channel so the UI + finalize reflect reality. Fallbacks are
+                    // pinned to the old SourceId by the composite FK, so a credential change drops them.
+                    var fromLabel = src.Label;
+                    await _gate.WriteAsync(async () =>
+                    {
+                        await db.RecordingFallbacks.Where(f => f.RecordingId == recordingId).ExecuteDeleteAsync();
+                        var rr = await db.Recordings.FindAsync(recordingId);
+                        if (rr is not null)
+                        {
+                            rr.SourceId = eq.SourceId; rr.ChannelId = eq.ChannelId; rr.StreamId = eq.StreamId; rr.UpdatedUtc = EpochTime.Now();
+                            db.Notifications.Add(new Notification { RecordingId = recordingId, TsUtc = EpochTime.Now(), Kind = NotificationKind.FailedOver, Severity = Severity.Info, Message = $"credential '{fromLabel}' busy → recording on '{eqSrc.Label}'" });
+                        }
+                        await db.SaveChangesAsync();
+                    });
+                    rec = (await db.Recordings.FindAsync(recordingId))!;
+                    src = eqSrc;
+                    ch = (await db.Channels.FindAsync(eq.ChannelId))!;
+                    acquired = spread;
+                    _log.LogInformation("[Recorder] Recording {Id}: primary credential busy → spread to '{Label}' (channel {Ch})", recordingId, eqSrc.Label, eq.ChannelId);
+                    break;
+                }
+                if (acquired is null) return $"credential '{src.Label}' is busy and no equivalent login has a free slot (1 stream/login)";
+            }
+            lease = acquired;
 
             // The credential slot is now HELD. Any failure before the supervisor owns the lease MUST
             // release it, or that single-stream credential is dead for the rest of the process lifetime.

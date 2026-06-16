@@ -12,8 +12,19 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
-## [1.12.0] — 2026-06-16
-Reliability overhaul, ffmpeg 8.x, and conflict planning across both logins.
+## [1.13.0] — 2026-06-16
+Conflict-planning + stop bug fixes, plus a manual "Start now" control.
+
+### Added
+- **Start button** on Pending/Conflict recordings (UI + `POST /api/recordings/{id}/start`) — force-arm a recording early/manually, before its pre-roll. Uses the recording's own window end and benefits from cross-login spreading if the credential's busy.
+- **`Cancelled` state** — stopping a recording before it ever captured now marks it `Cancelled` (was an inaccurate `Done`); the activity feed logs a cancellation.
+
+### Fixed
+- **Overlapping recordings now actually spread to the second login.** Manual recordings were pinned to the chosen source with no fallbacks, and the scheduler left a busy-credential recording in Pending until it Missed — so the schedule modal's "will record on \<other login\>" badge never happened. The recorder now re-homes a recording to the same channel on a free login at arm time (matching by stream id / logical key / name).
+- **Stop now works on every recording.** The stop endpoint only handled *active* and *Pending* states; a `Conflict` recording (or an orphaned state after a restart) silently no-op'd, and nothing was logged. It now cancels any non-terminal recording, finalizes a live one to Done, and logs every stop attempt with the state + whether it was actively capturing.
+- **Native-rate (VOD/test/DirectUrl) recordings no longer loop on clean EOF** — the Phase 1.12.0 clean-EOF instant-relaunch is now live-only; a finite input that ends is finalized instead of restarted.
+
+
 
 ### Added
 - **Conflict planning across the two provider logins.** New `CreditAwarePlanner` spreads overlapping events onto the second login instead of wasting it; when both logins are full an event is parked in a new **Conflict** state (re-promoted automatically when a slot frees). New **Conflicts** page (per-credential load + reasons, reassign / bump-priority actions) and a live "where will this land?" badge in the Schedule modal. New `League.Priority` tie-breaker. Endpoints: `/api/conflicts`, `/api/recordings/plan-preview`, `/api/recordings/{id}/reassign`.

@@ -25,6 +25,7 @@ public sealed class AutoScheduleService : BackgroundService
         RecordingState.Pending, RecordingState.Starting, RecordingState.Recording, RecordingState.Recovering,
         RecordingState.FailingOver, RecordingState.Degraded, RecordingState.Stopping, RecordingState.Finalizing,
         RecordingState.Done, RecordingState.FinalizeRetry, RecordingState.NeedsAttention, RecordingState.Conflict,
+        RecordingState.Cancelled,
     };
 
     // Recording states that occupy a credential's single stream slot (used for credit-aware conflict planning).

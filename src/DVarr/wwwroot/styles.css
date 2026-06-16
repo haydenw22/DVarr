@@ -58,7 +58,7 @@ tbody tr:hover { background:#1e232d; }
 
 .pill { display:inline-block; font-size:11px; padding:2px 9px; border-radius:20px; font-weight:700; letter-spacing:.3px; }
 .s-recording,.s-starting{ background:#0f3326; color:var(--ok); }
-.s-pending{ background:#22272f; color:var(--dim); }
+.s-pending,.s-cancelled{ background:#22272f; color:var(--dim); }
 .s-recovering,.s-failingover,.s-degraded,.s-finalizing,.s-stopping,.s-finalizeretry,.s-conflict{ background:#3a2f12; color:var(--warn); }
 .s-done{ background:#0e2b3b; color:var(--info); }
 .s-missed,.s-needsattention{ background:#3a1b1f; color:var(--crit); }

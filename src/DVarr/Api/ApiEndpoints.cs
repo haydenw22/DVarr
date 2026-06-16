@@ -309,17 +309,49 @@ public static class ApiEndpoints
             return Results.Json(new { rec.Id, minutes, message = "scheduled now; the scheduler will start it within a few seconds" });
         });
 
-        app.MapPost("/api/recordings/{id:int}/stop", async (int id, RecorderService rec, DVarrDbContext db, DbWriteGate gate) =>
+        app.MapPost("/api/recordings/{id:int}/stop", async (int id, RecorderService rec, DVarrDbContext db, DbWriteGate gate, ILoggerFactory lf) =>
         {
             var r = await db.Recordings.FindAsync(id);
             if (r is null) return Results.NotFound();
-            if (rec.IsActive(id)) { await rec.StopAsync(id); return Results.Json(new { stopped = true }); }
-            if (r.State == RecordingState.Pending)
+            var active = rec.IsActive(id);
+            lf.CreateLogger("DVarr.Api").LogInformation("[Api] Stop requested for recording {Id} (state {State}, active {Active})", id, r.State, active);
+
+            // Live capture → cancel; the supervisor stops ffmpeg and finalizes the partial recording to Done.
+            if (active) { await rec.StopAsync(id); return Results.Json(new { stopping = true }); }
+
+            // Not actively captured. If it's still non-terminal (Pending, Conflict, or an orphaned active state left by a
+            // crash/restart where the supervisor isn't running it), cancel it cleanly so the UI always clears it and the
+            // scheduler won't keep trying to arm it. (Previously only Pending was handled — Conflict/orphans hit noop.)
+            var terminal = new[] { RecordingState.Done, RecordingState.Missed, RecordingState.Cancelled, RecordingState.NeedsAttention };
+            if (!terminal.Contains(r.State))
             {
-                await gate.WriteAsync(async () => { r.State = RecordingState.Done; r.UpdatedUtc = EpochTime.Now(); r.FailureReason = "cancelled before start"; await db.SaveChangesAsync(); });
+                await gate.WriteAsync(async () =>
+                {
+                    var rr = await db.Recordings.FindAsync(id);
+                    if (rr is null) return;
+                    rr.State = RecordingState.Cancelled; rr.UpdatedUtc = EpochTime.Now(); rr.FailureReason = "cancelled by user";
+                    db.Notifications.Add(new Notification { RecordingId = id, TsUtc = EpochTime.Now(), Kind = NotificationKind.Cancelled, Severity = Severity.Info, ToState = "Cancelled", Message = "cancelled by user" });
+                    await db.SaveChangesAsync();
+                });
                 return Results.Json(new { cancelled = true });
             }
             return Results.Json(new { noop = true, state = r.State.ToString() });
+        });
+
+        // Start a Pending/Conflict recording NOW (early / manual) — force-arm before its pre-roll. Uses the recording's
+        // own window end, and benefits from the same cross-login spreading as the scheduler if its credential is busy.
+        app.MapPost("/api/recordings/{id:int}/start", async (int id, RecorderService rec, DVarrDbContext db, ILoggerFactory lf, CancellationToken ct) =>
+        {
+            var r = await db.Recordings.FindAsync(id);
+            if (r is null) return Results.NotFound();
+            if (rec.IsActive(id)) return Results.Json(new { already = true, state = r.State.ToString() });
+            if (r.State is not (RecordingState.Pending or RecordingState.Conflict))
+                return Results.Json(new { error = $"can't start a recording in state {r.State}" }, statusCode: 409);
+            if (r.EndUtc + r.PostPadS <= EpochTime.Now())
+                return Results.Json(new { error = "this recording's window has already passed" }, statusCode: 409);
+            lf.CreateLogger("DVarr.Api").LogInformation("[Api] Manual start requested for recording {Id} (state {State})", id, r.State);
+            var err = await rec.TryStartAsync(id, ct);
+            return err is null ? Results.Json(new { started = true }) : Results.Json(new { error = err }, statusCode: 409);
         });
 
         app.MapDelete("/api/recordings/{id:int}", async (int id, RecorderService rec, DVarrDbContext db, DbWriteGate gate) =>

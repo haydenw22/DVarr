@@ -23,6 +23,9 @@ public enum RecordingState
     /// to Pending if a slot frees (docs/05 conflict planning).</summary>
     Conflict,
     Missed,
+    /// <summary>Stopped by the user before it ever captured (Pending/Conflict cancelled). Terminal; never re-armed.
+    /// A user-stop of a LIVE recording instead finalizes the partial capture to Done.</summary>
+    Cancelled,
 }
 
 public enum RecordingPriority { CantMiss, Normal, Opportunistic }
@@ -45,7 +48,7 @@ public enum JobState { Pending, Running, Done, Error }
 public enum NotificationKind
 {
     Started, Completed, Failed, Missed, StalledRelaunched, FailedOver,
-    PlaceholderDetected, Degraded, NeedsAttention, Conflict,
+    PlaceholderDetected, Degraded, NeedsAttention, Conflict, Cancelled,
 }
 
 public enum Severity { Info, Warn, Critical }

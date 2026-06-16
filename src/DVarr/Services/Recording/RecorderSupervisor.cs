@@ -96,7 +96,10 @@ public sealed class RecorderSupervisor
                     // IMMEDIATELY, stay in Recording, and don't emit Recovering churn. The finalize de-overlap
                     // removes any few seconds the provider re-serves on reconnect. Only throttle (2s) if the line
                     // is flapping pathologically (many clean EOFs in 30s).
-                    if (exit.Kind == ExitKind.CleanEof && cleanEofInstantRelaunch)
+                    // A native-rate input (VOD / test / DirectUrl) that cleanly EOFs has simply ENDED — finalize what
+                    // we captured, never loop it. Only a LIVE clean EOF is a momentary line drop worth relaunching.
+                    if (exit.Kind == ExitKind.CleanEof && nativeRate) break;
+                    if (exit.Kind == ExitKind.CleanEof && cleanEofInstantRelaunch && !nativeRate)
                     {
                         var nowEof = EpochTime.Now();
                         cleanEofWindow.Enqueue(nowEof);
