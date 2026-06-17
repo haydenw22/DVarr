@@ -59,7 +59,9 @@ public sealed class SettingsService
         // key here to unlock the full sports/leagues catalogue (AFL, all F1/Supercars, etc.).
         ["thesportsdb_api_key"] = "3",
         ["recorder_input_mode"] = "direct_ts",
-        ["threadfin_base_url"] = "http://192.168.4.63:34400",
+        // When a recording's pre-roll attempt captures nothing (e.g. the channel isn't live yet), make ONE guaranteed
+        // fresh attempt at the event's real start time. Never interrupts a recording that's already capturing.
+        ["retry_at_event_start"] = "true",
         ["default_channel_source_filter"] = "all",
         ["timezone_display"] = "Australia/Brisbane",
         ["ha_webhook_url"] = "",
@@ -70,13 +72,17 @@ public sealed class SettingsService
     {
         var existing = await _db.Settings.Select(s => s.Key).ToListAsync(ct);
         var missing = Defaults.Where(kv => !existing.Contains(kv.Key)).ToList();
-        if (missing.Count == 0) return;
+        // Prune setting rows whose key has been REMOVED from Defaults (e.g. the retired threadfin_base_url) so a stale
+        // row can't surface in the UI's "Advanced" group or trip the allowlisted PUT /api/settings.
+        var orphan = existing.Where(k => !Defaults.ContainsKey(k)).ToList();
+        if (missing.Count == 0 && orphan.Count == 0) return;
 
         await _gate.WriteAsync(async () =>
         {
+            if (orphan.Count > 0) await _db.Settings.Where(s => orphan.Contains(s.Key)).ExecuteDeleteAsync(ct);
             foreach (var kv in missing)
                 _db.Settings.Add(new Setting { Key = kv.Key, Value = kv.Value, UpdatedUtc = EpochTime.Now() });
-            await _db.SaveChangesAsync(ct);
+            if (missing.Count > 0) await _db.SaveChangesAsync(ct);
         }, ct);
     }
 
@@ -91,12 +97,14 @@ public sealed class SettingsService
         => int.TryParse(await GetAsync(key), out var n) ? n : 0;
 
     /// <summary>
-    /// Seconds to assume an event runs when the provider gives no end time. Returns the per-sport override
-    /// (event_duration_overrides_json, keyed by lowercased sport) if one exists, else default_event_duration_s
-    /// (falling back to 2h). Soccer → 2h core (+post-pad); motorsport → 3h so race endings aren't clipped.
+    /// Seconds to assume an event runs when the provider gives no end time. Resolution order:
+    /// (1) the per-LEAGUE override <paramref name="leagueOverrideS"/> if &gt; 0, then (2) the per-SPORT override
+    /// (event_duration_overrides_json, keyed by lowercased sport), then (3) default_event_duration_s (2h fallback).
+    /// Soccer → 2h core (+post-pad); motorsport → 3h so race endings aren't clipped.
     /// </summary>
-    public async Task<int> GetEventDurationSecondsAsync(string? sport)
+    public async Task<int> GetEventDurationSecondsAsync(string? sport, int? leagueOverrideS = null)
     {
+        if (leagueOverrideS is > 0) return leagueOverrideS.Value; // tier 1: explicit per-league override wins
         var def = await GetIntAsync("default_event_duration_s"); if (def <= 0) def = 7200;
         if (string.IsNullOrWhiteSpace(sport)) return def;
         var json = await GetAsync("event_duration_overrides_json");

@@ -557,13 +557,62 @@ window.reassignRec = async (id, sourceId) => { const r = await api.post(`/api/re
 window.bumpRec = async (id) => { const r = await api.post(`/api/recordings/${id}/reassign`, { priority: 'cant_miss' }); if (r.error) toast(r.error, 'err'); else { toast('Priority raised to Can\'t-Miss', 'ok'); render(); } };
 
 // ---- Settings ----
+// Per-setting metadata: clear title (t), one-sentence help (h), group (g), and input type (ty). Keys not listed here
+// still render (under "Advanced") so a new backend setting is never hidden. The flat PUT payload is unchanged.
+const SETTINGS_GROUPS = ['Recording', 'Reliability', 'Scheduling', 'Guide', 'TheSportsDB', 'Integrations', 'Display', 'Backups'];
+const SETTINGS_META = {
+  max_global_concurrent_recordings: { g: 'Recording', t: 'Max simultaneous recordings', h: 'The most recordings DVarr will run at once across all logins.', ty: 'int' },
+  default_pre_pad_s: { g: 'Recording', t: 'Pre-roll padding (seconds)', h: 'How long before an event starts to begin recording.', ty: 'int' },
+  default_post_pad_s: { g: 'Recording', t: 'Post-roll padding (seconds)', h: 'How long after an event ends to keep recording.', ty: 'int' },
+  retry_at_event_start: { g: 'Recording', t: 'Retry at event start', h: 'If a recording captures nothing during pre-roll (the channel isn’t live yet), make one fresh attempt at the real start time.', ty: 'bool' },
+  recorder_input_mode: { g: 'Recording', t: 'Recorder input mode', h: 'How the stream is ingested. Leave as “direct_ts”.', ty: 'text' },
+  bitrate_floor_kbps_sd: { g: 'Reliability', t: 'SD bitrate floor (kbps)', h: 'Below this, an SD stream is treated as bad and fails over.', ty: 'int' },
+  bitrate_floor_kbps_hd: { g: 'Reliability', t: 'HD bitrate floor (kbps)', h: 'Below this, an HD stream is treated as bad and fails over.', ty: 'int' },
+  segment_no_progress_timeout_s: { g: 'Reliability', t: 'Stall timeout (seconds)', h: 'Seconds with no data written before the recorder relaunches / fails over.', ty: 'int' },
+  content_verify_enabled: { g: 'Reliability', t: 'Dead-feed detection', h: 'Watch for a black / frozen / silent slate and fail over when the feed is dead. Opt-in.', ty: 'bool' },
+  content_probe_interval_s: { g: 'Reliability', t: 'Dead-feed check interval (seconds)', h: 'How often to check for a dead feed when detection is on.', ty: 'int' },
+  content_dead_timeout_s: { g: 'Reliability', t: 'Dead-feed timeout (seconds)', h: 'Seconds of dead feed before failing over.', ty: 'int' },
+  finalize_deoverlap_enabled: { g: 'Reliability', t: 'De-overlap finished files', h: 'Trim duplicate seconds the provider re-serves on reconnect so playback never jumps backwards.', ty: 'bool' },
+  clean_eof_instant_relaunch: { g: 'Reliability', t: 'Instant relaunch on clean drop', h: 'Ride momentary line drops by relaunching immediately on a clean stream close (no “Recovering” churn).', ty: 'bool' },
+  tick_interval_s: { g: 'Scheduling', t: 'Scheduler tick (seconds)', h: 'How often DVarr checks for due recordings.', ty: 'int' },
+  auto_schedule_interval_s: { g: 'Scheduling', t: 'Auto-schedule interval (seconds)', h: 'How often DVarr scans monitored events and plans recordings.', ty: 'int' },
+  event_sync_interval_s: { g: 'Scheduling', t: 'Event sync interval (seconds)', h: 'How often the fixture list is refreshed from TheSportsDB.', ty: 'int' },
+  default_event_duration_s: { g: 'Guide', t: 'Default event length (seconds)', h: 'Assumed length when the source gives no end time (7200 = 2 h). A per-league override always wins.', ty: 'int' },
+  event_duration_overrides_json: { g: 'Guide', t: 'Per-sport length overrides', h: 'Advanced: JSON of sport → seconds (e.g. motorsport = 3 h). Used when a league has no per-league override.', ty: 'json' },
+  epg_past_window_h: { g: 'Guide', t: 'Guide history (hours)', h: 'How many hours of past guide data to keep.', ty: 'int' },
+  epg_future_window_d: { g: 'Guide', t: 'Guide lookahead (days)', h: 'How many days of upcoming guide data to keep.', ty: 'int' },
+  epg_max_programmes: { g: 'Guide', t: 'Guide safety cap', h: 'Max programmes stored per source to prevent runaway database growth.', ty: 'int' },
+  thesportsdb_api_key: { g: 'TheSportsDB', t: 'TheSportsDB API key', h: '“3” is the public test key (limited). Paste your own key to unlock all sports & leagues.', ty: 'text' },
+  ha_webhook_url: { g: 'Integrations', t: 'Home Assistant webhook', h: 'Webhook URL to push recording state changes to Home Assistant. Blank = off.', ty: 'url' },
+  default_channel_source_filter: { g: 'Display', t: 'Default channel filter', h: 'Which source’s channels to show by default (“all” or a source id).', ty: 'text' },
+  timezone_display: { g: 'Display', t: 'Display timezone', h: 'IANA timezone used to show times (e.g. Australia/Brisbane).', ty: 'text' },
+  litestream_target: { g: 'Backups', t: 'Litestream backup target', h: 'Continuous database backup destination (e.g. s3://bucket/path). Blank = off.', ty: 'url' },
+};
+function settingField(k, v) {
+  const m = SETTINGS_META[k] || { t: k, h: '', ty: (v === 'true' || v === 'false') ? 'bool' : 'text' };
+  const id = 'set_' + k;
+  if (m.ty === 'bool')
+    return `<label class="set-row" style="display:flex;gap:10px;align-items:flex-start"><input type="checkbox" id="${id}" data-k="${esc(k)}" data-bool="1" ${v === 'true' ? 'checked' : ''} style="width:auto;margin-top:3px"/><span><b>${esc(m.t)}</b>${m.h ? `<div class="muted" style="font-size:12px">${esc(m.h)}</div>` : ''}</span></label>`;
+  let input;
+  if (m.ty === 'int') input = `<input type="number" id="${id}" data-k="${esc(k)}" value="${esc(v)}"/>`;
+  else if (m.ty === 'url') input = `<input type="url" id="${id}" data-k="${esc(k)}" value="${esc(v)}" placeholder="blank = off"/>`;
+  else if (m.ty === 'json') input = `<textarea id="${id}" data-k="${esc(k)}" data-json="1" rows="2" spellcheck="false" style="font-family:var(--mono,monospace);font-size:12px">${esc(v)}</textarea>`;
+  else input = `<input type="text" id="${id}" data-k="${esc(k)}" value="${esc(v)}"/>`;
+  return `<label class="set-row"><b>${esc(m.t)}</b>${m.h ? `<div class="muted" style="font-size:12px;margin-bottom:4px">${esc(m.h)}</div>` : ''}${input}</label>`;
+}
 PAGES.settings = {
   title: 'Settings',
   async render(el) {
     const s = await api.get('/api/settings');
-    el.innerHTML = `<div class="card" style="max-width:760px"><div class="fields" style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
-      ${Object.entries(s).map(([k, v]) => `<label class="field">${esc(k)}<input data-k="${esc(k)}" value="${esc(v)}"/></label>`).join('')}
-    </div><div class="row" style="margin-top:18px"><button onclick="saveSettings()">Save settings</button><span id="setMsg" class="muted"></span></div></div>`;
+    const advanced = Object.keys(s).filter(k => !SETTINGS_META[k]);
+    const groups = advanced.length ? SETTINGS_GROUPS.concat('Advanced') : SETTINGS_GROUPS;
+    const card = group => {
+      const keys = group === 'Advanced' ? advanced : Object.keys(SETTINGS_META).filter(k => SETTINGS_META[k].g === group && k in s);
+      if (!keys.length) return '';
+      return `<div class="section" style="max-width:720px"><h2>${group}</h2><div class="card"><div class="fields" style="display:grid;gap:16px">${keys.map(k => settingField(k, s[k])).join('')}</div></div></div>`;
+    };
+    el.innerHTML = `${groups.map(card).join('')}
+      <div class="row" style="margin:8px 0 28px;max-width:720px"><button onclick="saveSettings()">Save settings</button><span id="setMsg" class="muted"></span></div>`;
   },
 };
 
@@ -880,11 +929,16 @@ async function deleteSource(id, label) {
 }
 async function saveSettings() {
   const vals = {};
-  document.querySelectorAll('#view [data-k]').forEach(i => vals[i.dataset.k] = i.value);
+  let badJson = null;
+  document.querySelectorAll('#view [data-k]').forEach(i => {
+    if (i.dataset.bool) { vals[i.dataset.k] = i.checked ? 'true' : 'false'; return; }
+    if (i.dataset.json) { try { JSON.parse(i.value); } catch { badJson = i.dataset.k; } }
+    vals[i.dataset.k] = i.value;
+  });
+  if (badJson) { toast(`“${(SETTINGS_META[badJson] || {}).t || badJson}” isn’t valid JSON`, 'err'); return; }
   const r = await api.put('/api/settings', vals);
-  if (r.error) { $('#setMsg').textContent = ''; toast(r.error, 'err'); return; }
-  $('#setMsg').textContent = 'saved ✓';
-  setTimeout(() => { const m = $('#setMsg'); if (m) m.textContent = ''; }, 1800);
+  if (r.error) { toast(r.error, 'err'); return; }
+  const m = $('#setMsg'); if (m) { m.textContent = 'saved ✓'; setTimeout(() => { const e = $('#setMsg'); if (e) e.textContent = ''; }, 1800); }
 }
 
 // ---- leagues (TheSportsDB pickers) / events / mappings actions ----
@@ -896,6 +950,7 @@ async function openLeagueModal(id) {
     <label class="field">League <span class="muted">(search)</span><input id="lLeagueQ" placeholder="e.g. AFL, supercars, premier league…"/><select id="lLeague" size="6"><option>Pick a sport first…</option></select></label>
     <label class="field">…or paste a TheSportsDB league id <span class="muted">(for anything not listed)</span><input id="lManualId" value="${esc(x?.externalLeagueId || '')}" placeholder="e.g. 4370"/></label>
     <label class="field">Auto-schedule horizon (days)<input id="lHorizon" type="number" value="${x?.scheduleHorizonDays || 14}"/></label>
+    <label class="field">Event length override <span class="muted">(minutes — blank uses the sport / global default)</span><input id="lDuration" type="number" min="1" value="${x?.eventDurationOverrideS ? Math.round(x.eventDurationOverrideS / 60) : ''}" placeholder="e.g. 180 for a 3-hour race"/></label>
     <label class="field">Calendar colour<input type="hidden" id="lColor" value="${esc(x?.color || '')}"/>
       <div class="swatches" id="lSwatches">${LEAGUE_COLORS.map(c => `<span class="swatch${(x?.color || '').toLowerCase() === c ? ' sel' : ''}" data-c="${c}" style="background:${c}" title="${c}"></span>`).join('')}</div></label>
     <label class="field" style="flex-direction:row;align-items:center;gap:8px"><input id="lMon" type="checkbox" ${(!x || x.monitored) ? 'checked' : ''} style="width:auto"/> Monitored — auto-record this league's events</label>
@@ -934,6 +989,7 @@ async function submitLeague(id) {
     name: manual ? undefined : opt?.dataset.name,
     sport: manual ? undefined : (opt?.dataset.sport || $('#lSport').value),
     scheduleHorizonDays: parseInt($('#lHorizon').value) || 14, monitored: $('#lMon').checked, color: $('#lColor').value || '',
+    eventDurationOverrideS: (() => { const v = parseInt($('#lDuration').value); return v > 0 ? v * 60 : 0; })(),
   };
   closeModals();
   if (id == null) { const r = await api.post('/api/leagues', body); toast(r.error ? r.error : 'League added', r.error ? 'err' : 'ok'); }

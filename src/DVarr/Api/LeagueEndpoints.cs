@@ -23,7 +23,7 @@ public static class LeagueEndpoints
                 {
                     l.Id, l.Sport, l.Name, l.Monitored, provider = l.EventProvider, l.ExternalLeagueId, l.IcsUrl,
                     poster = l.PosterUrl, badge = l.BadgeUrl, color = l.Color,
-                    l.ScheduleHorizonDays, lastSync = l.LastEventSyncUtc, events, mappings = maps,
+                    l.ScheduleHorizonDays, eventDurationOverrideS = l.EventDurationOverrideS, lastSync = l.LastEventSyncUtc, events, mappings = maps,
                 });
             }
             return Results.Json(result);
@@ -55,6 +55,7 @@ public static class LeagueEndpoints
                 PosterUrl = meta?.Poster, BadgeUrl = meta?.Badge,
                 Color = ValidColor(req.Color),
                 ScheduleHorizonDays = req.ScheduleHorizonDays is > 0 ? req.ScheduleHorizonDays!.Value : 14,
+                EventDurationOverrideS = req.EventDurationOverrideS is > 0 ? req.EventDurationOverrideS : null,
                 Monitored = req.Monitored ?? true, CreatedUtc = now,
             };
             await gate.WriteAsync(async () => { db.Leagues.Add(l); await db.SaveChangesAsync(); });
@@ -97,6 +98,7 @@ public static class LeagueEndpoints
                 if (req.ScheduleHorizonDays is > 0) l.ScheduleHorizonDays = req.ScheduleHorizonDays!.Value;
                 if (req.Monitored.HasValue) l.Monitored = req.Monitored.Value;
                 if (req.Color != null) l.Color = ValidColor(req.Color);
+                if (req.EventDurationOverrideS.HasValue) l.EventDurationOverrideS = req.EventDurationOverrideS > 0 ? req.EventDurationOverrideS : null; // 0/blank clears, >0 sets
                 await db.SaveChangesAsync();
             });
             return Results.Json(new { l.Id, updated = true });
@@ -283,7 +285,7 @@ public static class LeagueEndpoints
         => !string.IsNullOrWhiteSpace(c) && System.Text.RegularExpressions.Regex.IsMatch(c.Trim(), "^#[0-9a-fA-F]{6}$") ? c.Trim() : null;
 }
 
-public sealed record LeagueUpsert(string? Sport, string? Name, string? Provider, string? ExternalLeagueId, string? IcsUrl, int? ScheduleHorizonDays, bool? Monitored, string? Color);
+public sealed record LeagueUpsert(string? Sport, string? Name, string? Provider, string? ExternalLeagueId, string? IcsUrl, int? ScheduleHorizonDays, bool? Monitored, string? Color, int? EventDurationOverrideS);
 public sealed record EventCreate(int LeagueId, string? Title, long StartUtc, long? EndUtc, bool? Monitored);
 public sealed record MonitorReq(bool Monitored);
 public sealed record MappingCreate(int LeagueId, int ChannelId, int? Rank, bool? Pinned);

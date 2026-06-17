@@ -53,6 +53,7 @@ public sealed class SchedulerService : BackgroundService
 
         List<RecordingEntity> due;
         List<int> passedPending;
+        List<RecordingEntity> stuck = new();
         using (var scope = _scopes.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<DVarrDbContext>();
@@ -73,6 +74,42 @@ public sealed class SchedulerService : BackgroundService
                 .Where(r => r.State == RecordingState.Pending && r.EndUtc + r.PostPadS <= now)
                 .Select(r => r.Id)
                 .ToListAsync(ct);
+
+            // Retry-at-event-start: an active recording whose pre-roll attempt has captured NOTHING by ~30s past the
+            // real start (the channel likely wasn't live yet). Make ONE guaranteed fresh attempt; one-shot via
+            // EventStartRetried, and the 30s grace means a recording that's simply mid-connect is never restarted.
+            if (await settings.GetBoolAsync("retry_at_event_start"))
+                stuck = await db.Recordings
+                    .Where(r => !r.EventStartRetried && r.BytesWritten == 0
+                                && r.StartUtc <= now - 30 && r.EndUtc + r.PostPadS > now
+                                && (r.State == RecordingState.Recording || r.State == RecordingState.Recovering
+                                    || r.State == RecordingState.FailingOver || r.State == RecordingState.Degraded))
+                    .ToListAsync(ct);
+        }
+
+        // Re-attempt stuck recordings (started but captured nothing by event start) before the normal arming pass.
+        foreach (var r in stuck)
+        {
+            try
+            {
+                if (_recorder.IsActive(r.Id)) await _recorder.StopAsync(r.Id); // settle the empty attempt so it can re-arm clean
+                await _gate.WriteAsync(async () =>
+                {
+                    using var rs = _scopes.CreateScope();
+                    var rdb = rs.ServiceProvider.GetRequiredService<DVarrDbContext>();
+                    var rec = await rdb.Recordings.FindAsync(r.Id);
+                    if (rec is null || rec.EventStartRetried) return;
+                    rec.State = RecordingState.Pending; rec.EventStartRetried = true;
+                    rec.OutputPath = null; rec.SegmentDir = null; rec.FfmpegPid = null; rec.BytesWritten = 0; rec.FailureReason = null;
+                    rec.UpdatedUtc = EpochTime.Now();
+                    rdb.Notifications.Add(new Notification { RecordingId = r.Id, TsUtc = EpochTime.Now(), Kind = NotificationKind.StalledRelaunched, Severity = Severity.Warn, ToState = "Pending", Message = "no content captured during pre-roll — re-attempting at event start" });
+                    await rdb.SaveChangesAsync(ct);
+                }, ct);
+                var rerr = await _recorder.TryStartAsync(r.Id, ct);
+                if (rerr is null) started++;
+                _log.LogInformation("[Scheduler] Recording {Id}: nothing captured by event start → re-attempted ({Res})", r.Id, rerr ?? "started");
+            }
+            catch (Exception ex) { _log.LogWarning(ex, "[Scheduler] event-start retry failed for {Id}", r.Id); }
         }
 
         foreach (var r in due)

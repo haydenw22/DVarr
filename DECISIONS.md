@@ -73,7 +73,7 @@ With the three features + reliability core done, I built out the remaining plann
 
 **Phase 4 — Media import (Plex/Jellyfin-clean library).** After finalize, an event-linked recording is filed as **League = show, year = season, MMddHHmm = episode**, with Kodi `.nfo` sidecars (`tvshow.nfo` + per-episode) and a self-generated thumbnail (so Plex never shows a generic DVR series or a random ad-frame). Non-event recordings keep their flat name.
 
-**Phase 5 — Settings + ops.** All tunables (pads, intervals, concurrency, ThreadFin URL, HA webhook, timezone) are editable on the **Settings** page and backed by a typed Settings table with the plan's defaults.
+**Phase 5 — Settings + ops.** All tunables (pads, intervals, concurrency, recorder tunables, HA webhook, timezone) are editable on the **Settings** page and backed by a typed Settings table with the plan's defaults.
 
 ## Second adversarial review (Phases 2–4) — fixes applied
 

@@ -36,6 +36,9 @@ public class Recording
     public RecordingState State { get; set; } = RecordingState.Pending;
 
     public int AttemptCount { get; set; }
+    /// <summary>One-shot guard: set once the scheduler has made the guaranteed "second attempt at the event's real
+    /// start time" for a recording whose pre-roll attempt captured nothing (the retry_at_event_start feature).</summary>
+    public bool EventStartRetried { get; set; }
     public int? FfmpegPid { get; set; }
     public string? SegmentDir { get; set; }
     public string? OutputPath { get; set; }

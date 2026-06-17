@@ -12,6 +12,17 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.17.0] — 2026-06-17
+Settings page overhaul, per-league durations, a kickoff retry, and Threadfin removal.
+
+### Added
+- **Redesigned Settings page.** Settings are grouped (Recording, Reliability, Scheduling, Guide, TheSportsDB, Integrations, Display, Backups), each with a clear title + a one-sentence explainer. Booleans are real toggles, durations/intervals are number fields, URLs are URL fields, and the per-sport duration JSON is a validated textarea. Any unrecognised key still appears under **Advanced**, so a new setting is never hidden.
+- **Per-league event-duration override.** Set an event length (in minutes) directly on a league when adding/editing it. Duration now resolves **league → sport → global default**, so one league (or a motorsport series) can run long without hand-editing JSON.
+- **Retry at event start.** If a recording captures nothing during pre-roll (the channel isn't live yet), DVarr makes **one guaranteed fresh attempt at the event's real start time**. It never interrupts a recording that's already capturing, and it's toggleable in Settings.
+
+### Removed
+- **Threadfin.** The unused `threadfin_base_url` setting is gone and a stale DB row is auto-pruned on boot. DVarr has never used a proxy — streams and EPG are fetched directly from the provider.
+
 ## [1.16.0] — 2026-06-17
 A re-Resolve action, plus a large reviewed reliability/correctness pass (29 fixes from a multi-agent audit, each independently verified).
 

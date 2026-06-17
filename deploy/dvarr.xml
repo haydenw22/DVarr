@@ -24,7 +24,7 @@
   <DateInstalled/>
   <DonateText/>
   <DonateLink/>
-  <Description>DVarr — reliability-first IPTV sports DVR. WebUI on 1867. Reference other containers (Threadfin, Plex, Home Assistant, Prowlarr) by 192.168.4.63:&lt;port&gt;, never localhost/172.17.x.x.</Description>
+  <Description>DVarr — reliability-first IPTV sports DVR. WebUI on 1867. Reference other containers (Plex, Home Assistant, Prowlarr) by 192.168.4.63:&lt;port&gt;, never localhost/172.17.x.x.</Description>
   <Networking>
     <Mode>bridge</Mode>
     <Publish>

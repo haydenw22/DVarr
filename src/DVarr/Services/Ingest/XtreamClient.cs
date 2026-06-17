@@ -44,7 +44,7 @@ public sealed class XtreamClient
     private string Api(ProviderSource s, string query)
         => $"{BaseUrl(s)}/player_api.php?username={Uri.EscapeDataString(s.Username)}&password={Uri.EscapeDataString(s.Password)}{query}";
 
-    /// <summary>Direct .ts URL for the recorder (docs/05 §5.4, D3 — never Threadfin).</summary>
+    /// <summary>Direct .ts URL for the recorder (docs/05 §5.4, D3) — fetched straight from the provider.</summary>
     public string StreamTsUrl(ProviderSource s, int streamId)
         => $"{BaseUrl(s)}/live/{Uri.EscapeDataString(s.Username)}/{Uri.EscapeDataString(s.Password)}/{streamId}.ts";
 

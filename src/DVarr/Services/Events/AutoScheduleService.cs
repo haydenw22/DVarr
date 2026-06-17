@@ -201,7 +201,7 @@ public sealed class AutoScheduleService : BackgroundService
                 var ev = await db.Events.FindAsync(new object?[] { eid }, ct);
                 if (ev is null) continue;
                 var cSport = monitoredLeagues.TryGetValue(ev.LeagueId, out var cLeague) ? cLeague.Sport : "";
-                var newEndC = ev.EndUtc ?? ev.StartUtc + await settings.GetEventDurationSecondsAsync(cSport);
+                var newEndC = ev.EndUtc ?? ev.StartUtc + await settings.GetEventDurationSecondsAsync(cSport, cLeague?.EventDurationOverrideS);
                 var winStartC = ev.StartUtc - r.PrePadS;
                 var winEndC = newEndC + r.PostPadS;
                 if (now >= winEndC) { await MarkConflictMissedAsync(db, r.Id, now); continue; } // window passed while parked
@@ -247,7 +247,7 @@ public sealed class AutoScheduleService : BackgroundService
                     // recording row, not the event). Only Pending is touched; channel re-resolution is left as-is.
                     if (pendingByEvent.TryGetValue(e.Id, out var pend))
                     {
-                        var newEnd = e.EndUtc ?? e.StartUtc + await settings.GetEventDurationSecondsAsync(l.Sport);
+                        var newEnd = e.EndUtc ?? e.StartUtc + await settings.GetEventDurationSecondsAsync(l.Sport, l.EventDurationOverrideS);
                         if (pend.StartUtc != e.StartUtc || pend.EndUtc != newEnd || pend.Title != e.Title)
                         {
                             await _gate.WriteAsync(async () =>
@@ -274,7 +274,7 @@ public sealed class AutoScheduleService : BackgroundService
                 if (opts.Count == 0) { _log.LogDebug("[AutoSchedule] event {Id} '{Title}' not resolvable", e.Id, e.Title); continue; }
 
                 // Defensive: events are given a per-sport EndUtc at ingest, but a legacy/manual row may have none.
-                var endUtc = e.EndUtc ?? e.StartUtc + await settings.GetEventDurationSecondsAsync(l.Sport);
+                var endUtc = e.EndUtc ?? e.StartUtc + await settings.GetEventDurationSecondsAsync(l.Sport, l.EventDurationOverrideS);
                 var winStart = e.StartUtc - pre; var winEnd = endUtc + post;
                 var rank = CreditAwarePlanner.MakeRank(RecordingPriority.Normal, l.Priority, e.StartUtc, e.Id);
                 var decision = planner.Decide(opts, winStart, winEnd, rank, slots);

@@ -25,6 +25,10 @@ public class League
 
     /// <summary>Auto-schedule monitored events whose start is within this many days.</summary>
     public int ScheduleHorizonDays { get; set; } = 14;
+
+    /// <summary>Per-league assumed event duration (seconds) when the provider gives no end time. Null = fall back to
+    /// the per-sport override (event_duration_overrides_json) then default_event_duration_s.</summary>
+    public int? EventDurationOverrideS { get; set; }
     public long? LastEventSyncUtc { get; set; }
 
     /// <summary>Conflict tie-breaker (higher wins) when demand exceeds both logins for a window: a higher-priority

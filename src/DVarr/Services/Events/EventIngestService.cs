@@ -40,7 +40,7 @@ public sealed class EventIngestService
         var isTsdb = l.EventProvider == "thesportsdb";
         // Per-sport assumed duration for events whose provider gives no end time (every TheSportsDB event).
         // ICS events that DO carry a real DTEND keep it (the ?? below only fills when EndUtc is null).
-        var defaultDurationS = await _settings.GetEventDurationSecondsAsync(l.Sport);
+        var defaultDurationS = await _settings.GetEventDurationSecondsAsync(l.Sport, l.EventDurationOverrideS);
         long? EndFor(IngestedEvent ie) => ie.EndUtc ?? ie.StartUtc + defaultDurationS;
 
         // Refresh league artwork (poster/badge) from TheSportsDB so the Plex provider + media import have it.
