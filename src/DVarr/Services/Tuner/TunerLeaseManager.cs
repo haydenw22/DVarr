@@ -130,6 +130,9 @@ public sealed class TunerLeaseManager
             if (stale.Count > 0) await db.SaveChangesAsync(ct);
             if (stale.Count > 0) _log.LogWarning("[Tuner] Reconciled {N} stale active lease(s) on boot", stale.Count);
         }, ct);
-        _slots.Clear();
+        // NOTE: do NOT clear _slots here. It is a fresh ConcurrentDictionary at process start, populated ONLY by live
+        // TryAcquireAsync calls — clearing it would discard a slot a preview/recording already acquired during the
+        // boot window (the HTTP server serves before this runs), making the credential wrongly report free and
+        // allowing a SECOND concurrent stream on one login. The DB reconciliation above is the only boot work needed.
     }
 }

@@ -166,6 +166,13 @@ public sealed class RecorderSupervisor
             _log.LogError(exOuter, "[Recorder] Recording {Id} pre-finalize error", recordingId);
         }
 
+        // Capture has ended and its ffmpeg is already graceful-stopped/disposed (inside the capture loop), so the
+        // provider connection is closed. Finalize is purely LOCAL (concat + AAC re-encode of on-disk segments) and
+        // never touches the provider — so release the credential's single stream slot NOW rather than pinning it for
+        // the whole finalize (up to ~60 min on a long recording), which would block a back-to-back same-credential
+        // recording from arming. ReleaseAsync is idempotent (Interlocked guard), so the finally below is a safe no-op.
+        await _d.Tuner.ReleaseAsync(lease);
+
         // ALWAYS finalize — even after an unexpected error, concatenate whatever segments exist so a
         // transient fault never abandons a captured window. NeedsAttention only if there is truly nothing.
         try

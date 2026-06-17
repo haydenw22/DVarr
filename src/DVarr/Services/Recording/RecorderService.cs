@@ -93,26 +93,37 @@ public sealed class RecorderService
                     if (eqSrc is null || !eqSrc.Enabled) continue;
                     var spread = await _tuner.TryAcquireAsync(eq.SourceId, LeasePurpose.Recording, recordingId, eq.ChannelId, eq.StreamId, stoppingToken);
                     if (spread is null) continue;
-                    // Re-home: persist the new credential/channel so the UI + finalize reflect reality. Fallbacks are
-                    // pinned to the old SourceId by the composite FK, so a credential change drops them.
-                    var fromLabel = src.Label;
-                    await _gate.WriteAsync(async () =>
+                    // The spread credential's single slot is now HELD. This block is OUTSIDE the lease-release try
+                    // below (it runs before `lease = acquired`), so any throw here would leak that login's slot until
+                    // restart — guard it and release on failure.
+                    try
                     {
-                        await db.RecordingFallbacks.Where(f => f.RecordingId == recordingId).ExecuteDeleteAsync();
-                        var rr = await db.Recordings.FindAsync(recordingId);
-                        if (rr is not null)
+                        // Re-home: persist the new credential/channel so the UI + finalize reflect reality. Fallbacks are
+                        // pinned to the old SourceId by the composite FK, so a credential change drops them.
+                        var fromLabel = src.Label;
+                        await _gate.WriteAsync(async () =>
                         {
-                            rr.SourceId = eq.SourceId; rr.ChannelId = eq.ChannelId; rr.StreamId = eq.StreamId; rr.UpdatedUtc = EpochTime.Now();
-                            db.Notifications.Add(new Notification { RecordingId = recordingId, TsUtc = EpochTime.Now(), Kind = NotificationKind.FailedOver, Severity = Severity.Info, Message = $"credential '{fromLabel}' busy → recording on '{eqSrc.Label}'" });
-                        }
-                        await db.SaveChangesAsync();
-                    });
-                    rec = (await db.Recordings.FindAsync(recordingId))!;
-                    src = eqSrc;
-                    ch = (await db.Channels.FindAsync(eq.ChannelId))!;
-                    acquired = spread;
-                    _log.LogInformation("[Recorder] Recording {Id}: primary credential busy → spread to '{Label}' (channel {Ch})", recordingId, eqSrc.Label, eq.ChannelId);
-                    break;
+                            await db.RecordingFallbacks.Where(f => f.RecordingId == recordingId).ExecuteDeleteAsync();
+                            var rr = await db.Recordings.FindAsync(recordingId);
+                            if (rr is not null)
+                            {
+                                rr.SourceId = eq.SourceId; rr.ChannelId = eq.ChannelId; rr.StreamId = eq.StreamId; rr.UpdatedUtc = EpochTime.Now();
+                                db.Notifications.Add(new Notification { RecordingId = recordingId, TsUtc = EpochTime.Now(), Kind = NotificationKind.FailedOver, Severity = Severity.Info, Message = $"credential '{fromLabel}' busy → recording on '{eqSrc.Label}'" });
+                            }
+                            await db.SaveChangesAsync();
+                        });
+                        var rrec = await db.Recordings.FindAsync(recordingId);
+                        var rch = await db.Channels.FindAsync(eq.ChannelId);
+                        if (rrec is null || rch is null) { await _tuner.ReleaseAsync(spread); continue; } // re-homed row/channel vanished — give the slot back, try next
+                        rec = rrec; src = eqSrc; ch = rch; acquired = spread;
+                        _log.LogInformation("[Recorder] Recording {Id}: primary credential busy → spread to '{Label}' (channel {Ch})", recordingId, eqSrc.Label, eq.ChannelId);
+                        break;
+                    }
+                    catch
+                    {
+                        await _tuner.ReleaseAsync(spread); // never leak the spread login's only slot on a re-home failure
+                        throw;
+                    }
                 }
                 if (acquired is null) return $"credential '{src.Label}' is busy and no equivalent login has a free slot (1 stream/login)";
             }

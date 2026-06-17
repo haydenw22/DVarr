@@ -19,6 +19,10 @@ public static class ApiEndpoints
         app.MapGet("/api/sources", async (DVarrDbContext db, TunerLeaseManager tuner) =>
         {
             var sources = await db.Sources.OrderBy(s => s.Id).ToListAsync();
+            // Pre-compute per-source counts with two awaited grouped queries, rather than 2 lazy synchronous Count()
+            // calls per source evaluated on the JSON-serialization thread (blocking DB IO while writing the response).
+            var chCounts = await db.Channels.GroupBy(c => c.SourceId).Select(g => new { g.Key, C = g.Count() }).ToDictionaryAsync(g => g.Key, g => g.C);
+            var pgCounts = await db.Programmes.GroupBy(p => p.SourceId).Select(g => new { g.Key, C = g.Count() }).ToDictionaryAsync(g => g.Key, g => g.C);
             return Results.Json(sources.Select(s => new
             {
                 s.Id, s.Label, s.Type, host = s.BaseUrl, s.Port, protocol = s.ServerProtocol,
@@ -26,8 +30,8 @@ public static class ApiEndpoints
                 maxStreams = s.MaxStreams, s.Enabled, s.Healthy,
                 epgUrl = s.EpgUrl, epgOverride = s.EpgOverride, userAgent = s.UserAgent,
                 slotFree = tuner.IsFree(s.Id),
-                channels = db.Channels.Count(c => c.SourceId == s.Id),
-                programmes = db.Programmes.Count(p => p.SourceId == s.Id),
+                channels = chCounts.GetValueOrDefault(s.Id),
+                programmes = pgCounts.GetValueOrDefault(s.Id),
             }));
         });
 
@@ -479,19 +483,33 @@ public static class ApiEndpoints
             if (r.State is not (RecordingState.Pending or RecordingState.Conflict))
                 return Results.Json(new { error = "only pending or conflicted recordings can be reassigned" }, statusCode: 409);
             var now = EpochTime.Now();
+            // If a specific login was requested it MUST have an equivalent channel for this recording — otherwise the
+            // reassign is impossible and we must say so. (Previously this returned ok=true and a "Reassigned" toast
+            // while the recording silently stayed in Conflict.) Resolve before the gate so we can 409 without mutating.
+            ResolvedChannel? equiv = null;
+            if (req.SourceId is { } sid && sid != r.SourceId)
+            {
+                equiv = (await resolver.EquivalentChannelsAsync(r.ChannelId)).FirstOrDefault(x => x.SourceId == sid);
+                if (equiv is null)
+                    return Results.Json(new { error = "that login has no equivalent channel for this recording" }, statusCode: 409);
+            }
+            var aborted = false;
             await gate.WriteAsync(async () =>
             {
+                // Re-validate inside the gate: the chosen login could have been disabled between EquivalentChannelsAsync
+                // (un-gated) and here — don't re-point onto a now-disabled credential.
+                if (equiv is not null)
+                {
+                    var es = await db.Sources.FindAsync(equiv.SourceId);
+                    if (es is null || !es.Enabled) { aborted = true; return; }
+                }
                 if (req.Priority is not null) r.Priority = ParsePriority(req.Priority);
                 var placed = false;
-                if (req.SourceId is { } sid && sid != r.SourceId)
+                if (equiv is not null)
                 {
-                    var equiv = (await resolver.EquivalentChannelsAsync(r.ChannelId)).FirstOrDefault(x => x.SourceId == sid);
-                    if (equiv is not null)
-                    {
-                        r.SourceId = equiv.SourceId; r.ChannelId = equiv.ChannelId; r.StreamId = equiv.StreamId;
-                        await db.RecordingFallbacks.Where(f => f.RecordingId == id).ExecuteDeleteAsync();
-                        placed = true;
-                    }
+                    r.SourceId = equiv.SourceId; r.ChannelId = equiv.ChannelId; r.StreamId = equiv.StreamId;
+                    await db.RecordingFallbacks.Where(f => f.RecordingId == id).ExecuteDeleteAsync();
+                    placed = true;
                 }
                 // Only unpark a Conflict to Pending on an EXPLICIT placement (the user picked a specific login). A
                 // bare priority bump keeps it in Conflict so the auto-scheduler's conflict re-evaluation re-plans it
@@ -501,13 +519,67 @@ public static class ApiEndpoints
                 r.UpdatedUtc = now;
                 await db.SaveChangesAsync();
             });
+            if (aborted) return Results.Json(new { error = "that login became disabled — retry" }, statusCode: 409);
             return Results.Json(new { ok = true, state = r.State.ToString(), r.SourceId, r.ChannelId });
+        });
+
+        // Re-resolve a scheduled recording's channel against the league's CURRENT mapping (e.g. after you re-pin the
+        // channel) — updates channel/source/stream + the same-credential fallback ladder IN PLACE, no delete/recreate.
+        // Pending/Conflict only (never an active capture); event-linked only (a manual recording has no league mapping).
+        app.MapPost("/api/recordings/{id:int}/resolve", async (int id, DVarrDbContext db, DbWriteGate gate, ResolverService resolver) =>
+        {
+            var r = await db.Recordings.FindAsync(id);
+            if (r is null) return Results.NotFound();
+            if (r.State is not (RecordingState.Pending or RecordingState.Conflict))
+                return Results.Json(new { error = "only pending or conflicted recordings can be re-resolved" }, statusCode: 409);
+            if (r.EventId is not { } eid)
+                return Results.Json(new { error = "manual recordings have no league mapping to re-resolve" }, statusCode: 400);
+            var res = await resolver.ResolveAsync(eid);
+            if (!res.Ok || res.Primary is null)
+                return Results.Json(new { error = res.Reason ?? "could not resolve a channel" }, statusCode: 409);
+            var p = res.Primary;
+            var changed = p.ChannelId != r.ChannelId;
+            var now = EpochTime.Now();
+            var aborted = false;
+            await gate.WriteAsync(async () =>
+            {
+                // Re-validate inside the gate: the resolved source/channel could have been disabled between the
+                // (un-gated) resolver read and here — don't re-point a recording onto a now-disabled credential.
+                var src = await db.Sources.FindAsync(p.SourceId);
+                var rch = await db.Channels.FindAsync(p.ChannelId);
+                if (src is null || !src.Enabled || rch is null || !rch.Enabled) { aborted = true; return; }
+                r.ChannelId = p.ChannelId; r.SourceId = p.SourceId; r.StreamId = p.StreamId;
+                // Rewrite the failover ladder so a failover can't fall back to the OLD channel (resolver fallbacks are
+                // already restricted to the winner's credential).
+                await db.RecordingFallbacks.Where(f => f.RecordingId == id).ExecuteDeleteAsync();
+                var rank = 2; // rank 1 is the primary (carried on Recording.ChannelId); RecorderService loads fallbacks at Rank >= 2
+                foreach (var fb in res.Fallbacks.Where(f => f.ChannelId != p.ChannelId))
+                    db.RecordingFallbacks.Add(new RecordingFallback { RecordingId = id, Rank = rank++, ChannelId = fb.ChannelId, SourceId = fb.SourceId });
+                r.ResolutionSnapshotJson = System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    resolved_channel_id = p.ChannelId, channel = p.ChannelName, resolver_version = 2, resolved_at = now, reresolved = true,
+                });
+                r.UpdatedUtc = now;
+                await db.SaveChangesAsync();
+            });
+            if (aborted) return Results.Json(new { error = "resolved source/channel became disabled — retry" }, statusCode: 409);
+            return Results.Json(new { ok = true, changed, channelId = p.ChannelId, channel = p.ChannelName, r.SourceId });
         });
 
         // ---- Settings ----
         app.MapGet("/api/settings", async (SettingsService settings) => Results.Json(await settings.GetAllAsync()));
         app.MapPut("/api/settings", async (Dictionary<string, string> values, SettingsService settings) =>
         {
+            // Allowlist keys against the known defaults (no unbounded Settings-table growth / namespace pollution) and
+            // require an int value for int-typed keys (GetIntAsync silently returns 0 on a non-numeric value, which
+            // would disable padding/intervals).
+            foreach (var kv in values)
+            {
+                if (!SettingsService.Defaults.TryGetValue(kv.Key, out var def))
+                    return Results.Json(new { error = $"unknown setting key: {kv.Key}" }, statusCode: 400);
+                if (int.TryParse(def, out _) && !int.TryParse(kv.Value, out _))
+                    return Results.Json(new { error = $"setting '{kv.Key}' must be an integer" }, statusCode: 400);
+            }
             foreach (var kv in values) await settings.SetAsync(kv.Key, kv.Value);
             return Results.Json(await settings.GetAllAsync());
         });

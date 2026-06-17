@@ -251,7 +251,14 @@ public static class PlexEndpoints
     }
 
     private static bool TitleMatch(string? a, string? b)
-        => !string.IsNullOrWhiteSpace(a) && !string.IsNullOrWhiteSpace(b) && Norm(a).Contains(Norm(b)) || (!string.IsNullOrWhiteSpace(b) && Norm(b!).Contains(Norm(a ?? "")));
+    {
+        // Symmetric substring match, both operands required non-empty. (The previous one-liner's && / || precedence
+        // dropped the `a` guard on the second clause, so an empty/punctuation-only DB title matched ANY hint — Norm("")
+        // is a substring of everything — spuriously matching the first season event.)
+        if (string.IsNullOrWhiteSpace(a) || string.IsNullOrWhiteSpace(b)) return false;
+        var na = Norm(a); var nb = Norm(b);
+        return na.Length > 0 && nb.Length > 0 && (na.Contains(nb) || nb.Contains(na));
+    }
 
     private static string Norm(string s) => new string(s.ToLowerInvariant().Where(c => char.IsLetterOrDigit(c) || c == ' ').ToArray()).Trim();
 

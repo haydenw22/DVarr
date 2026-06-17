@@ -87,14 +87,19 @@ public sealed class ResolverService
         if (ch is null) return new();
         var disabled = (await _db.Sources.Where(s => !s.Enabled).Select(s => s.Id).ToListAsync(ct)).ToHashSet();
 
+        // An empty normalised key/name must NOT act as a wildcard (junk channels like "||" or "UK:" normalise to ""),
+        // or an empty-named target would cross-match arbitrary other-source channels and re-home a recording to the
+        // wrong channel. Only match LogicalKey/NameNorm when they're non-empty; StreamId equality always stands.
+        var hasKey = !string.IsNullOrEmpty(ch.LogicalKey);
+        var hasName = !string.IsNullOrEmpty(ch.NameNorm);
         var rows = await _db.Channels
             .Where(c => c.Enabled && c.SourceId != ch.SourceId &&
                         (c.StreamId == ch.StreamId
-                         || (ch.LogicalKey != null && c.LogicalKey == ch.LogicalKey)
-                         || c.NameNorm == ch.NameNorm))
+                         || (hasKey && c.LogicalKey == ch.LogicalKey)
+                         || (hasName && c.NameNorm == ch.NameNorm)))
             .ToListAsync(ct);
 
-        int Quality(Channel c) => c.StreamId == ch.StreamId ? 3 : (ch.LogicalKey != null && c.LogicalKey == ch.LogicalKey ? 2 : 1);
+        int Quality(Channel c) => c.StreamId == ch.StreamId ? 3 : (hasKey && c.LogicalKey == ch.LogicalKey ? 2 : 1);
 
         return rows.Where(c => !disabled.Contains(c.SourceId))
             .GroupBy(c => c.SourceId)

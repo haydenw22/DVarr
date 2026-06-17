@@ -126,6 +126,44 @@ public static class LeagueEndpoints
             return r.Ok ? Results.Json(r) : Results.Json(r, statusCode: 502);
         });
 
+        // Re-resolve ALL this league's scheduled (Pending/Conflict) recordings against the current channel mapping —
+        // one click after you re-pin a league's channel, instead of deleting each recording so the scheduler recreates
+        // it. Updates channel/source/stream + the same-credential fallback ladder in place. Never touches a live capture.
+        app.MapPost("/api/leagues/{id:int}/reresolve", async (int id, DVarrDbContext db, DbWriteGate gate, ResolverService resolver) =>
+        {
+            var evIds = await db.Events.Where(e => e.LeagueId == id).Select(e => e.Id).ToListAsync();
+            if (evIds.Count == 0) return Results.Json(new { ok = true, updated = 0, changed = 0 });
+            var recs = await db.Recordings
+                .Where(r => r.EventId != null && evIds.Contains(r.EventId.Value)
+                            && (r.State == RecordingState.Pending || r.State == RecordingState.Conflict))
+                .ToListAsync();
+            // Resolve (reads) up-front, then apply all mutations in a single write so the gate is held only briefly.
+            var plans = new List<(Data.Entities.Recording R, ResolvedChannel P, List<ResolvedChannel> Fbs)>();
+            foreach (var r in recs)
+            {
+                var res = await resolver.ResolveAsync(r.EventId!.Value);
+                if (res.Ok && res.Primary is not null) plans.Add((r, res.Primary, res.Fallbacks));
+            }
+            var now = EpochTime.Now();
+            var updated = 0; var changed = 0;
+            await gate.WriteAsync(async () =>
+            {
+                foreach (var (r, p, fbs) in plans)
+                {
+                    if (p.ChannelId != r.ChannelId) changed++;
+                    r.ChannelId = p.ChannelId; r.SourceId = p.SourceId; r.StreamId = p.StreamId;
+                    await db.RecordingFallbacks.Where(f => f.RecordingId == r.Id).ExecuteDeleteAsync();
+                    var rank = 2; // rank 1 is the primary (carried on Recording.ChannelId); RecorderService loads fallbacks at Rank >= 2
+                    foreach (var fb in fbs.Where(f => f.ChannelId != p.ChannelId))
+                        db.RecordingFallbacks.Add(new RecordingFallback { RecordingId = r.Id, Rank = rank++, ChannelId = fb.ChannelId, SourceId = fb.SourceId });
+                    r.UpdatedUtc = now;
+                    updated++;
+                }
+                await db.SaveChangesAsync();
+            });
+            return Results.Json(new { ok = true, updated, changed });
+        });
+
         // ---- Events ----
         app.MapGet("/api/events", async (DVarrDbContext db, int? leagueId, long? from, long? to) =>
         {

@@ -35,7 +35,6 @@ public sealed class EventIngestService
         try { events = await _fetcher.FetchAsync(l, ct); }
         catch (Exception ex) { _log.LogError(ex, "[Events] fetch failed for league {Id}", leagueId); return new EventSyncResult(leagueId, false, 0, 0, 0, ex.Message); }
 
-        var existing = await _db.Events.Where(e => e.LeagueId == leagueId).ToDictionaryAsync(e => e.NaturalKey, ct);
         int added = 0, updated = 0;
         var now = EpochTime.Now();
         var isTsdb = l.EventProvider == "thesportsdb";
@@ -57,6 +56,9 @@ public sealed class EventIngestService
 
         await _gate.WriteAsync(async () =>
         {
+            // Snapshot existing events INSIDE the gate (which serializes all writers) so a concurrent same-league sync
+            // can't insert the same NaturalKey between our read and write and roll back the whole batch on the unique index.
+            var existing = await _db.Events.Where(e => e.LeagueId == leagueId).ToDictionaryAsync(e => e.NaturalKey, ct);
             foreach (var ie in events)
             {
                 var nk = $"{l.Id}:{l.EventProvider}:{ie.ExternalId}";

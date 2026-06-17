@@ -54,6 +54,10 @@ public sealed class MediaImportService
             var dest = Path.Combine(stageDir, Path.GetFileName(currentPath));
             if (string.Equals(currentPath, dest, StringComparison.OrdinalIgnoreCase)) return currentPath; // already staged
             Directory.CreateDirectory(stageDir);
+            // Don't clobber a DIFFERENT recording already staged under the same filename (two same-title/same-minute
+            // manual recordings produce identical flat names) — suffix with the unique recording id.
+            if (File.Exists(dest))
+                dest = Path.Combine(stageDir, $"{Path.GetFileNameWithoutExtension(currentPath)} [{recordingId}]{Path.GetExtension(currentPath)}");
             File.Move(currentPath, dest, overwrite: true);
             await _gate.WriteAsync(async () =>
             {
@@ -90,11 +94,13 @@ public sealed class MediaImportService
             var localEv = await _db.Events.FirstOrDefaultAsync(e => e.LeagueId == league.Id && e.TsdbEventId == eventId, ct);
             if (localEv is null && ev.StartUtc is { } su)
             {
-                // No TheSportsDB-id match (id drift / older ingest) → nearest start within 2 h in the same league.
+                // No TheSportsDB-id match (id drift / older ingest) → nearest start in the same league, but ONLY if it
+                // also looks like the SAME fixture (tight window + title match), so a doubleheader or a date-only tie
+                // can't silently link the wrong game. Deterministic Id tiebreak for equidistant candidates.
                 var cands = await _db.Events.Where(e => e.LeagueId == league.Id)
-                    .Select(e => new { e.Id, e.StartUtc }).ToListAsync(ct);
-                var near = cands.OrderBy(e => Math.Abs(e.StartUtc - su)).FirstOrDefault();
-                if (near is not null && Math.Abs(near.StartUtc - su) <= 2 * 3600)
+                    .Select(e => new { e.Id, e.StartUtc, e.Title }).ToListAsync(ct);
+                var near = cands.OrderBy(e => Math.Abs(e.StartUtc - su)).ThenBy(e => e.Id).FirstOrDefault();
+                if (near is not null && Math.Abs(near.StartUtc - su) <= 30 * 60 && TitlesSimilar(near.Title, ev.Title))
                     localEv = await _db.Events.FindAsync(new object?[] { near.Id }, ct);
             }
             if (localEv is not null)
@@ -356,7 +362,7 @@ public sealed class MediaImportService
             _ = Task.Run(async () => { try { while (await p.StandardError.ReadLineAsync() is not null) { } } catch { } });
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(30));
-            await p.WaitForExitAsync(cts.Token);
+            try { await p.WaitForExitAsync(cts.Token); } catch (OperationCanceledException) { try { if (!p.HasExited) p.Kill(true); } catch { } } // never orphan a stuck ffmpeg
             if (!File.Exists(jpg))
             {
                 var psi2 = new ProcessStartInfo(_ffmpeg.Ffmpeg) { RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
@@ -364,7 +370,9 @@ public sealed class MediaImportService
                     psi2.ArgumentList.Add(a);
                 using var p2 = Process.Start(psi2)!;
                 _ = Task.Run(async () => { try { while (await p2.StandardError.ReadLineAsync() is not null) { } } catch { } });
-                await p2.WaitForExitAsync(ct);
+                using var cts2 = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                cts2.CancelAfter(TimeSpan.FromSeconds(30));
+                try { await p2.WaitForExitAsync(cts2.Token); } catch (OperationCanceledException) { try { if (!p2.HasExited) p2.Kill(true); } catch { } }
             }
         }
         catch (Exception ex) { _log.LogWarning(ex, "[Media] thumbnail generation failed for {Mkv}", mkv); }
@@ -381,14 +389,24 @@ public sealed class MediaImportService
             foreach (var a in new[] { "-v", "quiet", "-select_streams", "v:0", "-show_entries", "stream=height", "-of", "default=nk=1:nw=1", path })
                 psi.ArgumentList.Add(a);
             using var p = Process.Start(psi)!;
-            var outp = await p.StandardOutput.ReadToEndAsync();
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(30));
-            await p.WaitForExitAsync(cts.Token);
+            string outp;
+            try { outp = await p.StandardOutput.ReadToEndAsync(cts.Token); await p.WaitForExitAsync(cts.Token); }
+            catch (OperationCanceledException) { try { if (!p.HasExited) p.Kill(true); } catch { } return null; } // bound a hung ffprobe + don't orphan it
             var line = outp.Split('\n', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim();
             return int.TryParse(line, out var h) && h > 0 ? $"HDTV-{h}p" : null;
         }
         catch (Exception ex) { _log.LogDebug(ex, "[Media] resolution probe failed for {Path}", path); return null; }
+    }
+
+    /// <summary>Loose title equivalence (alphanumeric, case-insensitive, substring either way) — guards the manual-import
+    /// nearest-start fallback so it cannot link to a different fixture that merely starts near the same time.</summary>
+    private static bool TitlesSimilar(string? a, string? b)
+    {
+        static string N(string? s) => new string((s ?? "").ToLowerInvariant().Where(char.IsLetterOrDigit).ToArray());
+        var na = N(a); var nb = N(b);
+        return na.Length > 0 && nb.Length > 0 && (na.Contains(nb) || nb.Contains(na));
     }
 
     private static string Sanitize(string s)

@@ -26,6 +26,11 @@ public sealed class TheSportsDbClient
     private readonly ILogger<TheSportsDbClient> _log;
     private static readonly JsonSerializerOptions J = new() { PropertyNameCaseInsensitive = true };
 
+    private int _httpOk;
+    /// <summary>Count of successful (2xx) HTTP responses this instance has received — lets a caller distinguish
+    /// "provider unreachable / all calls failed" from "reachable but no events", so a failed sync doesn't look empty.</summary>
+    public int HttpOkCount => _httpOk;
+
     // key -> (expiresUtc, payload). Static so the cache survives this transient typed client.
     private static readonly ConcurrentDictionary<string, (DateTimeOffset exp, object data)> _cache = new();
 
@@ -52,15 +57,30 @@ public sealed class TheSportsDbClient
 
     private async Task<JsonDocument?> GetAsync(string path, CancellationToken ct)
     {
-        try
+        var url = $"https://www.thesportsdb.com/api/v1/json/{Uri.EscapeDataString(await KeyAsync())}/{path}";
+        for (var attempt = 0; ; attempt++)
         {
-            var url = $"https://www.thesportsdb.com/api/v1/json/{Uri.EscapeDataString(await KeyAsync())}/{path}";
-            using var resp = await _http.GetAsync(url, ct);
-            if (!resp.IsSuccessStatusCode) { _log.LogWarning("[TSDB] {Path} → {Code}", path, (int)resp.StatusCode); return null; }
-            await using var s = await resp.Content.ReadAsStreamAsync(ct);
-            return await JsonDocument.ParseAsync(s, default, ct);
+            try
+            {
+                using var resp = await _http.GetAsync(url, ct);
+                if (resp.StatusCode == System.Net.HttpStatusCode.TooManyRequests && attempt < 3)
+                {
+                    // Free tier is ~30/min. Back off (honouring Retry-After when present) and retry instead of silently
+                    // returning null — a dropped fixture would shift every later episode's chronological ordinal.
+                    var wait = resp.Headers.RetryAfter?.Delta is { } d && d > TimeSpan.Zero ? d : TimeSpan.FromSeconds(2 * (attempt + 1));
+                    if (wait > TimeSpan.FromSeconds(10)) wait = TimeSpan.FromSeconds(10);
+                    _log.LogWarning("[TSDB] {Path} → 429; backing off {Sec}s (attempt {N})", path, wait.TotalSeconds, attempt + 1);
+                    await Task.Delay(wait, ct);
+                    continue;
+                }
+                if (!resp.IsSuccessStatusCode) { _log.LogWarning("[TSDB] {Path} → {Code}", path, (int)resp.StatusCode); return null; }
+                _httpOk++; // a real, reachable 2xx response (used to tell provider-down from empty)
+                await using var s = await resp.Content.ReadAsStreamAsync(ct);
+                return await JsonDocument.ParseAsync(s, default, ct);
+            }
+            catch (OperationCanceledException) { throw; } // shutdown/timeout — propagate, don't mask as "no data"
+            catch (Exception ex) { _log.LogWarning(ex, "[TSDB] {Path} failed", path); return null; }
         }
-        catch (Exception ex) { _log.LogWarning(ex, "[TSDB] {Path} failed", path); return null; }
     }
 
     // ---- Catalogue (cached) ----

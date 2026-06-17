@@ -102,7 +102,9 @@ let liveRefresh = null, liveTimer = null;
 function setLive(fn) { liveRefresh = fn; }
 function connectSSE() {
   const es = new EventSource('/api/stream/recordings');
-  es.onmessage = () => { clearTimeout(liveTimer); liveTimer = setTimeout(() => liveRefresh && liveRefresh(), 150); };
+  // Swallow a stale/failed refresh so a transient API error (or a draw() against a just-navigated page) can't throw an
+  // unhandled rejection and freeze live updates on stale data.
+  es.onmessage = () => { clearTimeout(liveTimer); liveTimer = setTimeout(() => { try { const p = liveRefresh && liveRefresh(); if (p && p.catch) p.catch(() => {}); } catch {} }, 150); };
   es.onerror = () => { es.close(); setTimeout(connectSSE, 3000); };
 }
 
@@ -145,6 +147,7 @@ PAGES.dashboard = {
         api.get('/api/leagues'),
         api.get(`/api/events?from=${now}`),
       ]);
+      if (!Array.isArray(recs) || !Array.isArray(leagues) || !Array.isArray(events)) return; // transient API error — keep the current view, retry next tick
       const live = recs.filter(r => ACTIVE.includes(r.state));
       const scheduled = recs.filter(r => r.state === 'Pending' && r.startUtc <= now + 86400).sort((a, b) => a.startUtc - b.startUtc); // next 24h only
       const upcoming = events.filter(e => e.start <= now + 86400).sort((a, b) => a.start - b.start); // next 24h only
@@ -174,6 +177,7 @@ PAGES.recordings = {
       <div id="recTableWrap"></div>`;
     const draw = async () => {
       const recs = await api.get('/api/recordings');
+      if (!Array.isArray(recs)) return; // transient API error — don't blow away the table on a failed refresh
       const f = $('#recFilter').value;
       const rows = f === 'Recording' ? recs.filter(r => ACTIVE.includes(r.state)) : (f ? recs.filter(r => r.state === f) : recs);
       $('#recCount').textContent = `${rows.length} recording${rows.length === 1 ? '' : 's'}`;
@@ -192,7 +196,7 @@ function recTable(rows, withActions) {
       <td>${esc(r.channel)}</td><td class="muted">${esc(r.source)}</td>
       <td class="mono">${mb(r.bytesWritten)}</td>
       <td class="mono muted">${brisbane(r.startUtc)} – ${brisbane(r.endUtc)}</td>
-      ${withActions ? `<td class="row" style="gap:6px">${r.state === 'Pending' || r.state === 'Conflict' ? `<button class="sm" onclick="startRec(${r.id})" title="Start this recording now (early/manual)">start</button>` : ''}${ACTIVE.includes(r.state) || r.state === 'Pending' || r.state === 'Conflict' ? `<button class="ghost sm" onclick="stopRec(${r.id})">stop</button>` : ''}${r.state === 'Done' && (r.outputPath || '').includes('.unsorted') ? `<button class="sm" onclick="openImportModal(${r.id}, ${r.startUtc}, '${jsq(r.title || '')}')" title="Sort this manual recording into the library">import</button>` : ''}<button class="danger sm" onclick="delRec(${r.id})">delete</button></td>` : ''}
+      ${withActions ? `<td class="row" style="gap:6px">${r.state === 'Pending' || r.state === 'Conflict' ? `<button class="sm" onclick="startRec(${r.id})" title="Start this recording now (early/manual)">start</button><button class="ghost sm" onclick="reresolveRec(${r.id})" title="Re-resolve the channel from the league's current mapping">re-resolve</button>` : ''}${ACTIVE.includes(r.state) || r.state === 'Pending' || r.state === 'Conflict' ? `<button class="ghost sm" onclick="stopRec(${r.id})">stop</button>` : ''}${r.state === 'Done' && (r.outputPath || '').includes('.unsorted') ? `<button class="sm" onclick="openImportModal(${r.id}, ${r.startUtc}, '${jsq(r.title || '')}')" title="Sort this manual recording into the library">import</button>` : ''}<button class="danger sm" onclick="delRec(${r.id})">delete</button></td>` : ''}
     </tr>`).join('')}</tbody></table>`;
 }
 function notesList(notes) {
@@ -397,6 +401,7 @@ PAGES.leagues = {
         <td class="row" style="gap:6px;flex-wrap:nowrap">
           <button class="ghost sm" onclick="openMapModal(${l.id},'${jsq(l.name)}')">Map</button>
           <button class="ghost sm" onclick="syncLeague(${l.id})">Sync</button>
+          <button class="ghost sm" onclick="reresolveLeague(${l.id})" title="Update this league's scheduled recordings to its current channel mapping">Re-resolve</button>
           <button class="ghost sm" onclick="location.hash='#/calendar?league=${l.id}'">Events</button>
           <button class="ghost sm" onclick="openLeagueModal(${l.id})">Edit</button>
           <button class="danger sm" onclick="deleteLeague(${l.id},'${jsq(l.name)}')">Del</button>
@@ -808,6 +813,8 @@ async function submitImport(id) {
 }
 async function startRec(id) { const r = await api.post(`/api/recordings/${id}/start`); if (r.error) toast(r.error, 'err'); else toast(r.started ? 'Starting…' : 'Already running', 'ok'); render(); }
 async function stopRec(id) { const r = await api.post(`/api/recordings/${id}/stop`); toast(r.cancelled ? 'Cancelled' : r.stopping ? 'Stopping…' : 'No change', r.error ? 'err' : 'ok'); render(); }
+async function reresolveRec(id) { const r = await api.post(`/api/recordings/${id}/resolve`); if (r.error) toast(r.error, 'err'); else toast(r.changed ? `Re-resolved → ${r.channel}` : `Already on ${r.channel}`, 'ok'); render(); }
+async function reresolveLeague(id) { const r = await api.post(`/api/leagues/${id}/reresolve`); if (r.error) toast(r.error, 'err'); else toast(`Re-resolved ${r.updated} scheduled recording${r.updated === 1 ? '' : 's'}${r.changed ? ` (${r.changed} changed channel)` : ''}`, 'ok'); render(); }
 async function delRec(id) { if (!confirm('Delete this recording?')) return; const r = await api.del(`/api/recordings/${id}`); if (r.error) return toast(r.error, 'err'); toast('Deleted'); render(); }
 function ingest(id, label) {
   modal(`<h2>Ingest channels — ${esc(label)}</h2>
@@ -930,7 +937,7 @@ async function submitLeague(id) {
   };
   closeModals();
   if (id == null) { const r = await api.post('/api/leagues', body); toast(r.error ? r.error : 'League added', r.error ? 'err' : 'ok'); }
-  else { await api.put('/api/leagues/' + id, body); toast('League saved', 'ok'); }
+  else { const r = await api.put('/api/leagues/' + id, body); toast(r.error ? r.error : 'League saved', r.error ? 'err' : 'ok'); }
   render();
 }
 async function deleteLeague(id, name) { if (!confirm(`Delete league “${name}”? Removes its events & mappings.`)) return; const r = await api.del('/api/leagues/' + id); if (r.error) return toast(r.error, 'err'); toast('League deleted', 'ok'); render(); }
@@ -981,6 +988,7 @@ async function resolvePreview(id) { const r = await api.get('/api/events/' + id 
 // router
 // =========================================================================
 async function render() {
+  const seq = (render._seq = (render._seq || 0) + 1); // navigation generation — a slow page must not paint over a newer one
   closeModals(); // navigating away must tear down any open modal — esp. a live preview holding the stream slot
   const id = (location.hash.replace(/^#\//, '') || 'dashboard').split('?')[0];
   const page = PAGES[id] || PAGES.dashboard;
@@ -990,15 +998,15 @@ async function render() {
   setLive(null);
   const view = $('#view');
   view.innerHTML = '<div class="loading">Loading…</div>';
-  try { await page.render(view); }
-  catch (e) { view.innerHTML = emptyBox('Failed to load this page: ' + e.message); }
+  try { await page.render(view); if (seq !== render._seq) return; } // a newer navigation started while loading — don't clobber it
+  catch (e) { if (seq === render._seq) view.innerHTML = emptyBox('Failed to load this page: ' + e.message); }
 }
 
 window.addEventListener('hashchange', render);
 window.addEventListener('keydown', e => { if (e.key === 'Escape') closeModals(); }); // Esc closes modals + stops preview
 window.render = render; window.openTestModal = openTestModal; window.submitTest = submitTest;
 window.openScheduleModal = openScheduleModal; window.submitSchedule = submitSchedule; window.scheduleFor = scheduleFor; window.scheduleFromGuide = scheduleFromGuide;
-window.openPreview = openPreview; window.stopRec = stopRec; window.startRec = startRec; window.delRec = delRec;
+window.openPreview = openPreview; window.stopRec = stopRec; window.startRec = startRec; window.delRec = delRec; window.reresolveRec = reresolveRec; window.reresolveLeague = reresolveLeague;
 window.openImportModal = openImportModal; window.submitImport = submitImport;
 window.ingest = ingest; window.doIngest = doIngest; window.saveSettings = saveSettings; window.closeModals = closeModals;
 window.syncEpg = syncEpg; window.doSyncEpg = doSyncEpg; window.openSourceModal = openSourceModal; window.submitSource = submitSource; window.deleteSource = deleteSource;

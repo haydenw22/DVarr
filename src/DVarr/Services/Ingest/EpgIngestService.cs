@@ -21,6 +21,10 @@ public sealed record EpgResult(int SourceId, bool Ok, int Programmes, int Channe
 public sealed class EpgIngestService
 {
     private const int BatchSize = 5000;
+    // One lock per source so two concurrent syncs of the SAME source can't race the last-known-good swap (the
+    // maxOldId threshold is read outside the gate). Static because the service is scoped per request; different
+    // sources still sync in parallel.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, SemaphoreSlim> _sourceLocks = new();
 
     private readonly DVarrDbContext _db;
     private readonly XtreamClient _xtream;
@@ -34,6 +38,16 @@ public sealed class EpgIngestService
     }
 
     public async Task<EpgResult> SyncSourceEpgAsync(int sourceId, CancellationToken ct = default)
+    {
+        // Serialize per source: a second concurrent sync of the same source fast-fails rather than racing the swap.
+        var gate = _sourceLocks.GetOrAdd(sourceId, _ => new SemaphoreSlim(1, 1));
+        if (!await gate.WaitAsync(0, ct))
+            return new EpgResult(sourceId, false, 0, 0, false, "an EPG sync is already in progress for this source");
+        try { return await SyncSourceEpgCoreAsync(sourceId, ct); }
+        finally { gate.Release(); }
+    }
+
+    private async Task<EpgResult> SyncSourceEpgCoreAsync(int sourceId, CancellationToken ct = default)
     {
         var s = await _db.Sources.FindAsync(new object?[] { sourceId }, ct);
         if (s is null) return new EpgResult(sourceId, false, 0, 0, false, "source not found");
@@ -85,7 +99,7 @@ public sealed class EpgIngestService
             {
                 if (inProg && !string.IsNullOrEmpty(curCh) && curStart is { } st)
                 {
-                    var stop = curStop ?? st;
+                    var stop = (curStop is { } cs && cs > st) ? cs : st + 3600; // missing/back-dated stop → assume 1h so every row has a forward interval
                     if (stop >= winStart && st <= winEnd)
                     {
                         channels.Add(curCh!);
@@ -154,8 +168,13 @@ public sealed class EpgIngestService
             }
             Complete();             // flush a trailing <programme> whose <title> was the final child read
             await FlushBatchAsync();
-            // Full parse succeeded → swap: drop the OLD guide, leaving only this run's rows.
-            await _gate.WriteAsync(async () => { await _db.Programmes.Where(p => p.SourceId == sourceId && p.Id <= maxOldId).ExecuteDeleteAsync(ct); }, ct);
+            if (!truncated)
+                // Full parse succeeded → swap: drop the OLD guide, leaving only this run's rows.
+                await _gate.WriteAsync(async () => { await _db.Programmes.Where(p => p.SourceId == sourceId && p.Id <= maxOldId).ExecuteDeleteAsync(ct); }, ct);
+            else
+                // Hit the safety cap mid-stream → this run's guide is INCOMPLETE. Keep the last-known-good guide and
+                // discard this run's partial rows, rather than overwriting a complete guide with a truncated one.
+                await _gate.WriteAsync(async () => { await _db.Programmes.Where(p => p.SourceId == sourceId && p.Id > maxOldId).ExecuteDeleteAsync(ct); }, ct);
         }
         catch (Exception ex)
         {
@@ -205,7 +224,10 @@ public sealed class EpgIngestService
             var norm = MatchNorm(c.Name);
             // Skip ambiguous norms (a name shared by >1 EPG channel) — better no guide than the wrong one.
             string? matched = norm.Length > 0 && !ambiguousNames.Contains(norm) && nameIndex.TryGetValue(norm, out var tv) ? tv : null;
-            if (!string.Equals(matched, c.MatchedEpgId, StringComparison.OrdinalIgnoreCase)) changed.Add((c.Id, matched));
+            // Only ADD/CHANGE a positive match; never downgrade an existing match to null on this run. A degraded or
+            // partial EPG (e.g. a stripped <channel> section) would otherwise wipe every previously-matched channel's
+            // guide with no last-known-good protection. A genuinely-gone match is left stale until a healthy resync.
+            if (matched != null && !string.Equals(matched, c.MatchedEpgId, StringComparison.OrdinalIgnoreCase)) changed.Add((c.Id, matched));
         }
 
         for (var i = 0; i < changed.Count; i += 2000)

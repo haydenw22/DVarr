@@ -33,6 +33,7 @@ public sealed class EventFetcher
     {
         if (string.IsNullOrWhiteSpace(l.ExternalLeagueId)) return new();
         var leagueId = l.ExternalLeagueId!;
+        var okBefore = _tsdb.HttpOkCount; // to tell "provider unreachable" from "reachable but no events" at the end
         var byId = new Dictionary<string, IngestedEvent>(StringComparer.Ordinal); // dedupe by stable idEvent; first writer wins
 
         var seasons = new HashSet<string>(StringComparer.OrdinalIgnoreCase); // season strings seen, for gap-fill scoping
@@ -68,6 +69,7 @@ public sealed class EventFetcher
         var nowUtc = DateTimeOffset.FromUnixTimeSeconds(EpochTime.Now()).UtcDateTime.Date;
         var earliest = byId.Values.Count > 0 ? byId.Values.Min(e => e.StartUtc) : (long?)null;
         var startDate = earliest is { } es ? DateTimeOffset.FromUnixTimeSeconds(es).UtcDateTime.Date.AddDays(-1) : nowUtc.AddDays(-45);
+        if (startDate > nowUtc) startDate = nowUtc; // a not-yet-started competition seeds only future fixtures — still sweep now..horizon so the uncapped eventsday pulls them
         var endDate = nowUtc.AddDays(horizon + 1);
         if ((endDate - startDate).TotalDays > 120) startDate = endDate.AddDays(-120); // safety cap on the sweep span
         for (var day = startDate; day <= endDate; day = day.AddDays(1))
@@ -108,6 +110,12 @@ public sealed class EventFetcher
                 try { await Task.Delay(200, ct); } catch (OperationCanceledException) { return byId.Values.ToList(); }
             }
         }
+
+        // If NOTHING succeeded (every call failed / 429-exhausted) and we have no events, the provider is unreachable —
+        // throw so SyncLeagueAsync reports failure and does NOT advance LastEventSyncUtc (which would otherwise suppress
+        // auto-retry for the whole sync interval). A genuinely empty league still returns [] (its calls succeeded).
+        if (byId.Count == 0 && _tsdb.HttpOkCount == okBefore)
+            throw new InvalidOperationException($"TheSportsDB unreachable for league {leagueId} (all calls failed)");
 
         _log.LogInformation("[Events] TheSportsDB league {Id} ({Ext}): {Count} events (season + day-sweep {Start:yyyy-MM-dd}..{End:yyyy-MM-dd} + {Fills} gap-fill lookups)",
             l.Id, leagueId, byId.Count, startDate, endDate, fills);

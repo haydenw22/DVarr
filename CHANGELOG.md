@@ -12,6 +12,26 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.16.0] — 2026-06-17
+A re-Resolve action, plus a large reviewed reliability/correctness pass (29 fixes from a multi-agent audit, each independently verified).
+
+### Added
+- **Re-Resolve** — push a league's *current* channel mapping onto already-scheduled recordings **in place**, without delete-and-recreate. A per-recording button on Pending/Conflict recordings, and a per-league **Re-resolve** button that updates every scheduled recording for that league at once. Updates the channel/source/stream + the same-credential failover ladder; never touches a live capture; skips manual recordings.
+
+### Fixed — reliability (High)
+- **Tuner slot is freed as soon as capture ends**, before the (local-only) finalize — a long finalize no longer pins a login's only stream for up to an hour, so a back-to-back recording on the same credential can arm immediately instead of being missed.
+- **Parked conflicts retime to the live event before arming** — a conflict whose fixture moved on re-sync no longer records the wrong window.
+- **Postponed-then-rescheduled events record again** — a match cancelled by the postponement sweep is revived when it returns to the schedule (was blocked permanently).
+- **No tuner-lease leak** when a cross-login spread fails mid-re-home; **boot reconcile no longer wipes a held slot** (which could let two streams run on one login).
+
+### Fixed — correctness (Medium)
+- EPG sync is **serialized per source** (concurrent syncs could duplicate or wipe a guide) and **keeps the last-known-good guide on truncation**; a degraded sync no longer wipes channel name-matches.
+- TheSportsDB pull now **backs off on HTTP 429** (instead of silently dropping fixtures), **does not advance the sync timer on a failed pull** (retries instead of going stale for 6 h), **handles a not-yet-started competition**, and a **concurrent same-league sync can't lose the batch**.
+- Re-resolve fallbacks write at the correct rank; the planner slot stays in sync after a retime (no same-tick double-book); `reassign` returns a real error instead of a false success; ffmpeg/ffprobe children are killed on timeout; manual-import staging no longer clobbers a same-named file; the UI no longer paints a stale page over a newer one and now surfaces league-edit errors.
+
+### Fixed — hardening (Low)
+- `AsNoTracking` on scheduler read-snapshots; empty channel names no longer wildcard-match in spread; EPG programme stop-times validated; manual-import nearest-match needs a tight window + title match; Plex `TitleMatch` precedence; resolve/reassign re-check enablement under the write gate; `PUT /api/settings` key allowlist + integer validation; `/api/sources` counts moved off the serialization thread; `FfmpegLocator` can't hang startup; live-refresh tolerates transient API errors.
+
 ## [1.15.0] — 2026-06-17
 Correct, tournament-accurate episode numbering, plus a batch of reviewed reliability fixes.
 

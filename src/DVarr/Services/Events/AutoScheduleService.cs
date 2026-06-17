@@ -79,11 +79,11 @@ public sealed class AutoScheduleService : BackgroundService
         }
 
         // 2) Auto-schedule monitored events within each league's horizon, spreading across both logins.
-        var monitoredLeagues = await db.Leagues.Where(l => l.Monitored).ToDictionaryAsync(l => l.Id, ct);
+        var monitoredLeagues = await db.Leagues.AsNoTracking().Where(l => l.Monitored).ToDictionaryAsync(l => l.Id, ct);
         if (monitoredLeagues.Count == 0) return interval;
         var maxLookahead = now + 60L * 86400; // hard ceiling; per-league horizon applied below
 
-        var candidates = await db.Events
+        var candidates = await db.Events.AsNoTracking()
             .Where(e => e.Monitored && monitoredLeagues.Keys.Contains(e.LeagueId)
                         && e.StartUtc > now - 3600 && e.StartUtc < maxLookahead
                         && (e.Status == EventStatus.Scheduled || e.Status == EventStatus.Live || e.Status == EventStatus.Unknown))
@@ -95,8 +95,10 @@ public sealed class AutoScheduleService : BackgroundService
 
         // ---- Credit-aware conflict planning ----
         // Current occupancy: every slot-holding recording reserves [Start-PrePad, End+PostPad] on its credential.
-        var committed = await db.Recordings.Where(r => SlotHolding.Contains(r.State)).ToListAsync(ct);
-        var conflicts = await db.Recordings.Where(r => r.State == RecordingState.Conflict).ToListAsync(ct);
+        // AsNoTracking: these are read-only planning snapshots — every actual mutation re-loads the row fresh inside the
+        // write gate (db.Recordings.FindAsync), so we avoid accumulating a large tracked graph across the 500-event tick.
+        var committed = await db.Recordings.AsNoTracking().Where(r => SlotHolding.Contains(r.State)).ToListAsync(ct);
+        var conflicts = await db.Recordings.AsNoTracking().Where(r => r.State == RecordingState.Conflict).ToListAsync(ct);
 
         // Pending recordings keyed by event, so a re-synced event that MOVED can retime its already-created recording
         // (else it would record at the stale time). Only Pending is safe to retime — never an in-progress capture.
@@ -165,17 +167,46 @@ public sealed class AutoScheduleService : BackgroundService
             conflicts = conflicts.Where(c => !staleSet.Contains(c.Id)).ToList();
         }
 
+        // 1c) Revive events whose postponement cleared. The sweep above cancels a recording when its event goes
+        // Postponed/Cancelled; the Cancelled row then keeps the event in handledEventIds FOREVER, so if the provider
+        // later un-postpones the match it would silently never record again. Reclaim ONLY recordings WE sweep-cancelled
+        // (the FailureReason marker) whose event is active again — a user cancellation stays terminal. Delete the dead
+        // row + drop the event from handledEventIds so 2b re-places it fresh (current time, full resolution + planning).
+        var reviveRows = await (from r in db.Recordings
+                                join e in db.Events on r.EventId equals e.Id
+                                where r.State == RecordingState.Cancelled && r.FailureReason == "event cancelled/postponed"
+                                      && (e.Status == EventStatus.Scheduled || e.Status == EventStatus.Live || e.Status == EventStatus.Unknown)
+                                select new { r.Id, EventId = r.EventId!.Value }).ToListAsync(ct);
+        if (reviveRows.Count > 0)
+        {
+            var reviveIds = reviveRows.Select(x => x.Id).ToList();
+            await _gate.WriteAsync(async () =>
+            {
+                await db.RecordingFallbacks.Where(f => reviveIds.Contains(f.RecordingId)).ExecuteDeleteAsync(ct);
+                await db.Recordings.Where(r => reviveIds.Contains(r.Id) && r.State == RecordingState.Cancelled).ExecuteDeleteAsync(ct);
+            }, ct);
+            foreach (var x in reviveRows) handledEventIds.Remove(x.EventId);
+            _log.LogInformation("[AutoSchedule] revived {N} event(s) whose recording was cancelled by a now-cleared postponement", reviveRows.Count);
+        }
+
         // 2a) Re-evaluate parked conflicts FIRST (they have been waiting): a freed slot promotes one back to Pending.
         foreach (var r in conflicts.OrderBy(r => r.StartUtc))
         {
             try
             {
-                var winEndC = r.EndUtc + r.PostPadS;
-                if (now >= winEndC) { await MarkConflictMissedAsync(db, r.Id, now); continue; } // window passed while parked
                 if (r.EventId is not { } eid) continue; // only event-linked conflicts are auto-replanned
+                // Reconcile to the event's CURRENT time before planning AND before arming. The event may have moved on
+                // re-sync while this recording sat parked (the row keeps the old time); promoting on the stale row time
+                // would arm the capture at the wrong window. Recompute the window from the live event.
+                var ev = await db.Events.FindAsync(new object?[] { eid }, ct);
+                if (ev is null) continue;
+                var cSport = monitoredLeagues.TryGetValue(ev.LeagueId, out var cLeague) ? cLeague.Sport : "";
+                var newEndC = ev.EndUtc ?? ev.StartUtc + await settings.GetEventDurationSecondsAsync(cSport);
+                var winStartC = ev.StartUtc - r.PrePadS;
+                var winEndC = newEndC + r.PostPadS;
+                if (now >= winEndC) { await MarkConflictMissedAsync(db, r.Id, now); continue; } // window passed while parked
 
                 var opts = await planner.OptionsForEventAsync(eid, ct);
-                var winStartC = r.StartUtc - r.PrePadS;
                 var rank = RankOf(r);
                 var decision = planner.Decide(opts, winStartC, winEndC, rank, slots);
                 if (!decision.Placed || decision.Option is not { } opt) continue; // still no room → stays Conflict
@@ -186,6 +217,7 @@ public sealed class AutoScheduleService : BackgroundService
                     var rec = await db.Recordings.FindAsync(r.Id);
                     if (rec is null) return;
                     rec.State = RecordingState.Pending; rec.SourceId = opt.SourceId; rec.ChannelId = opt.ChannelId; rec.StreamId = opt.StreamId;
+                    rec.StartUtc = ev.StartUtc; rec.EndUtc = newEndC; rec.Title = ev.Title; // retime/retitle to the live event so the capture arms on the real window
                     rec.FailureReason = null; rec.UpdatedUtc = now;
                     db.Notifications.Add(new Notification { RecordingId = r.Id, TsUtc = now, Kind = NotificationKind.Conflict, Severity = Severity.Info, ToState = "Pending", Message = $"credential freed → scheduled on '{opt.ChannelName}'" });
                     await db.SaveChangesAsync(ct);
@@ -228,6 +260,11 @@ public sealed class AutoScheduleService : BackgroundService
                                 }
                             }, ct);
                             _log.LogInformation("[AutoSchedule] reconciled recording {Id} to moved event {Eid} '{Title}'", pend.Id, e.Id, e.Title);
+                            // Keep the in-memory planner slot in sync so a later candidate THIS tick is planned against
+                            // the new window — otherwise it compares against the stale slot and can double-book the login.
+                            pend.StartUtc = e.StartUtc; pend.EndUtc = newEnd; pend.Title = e.Title;
+                            slots.RemoveAll(s => s.RecordingId == pend.Id);
+                            slots.Add(new CreditAwarePlanner.Slot(pend.SourceId, e.StartUtc - pend.PrePadS, newEnd + pend.PostPadS, pend.Id, RecordingState.Pending, RankOf(pend)));
                         }
                     }
                     continue;

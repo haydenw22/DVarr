@@ -26,8 +26,14 @@ public sealed class FfmpegLocator
             { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
             using var p = Process.Start(psi);
             if (p is null) return null;
-            var outp = await p.StandardOutput.ReadToEndAsync();
-            await p.WaitForExitAsync();
+            // Drain stderr so a chatty binary can't fill the pipe and deadlock, and bound the wait so a misbehaving
+            // ffmpeg can never hang startup forever (this is awaited before app.Run()). On timeout: kill + give up.
+            _ = Task.Run(async () => { try { while (await p.StandardError.ReadLineAsync() is not null) { } } catch { } });
+            var outTask = p.StandardOutput.ReadToEndAsync();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            try { await p.WaitForExitAsync(cts.Token); }
+            catch (OperationCanceledException) { try { if (!p.HasExited) p.Kill(true); } catch { } return null; }
+            var outp = await outTask;
             return p.ExitCode == 0 ? outp.Split('\n').FirstOrDefault()?.Trim() : null;
         }
         catch { return null; }
