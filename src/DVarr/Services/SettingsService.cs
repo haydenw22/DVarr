@@ -43,6 +43,13 @@ public sealed class SettingsService
         // content_dead_timeout_s routes into the normal relaunch→failover ladder. OFF by default — opt-in after soak.
         ["content_verify_enabled"] = "false",
         ["content_dead_timeout_s"] = "30",
+        // The dead-feed decode runs on the GPU (NVDEC) and samples only a few frames/sec, so it costs almost no CPU
+        // (software-decoding both live feeds was the single biggest CPU draw). content_verify_hwaccel = the ffmpeg
+        // -hwaccel method for that decode ("cuda" = NVDEC on the Nvidia GPU; "" or "none" = software/CPU decode).
+        // content_verify_fps caps how many frames/sec the black/freeze filters sample (1 is ample for a dead-slate
+        // check; 0 = every frame). Both apply only when content_verify_enabled is on; the recording itself stays -c copy.
+        ["content_verify_hwaccel"] = "cuda",
+        ["content_verify_fps"] = "1",
         // Reliability (docs/04). De-overlap trims duplicate seconds the provider re-serves on reconnect so the
         // finished file never "goes back in time"; clean-EOF instant relaunch rides momentary line drops without
         // Recovering churn. Both ON by default; flip to false to fall back to plain concat / treat clean EOF as a fault.

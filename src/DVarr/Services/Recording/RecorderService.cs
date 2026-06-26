@@ -58,8 +58,9 @@ public sealed class RecorderService
         {
         string url, segDir, outputPath;
         long windowEnd;
-        int stall, contentDeadTimeout;
+        int stall, contentDeadTimeout, contentVerifyFps;
         bool nativeRate, contentVerify, cleanEof;
+        string contentVerifyHwaccel;
         TunerLease lease;
         List<(int channelId, int streamId, string url)> fallbacks;
 
@@ -103,14 +104,16 @@ public sealed class RecorderService
                         var fromLabel = src.Label;
                         await _gate.WriteAsync(async () =>
                         {
-                            await db.RecordingFallbacks.Where(f => f.RecordingId == recordingId).ExecuteDeleteAsync();
-                            var rr = await db.Recordings.FindAsync(recordingId);
-                            if (rr is not null)
-                            {
-                                rr.SourceId = eq.SourceId; rr.ChannelId = eq.ChannelId; rr.StreamId = eq.StreamId; rr.UpdatedUtc = EpochTime.Now();
-                                db.Notifications.Add(new Notification { RecordingId = recordingId, TsUtc = EpochTime.Now(), Kind = NotificationKind.FailedOver, Severity = Severity.Info, Message = $"credential '{fromLabel}' busy → recording on '{eqSrc.Label}'" });
-                            }
+                            // SourceId is part of the (Id, SourceId) alternate key, so it can't be changed on the tracked
+                            // entity (EF rejects it) — re-point via RecordingRepoint (deletes fallbacks + bypasses the tracker).
+                            var now = EpochTime.Now();
+                            await RecordingRepoint.ApplyAsync(db, recordingId, eq.SourceId, eq.ChannelId, eq.StreamId, now);
+                            db.Notifications.Add(new Notification { RecordingId = recordingId, TsUtc = now, Kind = NotificationKind.FailedOver, Severity = Severity.Info, Message = $"credential '{fromLabel}' busy → recording on '{eqSrc.Label}'" });
                             await db.SaveChangesAsync();
+                            // ExecuteUpdate bypassed the tracker, so the loaded `rec` is stale (and its alt-key SourceId
+                            // changed in the DB — Reload() would itself throw the "can't modify a key" error). Detach it
+                            // so the FindAsync just below re-queries the fresh row.
+                            db.Entry(rec).State = EntityState.Detached;
                         });
                         var rrec = await db.Recordings.FindAsync(recordingId);
                         var rch = await db.Channels.FindAsync(eq.ChannelId);
@@ -143,6 +146,10 @@ public sealed class RecorderService
                 contentVerify = await settings.GetBoolAsync("content_verify_enabled");
                 contentDeadTimeout = await settings.GetIntAsync("content_dead_timeout_s");
                 if (contentDeadTimeout <= 0) contentDeadTimeout = 30;
+                // The dead-feed decode runs on the GPU (NVDEC) and samples only a few fps, so it costs almost no CPU.
+                // hwaccel "" / "none" → software decode; fps 0 → every frame.
+                contentVerifyHwaccel = (await settings.GetAsync("content_verify_hwaccel"))?.Trim() ?? "";
+                contentVerifyFps = await settings.GetIntAsync("content_verify_fps");
                 // Clean rc=0 EOFs (a momentary line drop) relaunch instantly without Recovering churn; off → treat
                 // them like any other recoverable fault (back-off + failover ladder).
                 cleanEof = await settings.GetBoolAsync("clean_eof_instant_relaunch");
@@ -166,7 +173,7 @@ public sealed class RecorderService
                         : Task.FromResult<(int, int, string)?>(null);
 
                 var sup = new RecorderSupervisor(new RecorderSupervisor.Deps(_scopes, _gate, _ffmpeg, _tuner, _bus, _lf));
-                var task = Task.Run(() => sup.RunAsync(recordingId, url, segDir, outputPath, windowEnd, stall, nativeRate, contentVerify, contentDeadTimeout, cleanEof, src?.UserAgent, lease, next, cts.Token), CancellationToken.None);
+                var task = Task.Run(() => sup.RunAsync(recordingId, url, segDir, outputPath, windowEnd, stall, nativeRate, contentVerify, contentDeadTimeout, contentVerifyHwaccel, contentVerifyFps, cleanEof, src?.UserAgent, lease, next, cts.Token), CancellationToken.None);
                 _active[recordingId] = (task, cts); // swap the reservation placeholder for the running task (same cts)
                 _ = task.ContinueWith(t => { _active.TryRemove(recordingId, out _); cts.Dispose(); }, TaskScheduler.Default);
                 started = true;

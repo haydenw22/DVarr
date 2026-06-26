@@ -12,7 +12,21 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
-## [1.17.0] — 2026-06-17
+## [1.18.0] — 2026-06-26
+Mobile/PWA + a full UI refresh, richer dashboard, and GPU-accelerated dead-feed detection.
+
+### Added
+- **Installable PWA.** DVarr can be added to a phone's home screen and launches standalone (no browser chrome) — a web manifest, icon set (generated from the logo), theme-colour, Apple touch-icon meta, and a service worker that caches the app shell for instant load over the VPN (live `/api/*` data, SSE, and previews are never cached). Ideal for checking on a recording from the couch or away from home.
+- **Dashboard panels.** New **Recently completed** and **Sources** panels, plus an at-a-glance stat row (recording now / scheduled 24h / free slots / database). The Sources panel has one-tap **Refresh EPG** and **Ingest** so you can refresh the guide without leaving the dashboard.
+
+### Changed
+- **Responsive, mobile-first UI refresh.** Every view now reflows instead of "smushing" on a phone or a vertical monitor: the sidebar becomes a hamburger slide-out drawer, the dashboard is a fluid panel grid, the Recordings & Sources tables stack into cards on narrow screens, the guide's channel column narrows, and the calendar/topbar/modals adapt. Plus visible keyboard focus rings, smooth state transitions, larger touch targets, 16px inputs (no iOS zoom), reduced-motion support, and safe-area insets — all keeping the existing dark theme.
+
+### Performance
+- **Dead-feed detection now decodes on the GPU (NVDEC) and samples at 1 fps.** The black/freeze/silence check used to software-decode every frame of every active recording — the single biggest CPU draw (two recordings could peg the box). It now runs on the Nvidia GPU at ~1 fps, dropping that work to near zero while keeping the same detection. Tunable in Settings (`Dead-feed GPU decode`, `Dead-feed sample rate`); the recording itself is unchanged (still lossless `-c copy`).
+
+### Fixed
+- **Re-homing a recording to a different login no longer crashes.** `Recording.SourceId` is part of an alternate key (the structural guard that pins a recording's fallbacks to the same credential), so EF Core refused to change it on a tracked entity — which crashed **boot recovery** when a recording spread to another login, and lurked in the **reassign**, **re-Resolve** (per-recording and per-league), and **conflict-promotion** paths too (all five only failed when the source *actually* changed, which is why it surfaced now). They all re-point the credential through one helper that deletes the dependent fallbacks first, then applies the change with a tracker-bypassing UPDATE — also fixing a fallback-delete ordering bug in the conflict-promotion path. Verified by a standalone test that reproduces the original crash, confirms the fix, and proves the same-credential-fallback invariant still holds.
 Settings page overhaul, per-league durations, a kickoff retry, and Threadfin removal.
 
 ### Added

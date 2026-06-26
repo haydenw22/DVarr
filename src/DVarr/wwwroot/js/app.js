@@ -48,6 +48,8 @@ const bneMonthStart = (y, m) => Math.floor(Date.UTC(y, m, 1) / 1000) - BNE_OFFSE
 const bneParts = epochSec => { const p = {}; new Intl.DateTimeFormat('en-AU', { timeZone: 'Australia/Brisbane', year: 'numeric', month: 'numeric', day: 'numeric' }).formatToParts(new Date(epochSec * 1000)).forEach(x => p[x.type] = x.value); return { y: +p.year, m: +p.month - 1, d: +p.day }; };
 
 const ACTIVE = ['Starting', 'Recording', 'Recovering', 'FailingOver', 'Degraded', 'Stopping', 'Finalizing'];
+// Terminal/finished states for the dashboard "Recently completed" panel (newest first).
+const DASH_TERMINAL = ['Done', 'NeedsAttention', 'Missed', 'Cancelled'];
 
 // ---- icons (feather-style) ----
 const I = {
@@ -97,6 +99,10 @@ function modal(html, width) {
 }
 function closeModals() { stopPreview(); $('#modalRoot').replaceChildren(); }
 
+// ---- mobile drawer nav (sidebar slides in over a scrim below ~820px) ----
+function closeDrawer() { const a = $('.app'); if (a) a.classList.remove('drawer-open'); const h = $('#hamburger'); if (h) h.setAttribute('aria-expanded', 'false'); }
+function toggleDrawer() { const a = $('.app'); if (!a) return; const open = a.classList.toggle('drawer-open'); const h = $('#hamburger'); if (h) h.setAttribute('aria-expanded', open ? 'true' : 'false'); }
+
 // ---- live refresh wiring ----
 let liveRefresh = null, liveTimer = null;
 function setLive(fn) { liveRefresh = fn; }
@@ -142,29 +148,67 @@ PAGES.dashboard = {
   async render(el) {
     const draw = async () => {
       const now = Math.floor(Date.now() / 1000);
-      const [recs, leagues, events] = await Promise.all([
+      const [health, recs, leagues, events, sources] = await Promise.all([
+        api.get('/api/health').catch(() => null),
         api.get('/api/recordings'),
         api.get('/api/leagues'),
         api.get(`/api/events?from=${now}`),
+        api.get('/api/sources').catch(() => []),
       ]);
       if (!Array.isArray(recs) || !Array.isArray(leagues) || !Array.isArray(events)) return; // transient API error — keep the current view, retry next tick
       const live = recs.filter(r => ACTIVE.includes(r.state));
       const scheduled = recs.filter(r => r.state === 'Pending' && r.startUtc <= now + 86400).sort((a, b) => a.startUtc - b.startUtc); // next 24h only
       const upcoming = events.filter(e => e.start <= now + 86400).sort((a, b) => a.start - b.start); // next 24h only
-      // 2×2 grid: row 1 = Recording now | Leagues, row 2 = Scheduled | Next 24h. Grid rows auto-equalise the two
-      // cells' heights, so Scheduled and Next-24h match unless live recordings grow the Recording-now cell.
+      const completed = recs.filter(r => DASH_TERMINAL.includes(r.state)).sort((a, b) => (b.endUtc || b.startUtc) - (a.endUtc || a.startUtc)).slice(0, 6);
+      const srcList = Array.isArray(sources) ? sources : [];
+      const hd = (title, n, cls) => `${esc(title)}${n ? ` <span class="pill ${cls}">${n}</span>` : ''}`;
+      // Responsive panel grid (auto-fit) so it's a single readable column on a phone and 2–3 across on desktop.
       el.innerHTML = `
+        ${statRow(health, live.length, scheduled.length)}
         <div class="dash-grid">
-          <div class="section dash-cell"><h2>Recording now ${live.length ? `<span class="pill s-recording">${live.length}</span>` : ''}</h2>${live.length ? recTable(live, true) : emptyBox('Nothing recording right now.')}</div>
-          <div class="section dash-cell"><h2>Leagues ${leagues.length ? `<span class="pill s-done">${leagues.length}</span>` : ''}</h2>${leagues.length ? leagueChips(leagues) : emptyBox('No leagues yet — add one on the Leagues page.')}</div>
-          <div class="section dash-cell"><h2>Scheduled — next 24h ${scheduled.length ? `<span class="pill s-pending">${scheduled.length}</span>` : ''}</h2>${scheduled.length ? recTable(scheduled, true) : emptyBox('Nothing scheduled in the next 24 hours.')}</div>
-          <div class="section dash-cell"><h2>Next 24 hours ${upcoming.length ? `<span class="pill s-done">${upcoming.length}</span>` : ''}</h2>${upcoming.length ? upcomingEvents(upcoming, leagues) : emptyBox('No monitored events in the next 24 hours.')}</div>
+          <div class="section dash-cell"><h2>${hd('Recording now', live.length, 's-recording')}</h2>${live.length ? recTable(live, true) : emptyBox('Nothing recording right now.')}</div>
+          <div class="section dash-cell"><h2>${hd('Scheduled — next 24h', scheduled.length, 's-pending')}</h2>${scheduled.length ? recTable(scheduled, true) : emptyBox('Nothing scheduled in the next 24 hours.')}</div>
+          <div class="section dash-cell"><h2>${hd('Recently completed', completed.length, 's-done')}</h2>${completed.length ? completedTable(completed) : emptyBox('No finished recordings yet.')}</div>
+          <div class="section dash-cell"><h2>${hd('Sources', srcList.length, 's-done')}</h2>${srcList.length ? sourcesPanel(srcList) : emptyBox('No sources yet — add one on the Sources page.')}</div>
+          <div class="section dash-cell"><h2>${hd('Next 24 hours', upcoming.length, 's-done')}</h2>${upcoming.length ? upcomingEvents(upcoming, leagues) : emptyBox('No monitored events in the next 24 hours.')}</div>
+          <div class="section dash-cell"><h2>${hd('Leagues', leagues.length, 's-done')}</h2>${leagues.length ? leagueChips(leagues) : emptyBox('No leagues yet — add one on the Leagues page.')}</div>
         </div>`;
     };
     await draw();
     setLive(draw);
   },
 };
+// At-a-glance counters across the top of the dashboard (reuses the .cards/.stat component).
+function statRow(h, liveN, schedN) {
+  const card = (label, val) => `<div class="card stat-card"><h3>${esc(label)}</h3><div class="stat">${val}</div></div>`;
+  const slots = h && h.sources ? `${h.sources.free_credentials}<small> / ${h.sources.total}</small>` : '—';
+  const db = h && h.db ? (h.db.ok ? '<span style="color:var(--ok)">OK</span>' : '<span style="color:var(--crit)">down</span>') : '—';
+  return `<div class="cards stat-row">
+    ${card('Recording now', liveN)}
+    ${card('Scheduled · 24h', schedN)}
+    ${card('Free slots', slots)}
+    ${card('Database', db)}</div>`;
+}
+// Recently-finished recordings (Done/Missed/NeedsAttention/Cancelled) — tap a row to jump to the Recordings page.
+function completedTable(rows) {
+  return `<table><tbody>${rows.map(r => `
+    <tr class="clickrow" onclick="location.hash='#/recordings'">
+      <td>${esc(r.title)}<div class="muted" style="font-size:11px">${brisbane(r.endUtc || r.startUtc)}</div></td>
+      <td class="mono muted" style="width:74px;text-align:right">${mb(r.bytesWritten)}</td>
+      <td style="width:108px"><span class="pill ${sc(r.state)}">${r.state}</span></td>
+    </tr>`).join('')}</tbody></table>`;
+}
+// Available sources with one-tap EPG refresh + ingest, right on the dashboard.
+function sourcesPanel(sources) {
+  return `<table><tbody>${sources.map(x => `
+    <tr>
+      <td><b>${esc(x.label)}</b><div class="muted" style="font-size:11px">${x.channels} ch · ${x.programmes || 0} epg · <span style="color:${x.slotFree ? 'var(--ok)' : 'var(--warn)'}">${x.slotFree ? 'slot free' : 'slot busy'}</span></div></td>
+      <td style="width:152px"><div class="row" style="gap:6px;flex-wrap:nowrap;justify-content:flex-end">
+        <button class="ghost sm" onclick="syncEpg(${x.id},'${jsq(x.label)}')" title="Refresh this source's EPG">${I.refresh} EPG</button>
+        <button class="ghost sm" onclick="ingest(${x.id},'${jsq(x.label)}')" title="Re-ingest this source's channels">Ingest</button>
+      </div></td>
+    </tr>`).join('')}</tbody></table>`;
+}
 
 // ---- Recordings ----
 PAGES.recordings = {
@@ -190,13 +234,13 @@ PAGES.recordings = {
 };
 
 function recTable(rows, withActions) {
-  return `<table><thead><tr><th>Title</th><th>State</th><th>Channel</th><th>Source</th><th>Size</th><th>Window (Brisbane)</th>${withActions ? '<th></th>' : ''}</tr></thead><tbody>${rows.map(r => `
-    <tr><td>${esc(r.title)}</td>
-      <td><span class="pill ${sc(r.state)}">${r.state}</span>${r.attemptCount ? ` <span class="muted" title="relaunch/failover attempts">↻${r.attemptCount}</span>` : ''}</td>
-      <td>${esc(r.channel)}</td><td class="muted">${esc(r.source)}</td>
-      <td class="mono">${mb(r.bytesWritten)}</td>
-      <td class="mono muted">${brisbane(r.startUtc)} – ${brisbane(r.endUtc)}</td>
-      ${withActions ? `<td class="row" style="gap:6px">${r.state === 'Pending' || r.state === 'Conflict' ? `<button class="sm" onclick="startRec(${r.id})" title="Start this recording now (early/manual)">start</button><button class="ghost sm" onclick="reresolveRec(${r.id})" title="Re-resolve the channel from the league's current mapping">re-resolve</button>` : ''}${ACTIVE.includes(r.state) || r.state === 'Pending' || r.state === 'Conflict' ? `<button class="ghost sm" onclick="stopRec(${r.id})">stop</button>` : ''}${r.state === 'Done' && (r.outputPath || '').includes('.unsorted') ? `<button class="sm" onclick="openImportModal(${r.id}, ${r.startUtc}, '${jsq(r.title || '')}')" title="Sort this manual recording into the library">import</button>` : ''}<button class="danger sm" onclick="delRec(${r.id})">delete</button></td>` : ''}
+  return `<table class="rtable"><thead><tr><th>Title</th><th>State</th><th>Channel</th><th>Source</th><th>Size</th><th>Window (Brisbane)</th>${withActions ? '<th></th>' : ''}</tr></thead><tbody>${rows.map(r => `
+    <tr><td data-label="Title">${esc(r.title)}</td>
+      <td data-label="State"><span class="pill ${sc(r.state)}">${r.state}</span>${r.attemptCount ? ` <span class="muted" title="relaunch/failover attempts">↻${r.attemptCount}</span>` : ''}</td>
+      <td data-label="Channel">${esc(r.channel)}</td><td data-label="Source" class="muted">${esc(r.source)}</td>
+      <td data-label="Size" class="mono">${mb(r.bytesWritten)}</td>
+      <td data-label="Window" class="mono muted">${brisbane(r.startUtc)} – ${brisbane(r.endUtc)}</td>
+      ${withActions ? `<td data-label="" class="row acts" style="gap:6px">${r.state === 'Pending' || r.state === 'Conflict' ? `<button class="sm" onclick="startRec(${r.id})" title="Start this recording now (early/manual)">start</button><button class="ghost sm" onclick="reresolveRec(${r.id})" title="Re-resolve the channel from the league's current mapping">re-resolve</button>` : ''}${ACTIVE.includes(r.state) || r.state === 'Pending' || r.state === 'Conflict' ? `<button class="ghost sm" onclick="stopRec(${r.id})">stop</button>` : ''}${r.state === 'Done' && (r.outputPath || '').includes('.unsorted') ? `<button class="sm" onclick="openImportModal(${r.id}, ${r.startUtc}, '${jsq(r.title || '')}')" title="Sort this manual recording into the library">import</button>` : ''}<button class="danger sm" onclick="delRec(${r.id})">delete</button></td>` : ''}
     </tr>`).join('')}</tbody></table>`;
 }
 function notesList(notes) {
@@ -264,7 +308,10 @@ PAGES.channels = {
 };
 
 // ---- Guide (timeline EPG) ----
-const GUIDE_PX_PER_HOUR = 200, GUIDE_CH_COL = 250;
+const GUIDE_PX_PER_HOUR = 200;
+// Channel-name column: narrower on phones so the timeline isn't pushed off-screen. The CSS (.g-corner/.g-ch) reads
+// --gch, which renderGuide sets inline on .guide-inner from this same value, so the now-line offset stays aligned.
+const guideChCol = () => (window.innerWidth <= 640 ? 132 : 250);
 PAGES.guide = {
   title: 'Guide',
   async render(el) {
@@ -318,6 +365,7 @@ PAGES.guide = {
 
 function renderGuide(wrap, g) {
   if (!g.channels || !g.channels.length) { wrap.innerHTML = emptyBox('No channels/EPG for this view. Ingest channels and sync this source’s EPG (Sources page).'); return; }
+  const chCol = guideChCol();
   window._guideChans = {}; g.channels.forEach(c => window._guideChans[c.channelId] = c);
   const winStart = g.windowStart, winEnd = g.windowEnd, now = g.now;
   const totalH = (winEnd - winStart) / 3600;
@@ -346,10 +394,10 @@ function renderGuide(wrap, g) {
     return `<div class="g-row"><div class="g-ch" title="Watch ${esc(c.name)}" onclick="openPreview(${c.channelId},'${jsq(c.name)}')">${I.play}<span>${esc(c.name)}</span></div><div class="g-track" style="width:${trackW}px">${body}</div></div>`;
   }).join('');
 
-  wrap.innerHTML = `<div class="guide-scroll"><div class="guide-inner" style="width:${GUIDE_CH_COL + trackW}px">
+  wrap.innerHTML = `<div class="guide-scroll"><div class="guide-inner" style="--gch:${chCol}px;width:${chCol + trackW}px">
     <div class="g-head"><div class="g-corner">${new Date(winStart * 1000).toLocaleDateString('en-AU', { timeZone: 'Australia/Brisbane', weekday: 'short', day: '2-digit', month: 'short' })}</div><div class="g-hours" style="width:${trackW}px">${ticks}</div></div>
     ${rows}
-    ${(now >= winStart && now <= winEnd) ? `<div class="g-now" style="left:${GUIDE_CH_COL + xOf(now)}px"></div>` : ''}
+    ${(now >= winStart && now <= winEnd) ? `<div class="g-now" style="left:${chCol + xOf(now)}px"></div>` : ''}
   </div></div>`;
 
   wrap.querySelectorAll('.g-prog').forEach(b => b.addEventListener('click', () => {
@@ -370,12 +418,12 @@ PAGES.sources = {
     const s = await api.get('/api/sources');
     window._sources = s;
     el.innerHTML = `<div class="note warn">⚠ Your provider allows <b>one stream per login</b>. <b>Ingest</b>, <b>Sync EPG</b> and <b>Live preview</b> use that login's single slot — don't run them while recording on the same source.</div>
-      <div class="section">${s.length ? `<table><thead><tr><th>Label</th><th>Type</th><th>Host</th><th>User</th><th>Slot</th><th>Channels</th><th>EPG</th><th></th></tr></thead><tbody>${s.map(x => `
-        <tr><td><b>${esc(x.label)}</b></td><td class="muted">${esc(x.type)}</td><td class="mono muted">${esc(x.host)}${x.port ? ':' + x.port : ''}</td><td class="mono">${esc(x.username)}</td>
-        <td><span class="tag ${x.slotFree ? 'ok' : 'busy'}">${x.slotFree ? 'free' : 'busy'}</span></td>
-        <td class="mono">${x.channels}</td>
-        <td class="mono muted">${x.programmes || 0}${x.epgOverride ? ' <span class="tag" title="external EPG override active">ext</span>' : ''}</td>
-        <td class="row" style="gap:6px;flex-wrap:nowrap">
+      <div class="section">${s.length ? `<table class="rtable"><thead><tr><th>Label</th><th>Type</th><th>Host</th><th>User</th><th>Slot</th><th>Channels</th><th>EPG</th><th></th></tr></thead><tbody>${s.map(x => `
+        <tr><td data-label="Label"><b>${esc(x.label)}</b></td><td data-label="Type" class="muted">${esc(x.type)}</td><td data-label="Host" class="mono muted">${esc(x.host)}${x.port ? ':' + x.port : ''}</td><td data-label="User" class="mono">${esc(x.username)}</td>
+        <td data-label="Slot"><span class="tag ${x.slotFree ? 'ok' : 'busy'}">${x.slotFree ? 'free' : 'busy'}</span></td>
+        <td data-label="Channels" class="mono">${x.channels}</td>
+        <td data-label="EPG" class="mono muted">${x.programmes || 0}${x.epgOverride ? ' <span class="tag" title="external EPG override active">ext</span>' : ''}</td>
+        <td data-label="" class="row acts" style="gap:6px;flex-wrap:wrap">
           <button class="ghost sm" onclick="ingest(${x.id},'${jsq(x.label)}')">Ingest</button>
           <button class="ghost sm" onclick="syncEpg(${x.id},'${jsq(x.label)}')">EPG</button>
           <button class="ghost sm" onclick="openSourceModal(${x.id})">Edit</button>
@@ -572,6 +620,8 @@ const SETTINGS_META = {
   content_verify_enabled: { g: 'Reliability', t: 'Dead-feed detection', h: 'Watch for a black / frozen / silent slate and fail over when the feed is dead. Opt-in.', ty: 'bool' },
   content_probe_interval_s: { g: 'Reliability', t: 'Dead-feed check interval (seconds)', h: 'How often to check for a dead feed when detection is on.', ty: 'int' },
   content_dead_timeout_s: { g: 'Reliability', t: 'Dead-feed timeout (seconds)', h: 'Seconds of dead feed before failing over.', ty: 'int' },
+  content_verify_hwaccel: { g: 'Reliability', t: 'Dead-feed GPU decode', h: 'Decode the dead-feed check on the GPU (“cuda” = Nvidia NVDEC). Blank or “none” = CPU. Keeps detection near-free.', ty: 'text' },
+  content_verify_fps: { g: 'Reliability', t: 'Dead-feed sample rate (fps)', h: 'Frames/second the black & freeze check samples — 1 is ample; 0 = every frame (much higher CPU/GPU).', ty: 'int' },
   finalize_deoverlap_enabled: { g: 'Reliability', t: 'De-overlap finished files', h: 'Trim duplicate seconds the provider re-serves on reconnect so playback never jumps backwards.', ty: 'bool' },
   clean_eof_instant_relaunch: { g: 'Reliability', t: 'Instant relaunch on clean drop', h: 'Ride momentary line drops by relaunching immediately on a clean stream close (no “Recovering” churn).', ty: 'bool' },
   tick_interval_s: { g: 'Scheduling', t: 'Scheduler tick (seconds)', h: 'How often DVarr checks for due recordings.', ty: 'int' },
@@ -1046,6 +1096,7 @@ async function resolvePreview(id) { const r = await api.get('/api/events/' + id 
 async function render() {
   const seq = (render._seq = (render._seq || 0) + 1); // navigation generation — a slow page must not paint over a newer one
   closeModals(); // navigating away must tear down any open modal — esp. a live preview holding the stream slot
+  closeDrawer(); // picking a destination closes the mobile drawer
   const id = (location.hash.replace(/^#\//, '') || 'dashboard').split('?')[0];
   const page = PAGES[id] || PAGES.dashboard;
   document.querySelectorAll('.nav-item').forEach(a => a.classList.toggle('active', a.dataset.route === id));
@@ -1071,8 +1122,16 @@ window.openMapModal = openMapModal; window.submitMap = submitMap; window.deleteM
 window.openEventModal = openEventModal; window.submitEvent = submitEvent; window.monitorEvent = monitorEvent; window.resolvePreview = resolvePreview; window.openCalEvent = openCalEvent;
 
 buildNav();
+// Mobile drawer wiring (hamburger toggles, scrim or a nav choice closes it).
+(function wireDrawer() {
+  const h = $('#hamburger'); if (h) h.addEventListener('click', toggleDrawer);
+  const sc = $('#scrim'); if (sc) sc.addEventListener('click', closeDrawer);
+  const menu = $('#menu'); if (menu) menu.addEventListener('click', e => { if (e.target.closest('.nav-item')) closeDrawer(); });
+})();
 if (!location.hash) location.hash = '#/dashboard';
 render();
 pollHealth();
 setInterval(pollHealth, 5000);
 connectSSE();
+// Register the service worker so the app shell loads instantly (and works offline) once installed to the home screen.
+if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));

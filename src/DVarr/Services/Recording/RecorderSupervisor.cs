@@ -65,6 +65,8 @@ public sealed class RecorderSupervisor
         bool nativeRate,
         bool contentVerify,
         int contentDeadTimeoutS,
+        string? contentVerifyHwaccel,
+        int contentVerifyFps,
         bool cleanEofInstantRelaunch,
         string? userAgent,
         TunerLease lease,
@@ -85,7 +87,7 @@ public sealed class RecorderSupervisor
             {
                 try
                 {
-                    var exit = await CaptureUntilStopOrStallAsync(recordingId, url, segDir, windowEndUtc, stallTimeoutS, nativeRate, contentVerify, contentDeadTimeoutS, userAgent, lease, stopToken);
+                    var exit = await CaptureUntilStopOrStallAsync(recordingId, url, segDir, windowEndUtc, stallTimeoutS, nativeRate, contentVerify, contentDeadTimeoutS, contentVerifyHwaccel, contentVerifyFps, userAgent, lease, stopToken);
 
                     // Normal end of window or explicit stop → leave the capture loop and finalize.
                     if (stopToken.IsCancellationRequested || EpochTime.Now() >= windowEndUtc)
@@ -250,7 +252,8 @@ public sealed class RecorderSupervisor
     /// <summary>Launch one ffmpeg, watch output growth, return a typed reason when it exits or stalls.</summary>
     private async Task<CaptureExit> CaptureUntilStopOrStallAsync(
         int recordingId, string url, string segDir, long windowEndUtc, int stallTimeoutS, bool nativeRate,
-        bool contentVerify, int contentDeadTimeoutS, string? userAgent, TunerLease lease, CancellationToken stopToken)
+        bool contentVerify, int contentDeadTimeoutS, string? contentVerifyHwaccel, int contentVerifyFps,
+        string? userAgent, TunerLease lease, CancellationToken stopToken)
     {
         var pattern = Path.Combine(segDir, "seg-%Y%m%d-%H%M%S.ts");
         var psi = new ProcessStartInfo(_d.Ffmpeg.Ffmpeg)
@@ -277,6 +280,12 @@ public sealed class RecorderSupervisor
         // EOF; reconnect_at_eof would then loop forever retrying the end of file (it never "comes back"), so the
         // segmenter writes nothing. Live provider streams never intentionally EOF, so they keep it to ride out blips.
         if (!nativeRate) args.AddRange(new[] { "-reconnect_at_eof", "1" });
+        // Decode the content-verify pass on the GPU (NVDEC) when enabled — an INPUT option, so it applies to the
+        // single shared decode that feeds the black/freeze filters. The -c copy recording output never decodes, so
+        // it's untouched. Skipped when content-verify is off (nothing decodes) or hwaccel is none/software.
+        var cvHw = (contentVerifyHwaccel ?? "").Trim();
+        if (contentVerify && cvHw.Length > 0 && !cvHw.Equals("none", StringComparison.OrdinalIgnoreCase))
+            args.AddRange(new[] { "-hwaccel", cvHw });
         args.AddRange(new[]
         {
             // +genpts ONLY (fill MISSING timestamps). We DROPPED +igndts — it told ffmpeg to trust a corrupt
@@ -318,10 +327,15 @@ public sealed class RecorderSupervisor
         // continuous live content (only a genuine static/black/frozen slate trips it).
         if (contentVerify)
         {
+            // fps=N (when >0) caps the black/freeze sample rate, so the GPU only hands ~N decoded frames/sec to the
+            // CPU filters — a dead slate is just as detectable at 1fps, and this is what makes the pass near-free.
+            // Audio silencedetect stays full-rate (audio decode is trivial). The d=2 thresholds still fire after ~2s.
+            var vf = (contentVerifyFps > 0 ? $"fps={contentVerifyFps}," : "")
+                   + "blackdetect=d=2:pic_th=0.98,freezedetect=n=0.001:d=2";
             args.AddRange(new[]
             {
                 "-map", "0:v:0", "-map", "0:a:0?",
-                "-vf", "blackdetect=d=2:pic_th=0.98,freezedetect=n=0.001:d=2",
+                "-vf", vf,
                 "-af", "silencedetect=n=-50dB:d=2",
                 "-f", "null", "-",
             });

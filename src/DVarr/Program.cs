@@ -105,7 +105,11 @@ using (var scope = app.Services.CreateScope())
 }
 
 app.UseDefaultFiles();
-app.UseStaticFiles();
+// .webmanifest isn't in the default extension→MIME map, so without this the PWA manifest would be skipped (404 →
+// SPA fallback) instead of served. Register it (other shell assets — .js/.css/.png — are already known types).
+var contentTypes = new Microsoft.AspNetCore.StaticFiles.FileExtensionContentTypeProvider();
+contentTypes.Mappings[".webmanifest"] = "application/manifest+json";
+app.UseStaticFiles(new StaticFileOptions { ContentTypeProvider = contentTypes });
 
 app.MapHealthEndpoints();
 app.MapDVarrApi();

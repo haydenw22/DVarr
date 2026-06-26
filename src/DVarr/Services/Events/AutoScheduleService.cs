@@ -216,11 +216,18 @@ public sealed class AutoScheduleService : BackgroundService
                     if (decision.PreemptRecordingId is { } vid) await PreemptAsync(vid, $"preempted by higher-priority recording #{r.Id}");
                     var rec = await db.Recordings.FindAsync(r.Id);
                     if (rec is null) return;
-                    rec.State = RecordingState.Pending; rec.SourceId = opt.SourceId; rec.ChannelId = opt.ChannelId; rec.StreamId = opt.StreamId;
+                    // SourceId is part of the (Id, SourceId) alternate key — re-point via RecordingRepoint (delete
+                    // fallbacks + tracker-bypassing UPDATE of source/channel/stream). Mutating the tracked entity here
+                    // would throw "part of a key cannot be modified" when a parked conflict is promoted to a DIFFERENT
+                    // credential, and the old flow also deleted fallbacks AFTER persisting the SourceId change (wrong FK
+                    // order). The fields below are non-key; WriteFallbacksAsync re-adds the new same-credential ladder.
+                    await RecordingRepoint.ApplyAsync(db, r.Id, opt.SourceId, opt.ChannelId, opt.StreamId, now);
+                    rec.State = RecordingState.Pending;
                     rec.StartUtc = ev.StartUtc; rec.EndUtc = newEndC; rec.Title = ev.Title; // retime/retitle to the live event so the capture arms on the real window
                     rec.FailureReason = null; rec.UpdatedUtc = now;
                     db.Notifications.Add(new Notification { RecordingId = r.Id, TsUtc = now, Kind = NotificationKind.Conflict, Severity = Severity.Info, ToState = "Pending", Message = $"credential freed → scheduled on '{opt.ChannelName}'" });
-                    await db.SaveChangesAsync(ct);
+                    // The helper already committed the new SourceId, so the new fallbacks' (RecordingId, SourceId) FK is
+                    // satisfied; one SaveChanges now persists the non-key fields + the new ladder + the notification.
                     await WriteFallbacksAsync(r.Id, opt.SourceId, opt.Fallbacks);
                     await db.SaveChangesAsync(ct);
                 }, ct);

@@ -494,6 +494,7 @@ public static class ApiEndpoints
                     return Results.Json(new { error = "that login has no equivalent channel for this recording" }, statusCode: 409);
             }
             var aborted = false;
+            var placed = false;
             await gate.WriteAsync(async () =>
             {
                 // Re-validate inside the gate: the chosen login could have been disabled between EquivalentChannelsAsync
@@ -504,11 +505,11 @@ public static class ApiEndpoints
                     if (es is null || !es.Enabled) { aborted = true; return; }
                 }
                 if (req.Priority is not null) r.Priority = ParsePriority(req.Priority);
-                var placed = false;
                 if (equiv is not null)
                 {
-                    r.SourceId = equiv.SourceId; r.ChannelId = equiv.ChannelId; r.StreamId = equiv.StreamId;
-                    await db.RecordingFallbacks.Where(f => f.RecordingId == id).ExecuteDeleteAsync();
+                    // SourceId is part of the (Id, SourceId) alternate key — re-point via RecordingRepoint (it can't be
+                    // changed on the tracked entity). Drops the auto-fallbacks too (a credential change invalidates them).
+                    await RecordingRepoint.ApplyAsync(db, id, equiv.SourceId, equiv.ChannelId, equiv.StreamId, now);
                     placed = true;
                 }
                 // Only unpark a Conflict to Pending on an EXPLICIT placement (the user picked a specific login). A
@@ -520,7 +521,9 @@ public static class ApiEndpoints
                 await db.SaveChangesAsync();
             });
             if (aborted) return Results.Json(new { error = "that login became disabled — retry" }, statusCode: 409);
-            return Results.Json(new { ok = true, state = r.State.ToString(), r.SourceId, r.ChannelId });
+            // `r` is the tracked entity; RecordingRepoint changed SourceId/ChannelId via a tracker-bypassing UPDATE,
+            // so report the new values explicitly (the tracked copy is stale for those fields).
+            return Results.Json(new { ok = true, state = r.State.ToString(), SourceId = placed ? equiv!.SourceId : r.SourceId, ChannelId = placed ? equiv!.ChannelId : r.ChannelId });
         });
 
         // Re-resolve a scheduled recording's channel against the league's CURRENT mapping (e.g. after you re-pin the
@@ -548,10 +551,10 @@ public static class ApiEndpoints
                 var src = await db.Sources.FindAsync(p.SourceId);
                 var rch = await db.Channels.FindAsync(p.ChannelId);
                 if (src is null || !src.Enabled || rch is null || !rch.Enabled) { aborted = true; return; }
-                r.ChannelId = p.ChannelId; r.SourceId = p.SourceId; r.StreamId = p.StreamId;
-                // Rewrite the failover ladder so a failover can't fall back to the OLD channel (resolver fallbacks are
-                // already restricted to the winner's credential).
-                await db.RecordingFallbacks.Where(f => f.RecordingId == id).ExecuteDeleteAsync();
+                // SourceId is part of the (Id, SourceId) alternate key — re-point via RecordingRepoint (deletes the old
+                // fallbacks + applies a tracker-bypassing UPDATE), then rewrite the failover ladder so a failover can't
+                // fall back to the OLD channel (resolver fallbacks are already restricted to the winner's credential).
+                await RecordingRepoint.ApplyAsync(db, id, p.SourceId, p.ChannelId, p.StreamId, now);
                 var rank = 2; // rank 1 is the primary (carried on Recording.ChannelId); RecorderService loads fallbacks at Rank >= 2
                 foreach (var fb in res.Fallbacks.Where(f => f.ChannelId != p.ChannelId))
                     db.RecordingFallbacks.Add(new RecordingFallback { RecordingId = id, Rank = rank++, ChannelId = fb.ChannelId, SourceId = fb.SourceId });
@@ -559,11 +562,11 @@ public static class ApiEndpoints
                 {
                     resolved_channel_id = p.ChannelId, channel = p.ChannelName, resolver_version = 2, resolved_at = now, reresolved = true,
                 });
-                r.UpdatedUtc = now;
                 await db.SaveChangesAsync();
             });
             if (aborted) return Results.Json(new { error = "resolved source/channel became disabled — retry" }, statusCode: 409);
-            return Results.Json(new { ok = true, changed, channelId = p.ChannelId, channel = p.ChannelName, r.SourceId });
+            // r.SourceId on the tracked entity is stale (RecordingRepoint updated it via a tracker-bypassing UPDATE).
+            return Results.Json(new { ok = true, changed, channelId = p.ChannelId, channel = p.ChannelName, SourceId = p.SourceId });
         });
 
         // ---- Settings ----

@@ -153,12 +153,12 @@ public static class LeagueEndpoints
                 foreach (var (r, p, fbs) in plans)
                 {
                     if (p.ChannelId != r.ChannelId) changed++;
-                    r.ChannelId = p.ChannelId; r.SourceId = p.SourceId; r.StreamId = p.StreamId;
-                    await db.RecordingFallbacks.Where(f => f.RecordingId == r.Id).ExecuteDeleteAsync();
+                    // SourceId is part of the (Id, SourceId) alternate key — re-point via RecordingRepoint (delete old
+                    // fallbacks + tracker-bypassing UPDATE), then rebuild this recording's same-credential ladder.
+                    await RecordingRepoint.ApplyAsync(db, r.Id, p.SourceId, p.ChannelId, p.StreamId, now);
                     var rank = 2; // rank 1 is the primary (carried on Recording.ChannelId); RecorderService loads fallbacks at Rank >= 2
                     foreach (var fb in fbs.Where(f => f.ChannelId != p.ChannelId))
                         db.RecordingFallbacks.Add(new RecordingFallback { RecordingId = r.Id, Rank = rank++, ChannelId = fb.ChannelId, SourceId = fb.SourceId });
-                    r.UpdatedUtc = now;
                     updated++;
                 }
                 await db.SaveChangesAsync();
