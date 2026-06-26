@@ -189,9 +189,23 @@ label.field { display:flex; flex-direction:column; gap:5px; font-size:12px; colo
 .lg-dot { display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:7px; vertical-align:middle; }
 
 /* ---- dashboard at-a-glance ---- */
-/* Responsive panel grid: 1 column on a phone, 2–3 across as width allows (no more fixed 2×2 that cramps). */
-.dash-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:18px; align-items:start; }
+/* 6 compact panels — column counts that divide 6 evenly (1/2/3/6) so rows are always balanced. minmax(0,1fr)
+   lets a track shrink instead of letting wide content blow the grid out / spill into a neighbouring panel. */
+.dash-grid { display:grid; gap:18px; align-items:start; grid-template-columns:minmax(0,1fr); }
+@media (min-width:760px)  { .dash-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+@media (min-width:1300px) { .dash-grid { grid-template-columns:repeat(3,minmax(0,1fr)); } }
+@media (min-width:2100px) { .dash-grid { grid-template-columns:repeat(6,minmax(0,1fr)); } }
 .dash-cell { margin:0; min-width:0; }
+.dash-cell td { overflow-wrap:anywhere; }   /* a long title/channel wraps inside its panel, never widens it */
+/* Compact recording rows (flex, not a table) so min-width:0 lets the main column shrink + wrap/ellipsis and the
+   row can never push wider than its panel — the cause of the old dashboard overlap. */
+.dash-rec { background:var(--panel); border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+.dash-rec-row { display:flex; gap:10px; align-items:center; padding:9px 14px; border-bottom:1px solid var(--line); }
+.dash-rec-row:last-child { border-bottom:0; }
+.dash-rec-main { flex:1 1 auto; min-width:0; }
+.dash-rec-main b { display:block; font-weight:600; overflow-wrap:anywhere; }
+.dash-rec-sub { font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.dash-rec-side { flex:0 0 auto; display:flex; gap:6px; align-items:center; }
 .dash-cell .section, .dash-cell h2 { margin-top:0; }
 /* At-a-glance counters row — 2-up on a phone, 4-across on desktop. */
 .stat-row.cards { grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); margin-bottom:20px; }

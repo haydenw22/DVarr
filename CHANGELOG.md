@@ -12,6 +12,12 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.18.1] — 2026-06-26
+Dashboard layout fix.
+
+### Fixed
+- **Dashboard no longer overlaps on wide / ultrawide / vertical monitors.** The *Recording now* and *Scheduled* panels reused the full multi-column Recordings table, which overflowed its narrow dashboard panel and spilled into the neighbouring panel. They now use compact flexbox rows (title + when + state, with a **stop** button on live recordings; tap a row for full controls on the Recordings page) that can never push wider than their panel. The panel grid also snaps to column counts that divide its six panels evenly (1 / 2 / 3 / 6), so rows stay balanced at every width instead of cramming skinny columns.
+
 ## [1.18.0] — 2026-06-26
 Mobile/PWA + a full UI refresh, richer dashboard, and GPU-accelerated dead-feed detection.
 

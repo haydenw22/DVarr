@@ -166,8 +166,8 @@ PAGES.dashboard = {
       el.innerHTML = `
         ${statRow(health, live.length, scheduled.length)}
         <div class="dash-grid">
-          <div class="section dash-cell"><h2>${hd('Recording now', live.length, 's-recording')}</h2>${live.length ? recTable(live, true) : emptyBox('Nothing recording right now.')}</div>
-          <div class="section dash-cell"><h2>${hd('Scheduled — next 24h', scheduled.length, 's-pending')}</h2>${scheduled.length ? recTable(scheduled, true) : emptyBox('Nothing scheduled in the next 24 hours.')}</div>
+          <div class="section dash-cell"><h2>${hd('Recording now', live.length, 's-recording')}</h2>${live.length ? dashRecList(live) : emptyBox('Nothing recording right now.')}</div>
+          <div class="section dash-cell"><h2>${hd('Scheduled — next 24h', scheduled.length, 's-pending')}</h2>${scheduled.length ? dashRecList(scheduled) : emptyBox('Nothing scheduled in the next 24 hours.')}</div>
           <div class="section dash-cell"><h2>${hd('Recently completed', completed.length, 's-done')}</h2>${completed.length ? completedTable(completed) : emptyBox('No finished recordings yet.')}</div>
           <div class="section dash-cell"><h2>${hd('Sources', srcList.length, 's-done')}</h2>${srcList.length ? sourcesPanel(srcList) : emptyBox('No sources yet — add one on the Sources page.')}</div>
           <div class="section dash-cell"><h2>${hd('Next 24 hours', upcoming.length, 's-done')}</h2>${upcoming.length ? upcomingEvents(upcoming, leagues) : emptyBox('No monitored events in the next 24 hours.')}</div>
@@ -188,6 +188,17 @@ function statRow(h, liveN, schedN) {
     ${card('Scheduled · 24h', schedN)}
     ${card('Free slots', slots)}
     ${card('Database', db)}</div>`;
+}
+// Compact recording rows for the dashboard panels — narrow-friendly (title + when + state, with stop for live ones).
+// The full management table with all actions lives on the Recordings page; tap a row to go there.
+function dashRecList(rows) {
+  return `<div class="dash-rec">${rows.map(r => {
+    const active = ACTIVE.includes(r.state);
+    return `<div class="dash-rec-row clickrow" onclick="location.hash='#/recordings'">
+      <div class="dash-rec-main"><b>${esc(r.title)}</b><div class="muted dash-rec-sub">${brisbane(r.startUtc)}${r.channel ? ' · ' + esc(r.channel) : ''}</div></div>
+      <div class="dash-rec-side"><span class="pill ${sc(r.state)}">${r.state}</span>${active ? `<button class="ghost sm" onclick="event.stopPropagation();stopRec(${r.id})">stop</button>` : ''}</div>
+    </div>`;
+  }).join('')}</div>`;
 }
 // Recently-finished recordings (Done/Missed/NeedsAttention/Cancelled) — tap a row to jump to the Recordings page.
 function completedTable(rows) {
