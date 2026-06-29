@@ -189,12 +189,12 @@ label.field { display:flex; flex-direction:column; gap:5px; font-size:12px; colo
 .lg-dot { display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:7px; vertical-align:middle; }
 
 /* ---- dashboard at-a-glance ---- */
-/* 6 compact panels — column counts that divide 6 evenly (1/2/3/6) so rows are always balanced. minmax(0,1fr)
-   lets a track shrink instead of letting wide content blow the grid out / spill into a neighbouring panel. */
-.dash-grid { display:grid; gap:18px; align-items:start; grid-template-columns:minmax(0,1fr); }
-@media (min-width:760px)  { .dash-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
-@media (min-width:1300px) { .dash-grid { grid-template-columns:repeat(3,minmax(0,1fr)); } }
-@media (min-width:2100px) { .dash-grid { grid-template-columns:repeat(6,minmax(0,1fr)); } }
+/* Compact panels capped at 3 columns AND a comfortable max width, so on wide / ultrawide / vertical monitors the
+   dashboard stays a calm, mostly-vertical layout (panels stack into rows) instead of a long row of side-by-side
+   panels. minmax(0,1fr) lets a track shrink so content never spills into a neighbour. */
+.dash-grid { display:grid; gap:18px; align-items:start; grid-template-columns:minmax(0,1fr); max-width:1600px; }
+@media (min-width:780px)  { .dash-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+@media (min-width:1240px) { .dash-grid { grid-template-columns:repeat(3,minmax(0,1fr)); } }
 .dash-cell { margin:0; min-width:0; }
 .dash-cell td { overflow-wrap:anywhere; }   /* a long title/channel wraps inside its panel, never widens it */
 /* Compact recording rows (flex, not a table) so min-width:0 lets the main column shrink + wrap/ellipsis and the
@@ -208,7 +208,7 @@ label.field { display:flex; flex-direction:column; gap:5px; font-size:12px; colo
 .dash-rec-side { flex:0 0 auto; display:flex; gap:6px; align-items:center; }
 .dash-cell .section, .dash-cell h2 { margin-top:0; }
 /* At-a-glance counters row — 2-up on a phone, 4-across on desktop. */
-.stat-row.cards { grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); margin-bottom:20px; }
+.stat-row.cards { grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); margin-bottom:20px; max-width:1600px; }
 .stat-card .stat { font-size:26px; }
 .clickrow { cursor:pointer; }
 .clickrow:hover { background:#1e232d; }

@@ -12,6 +12,12 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.18.2] — 2026-06-26
+Calmer dashboard layout.
+
+### Changed
+- **Dashboard is capped at 3 columns and a 1600px max width.** On wide / ultrawide / vertical monitors it no longer spreads its panels across a single long row — they now stack into a calmer, mostly-vertical layout (1 column on a phone, 2 on a tablet, up to 3 on desktop), kept to a comfortable reading width.
+
 ## [1.18.1] — 2026-06-26
 Dashboard layout fix.
 
