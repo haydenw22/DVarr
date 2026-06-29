@@ -62,9 +62,11 @@ public sealed class SettingsService
         ["epg_past_window_h"] = "48",
         ["epg_future_window_d"] = "21",
         ["epg_max_programmes"] = "3000000",
-        // TheSportsDB API key. "3" is the public TEST key (sample data: Soccer + Motorsport only). Paste your own
-        // key here to unlock the full sports/leagues catalogue (AFL, all F1/Supercars, etc.).
-        ["thesportsdb_api_key"] = "3",
+        // TheSportsDB v2 API key (premium / Patreon), sent as the X-API-KEY header. Empty by default — v2 needs a real
+        // (paid) key; paste yours in Settings to unlock the full catalogue (AFL, NRL, all sports) + complete seasons.
+        // NOTE: a text setting whose default must NOT look numeric, or the /api/settings int-guard would reject a
+        // numeric key that overflows Int32 (premium keys are 10 digits).
+        ["thesportsdb_api_key"] = "",
         ["recorder_input_mode"] = "direct_ts",
         // When a recording's pre-roll attempt captures nothing (e.g. the channel isn't live yet), make ONE guaranteed
         // fresh attempt at the event's real start time. Never interrupts a recording that's already capturing.

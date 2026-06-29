@@ -377,23 +377,26 @@ public static class ApiEndpoints
         });
 
         // ---- Manual import / assignment (sort a staged recording onto a TheSportsDB game) ----
-        // Candidate games for a league around a date (the recording's date ±1 day; falls back to the season list).
-        app.MapGet("/api/import/events", async (string leagueId, string? date, TheSportsDbClient tsdb, CancellationToken ct) =>
+        // Candidate games for a league. Prefer the LOCAL events of an added league: with the premium full-season sync
+        // the local set is complete (fixes the old "dropdown missing games" caused by the dropped-game day-sweep), it's
+        // instant, and its ids are exactly what AssignAsync numbers. Fall back to a live full-season fetch for a league
+        // that isn't added locally. The `date` hint is no longer needed — the whole season is returned, start-ordered.
+        app.MapGet("/api/import/events", async (string leagueId, string? date, DVarrDbContext db, TheSportsDbClient tsdb, CancellationToken ct) =>
         {
             if (string.IsNullOrWhiteSpace(leagueId)) return Results.BadRequest(new { error = "leagueId required" });
-            var seen = new HashSet<string>(StringComparer.Ordinal);
-            var list = new List<TsdbEvent>();
-            if (DateTime.TryParse(date, out var d))
-                for (var i = -1; i <= 1; i++)
-                    foreach (var e in await tsdb.GetDayEventsAsync(leagueId, d.AddDays(i).ToString("yyyy-MM-dd"), ct))
-                        if (seen.Add(e.Id)) list.Add(e);
-            if (list.Count == 0) // day fetch empty (date-only / TZ edge) → fall back to the season list
+            var local = await db.Leagues.FirstOrDefaultAsync(l => l.ExternalLeagueId == leagueId, ct);
+            if (local is not null)
             {
-                var year = (DateTime.TryParse(date, out var dy) ? dy.Year : EpochTime.ToBrisbane(EpochTime.Now()).Year).ToString();
-                foreach (var e in await tsdb.GetSeasonEventsAsync(leagueId, year, ct))
-                    if (seen.Add(e.Id)) list.Add(e);
+                var evs = await db.Events.Where(e => e.LeagueId == local.Id && e.TsdbEventId != null)
+                    .OrderBy(e => e.StartUtc)
+                    .Select(e => new { id = e.TsdbEventId!, title = e.Title, date = e.StartUtc, round = e.Round })
+                    .ToListAsync(ct);
+                if (evs.Count > 0) return Results.Json(evs);
             }
-            return Results.Json(list.OrderBy(e => e.StartUtc ?? 0L).Select(e => new { id = e.Id, title = e.Title, date = e.StartUtc, round = e.Round }));
+            var year = (DateTime.TryParse(date, out var dy) ? dy.Year : EpochTime.ToBrisbane(EpochTime.Now()).Year).ToString();
+            var live = (await tsdb.GetSeasonEventsAsync(leagueId, year, ct)).OrderBy(e => e.StartUtc ?? 0L)
+                .Select(e => new { id = e.Id, title = e.Title, date = e.StartUtc, round = e.Round }).ToList();
+            return Results.Json(live);
         });
 
         // Re-file a staged (.unsorted) recording onto the chosen game → moves it into the Plex League/Season/Game layout.

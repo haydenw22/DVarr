@@ -23,7 +23,8 @@ public static class LeagueEndpoints
                 {
                     l.Id, l.Sport, l.Name, l.Monitored, provider = l.EventProvider, l.ExternalLeagueId, l.IcsUrl,
                     poster = l.PosterUrl, badge = l.BadgeUrl, color = l.Color,
-                    l.ScheduleHorizonDays, eventDurationOverrideS = l.EventDurationOverrideS, lastSync = l.LastEventSyncUtc, events, mappings = maps,
+                    l.ScheduleHorizonDays, eventDurationOverrideS = l.EventDurationOverrideS, monitoredTeams = ParseTeams(l.MonitoredTeamsJson),
+                    lastSync = l.LastEventSyncUtc, events, mappings = maps,
                 });
             }
             return Results.Json(result);
@@ -56,24 +57,39 @@ public static class LeagueEndpoints
                 Color = ValidColor(req.Color),
                 ScheduleHorizonDays = req.ScheduleHorizonDays is > 0 ? req.ScheduleHorizonDays!.Value : 14,
                 EventDurationOverrideS = req.EventDurationOverrideS is > 0 ? req.EventDurationOverrideS : null,
+                MonitoredTeamsJson = SerializeTeams(req.MonitoredTeams),
                 Monitored = req.Monitored ?? true, CreatedUtc = now,
             };
             await gate.WriteAsync(async () => { db.Leagues.Add(l); await db.SaveChangesAsync(); });
             return Results.Json(new { l.Id });
         });
 
-        // ---- League pickers, backed by the bundled catalogue (the free TheSportsDB key can't browse the full list,
-        //      but by-id lookups work — so the UI picks from the catalogue and we look up by id). ----
-        app.MapGet("/api/tsdb/sports", () =>
-            Results.Json(LeagueCatalog.Sports().Select(s => new { Name = s, Format = (string?)null })));
+        // ---- League pickers — premium v2 unlocks the FULL catalogue, so browse every sport/league live (cached 24h)
+        //      instead of the bundled free-key subset (which lacked AFL/NRL etc.). ----
+        app.MapGet("/api/tsdb/sports", async (TheSportsDbClient tsdb, CancellationToken ct) =>
+            Results.Json((await tsdb.GetSportsAsync(ct)).Select(s => new { s.Name, s.Format })));
 
-        app.MapGet("/api/tsdb/leagues", (string sport) =>
+        app.MapGet("/api/tsdb/leagues", async (string sport, TheSportsDbClient tsdb, CancellationToken ct) =>
         {
             if (string.IsNullOrWhiteSpace(sport)) return Results.BadRequest(new { error = "sport is required" });
-            return Results.Json(LeagueCatalog.BySport(sport).Select(l => new
+            return Results.Json((await tsdb.GetLeaguesAsync(sport, ct)).Select(l => new
             {
-                id = l.Id, l.Name, l.Sport, Country = (string?)null, Alternate = (string?)null, Poster = (string?)null, Badge = (string?)null,
+                id = l.Id, l.Name, l.Sport, l.Country, l.Alternate, l.Poster, l.Badge,
             }));
+        });
+
+        // League details (artwork + sport) AND its teams (with logos) in one call — backs the league modal's logo
+        // header and the team-follow multi-select. teamSport=true (format TeamvsTeam) means the team picker applies.
+        app.MapGet("/api/tsdb/league/{id}", async (string id, TheSportsDbClient tsdb, CancellationToken ct) =>
+        {
+            var l = await tsdb.LookupLeagueAsync(id, ct);
+            if (l is null) return Results.Json(new { error = "league not found" }, statusCode: 404);
+            var fmt = (await tsdb.GetSportsAsync(ct)).FirstOrDefault(s => string.Equals(s.Name, l.Sport, StringComparison.OrdinalIgnoreCase))?.Format;
+            var teamSport = string.Equals(fmt, "TeamvsTeam", StringComparison.OrdinalIgnoreCase);
+            var teams = new List<object>();
+            if (teamSport)
+                teams = (await tsdb.GetTeamsAsync(id, ct)).Select(t => (object)new { id = t.Id, t.Name, t.Badge, t.Logo }).ToList();
+            return Results.Json(new { id = l.Id, l.Name, l.Sport, l.Poster, l.Badge, teamSport, teams });
         });
 
         app.MapPut("/api/leagues/{id:int}", async (int id, LeagueUpsert req, DVarrDbContext db, DbWriteGate gate) =>
@@ -99,6 +115,7 @@ public static class LeagueEndpoints
                 if (req.Monitored.HasValue) l.Monitored = req.Monitored.Value;
                 if (req.Color != null) l.Color = ValidColor(req.Color);
                 if (req.EventDurationOverrideS.HasValue) l.EventDurationOverrideS = req.EventDurationOverrideS > 0 ? req.EventDurationOverrideS : null; // 0/blank clears, >0 sets
+                if (req.MonitoredTeams != null) l.MonitoredTeamsJson = SerializeTeams(req.MonitoredTeams); // sending [] = follow all teams; omitting leaves unchanged
                 await db.SaveChangesAsync();
             });
             return Results.Json(new { l.Id, updated = true });
@@ -283,9 +300,34 @@ public static class LeagueEndpoints
     // Only persist a strict #rrggbb hex (the API is the trust boundary — it's interpolated into a style attr client-side).
     private static string? ValidColor(string? c)
         => !string.IsNullOrWhiteSpace(c) && System.Text.RegularExpressions.Regex.IsMatch(c.Trim(), "^#[0-9a-fA-F]{6}$") ? c.Trim() : null;
+
+    // Team-follow: store/return the chosen teams as a compact JSON array of {id,name}. An empty/absent list = all teams.
+    private static string? SerializeTeams(List<TeamRef>? teams)
+    {
+        if (teams is null) return null;
+        var clean = teams.Where(t => !string.IsNullOrWhiteSpace(t.Id))
+            .Select(t => new { id = t.Id.Trim(), name = t.Name?.Trim() }).ToList();
+        return clean.Count == 0 ? null : System.Text.Json.JsonSerializer.Serialize(clean);
+    }
+    private static object[] ParseTeams(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return Array.Empty<object>();
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json!);
+            if (doc.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array)
+                return doc.RootElement.EnumerateArray()
+                    .Where(e => e.ValueKind == System.Text.Json.JsonValueKind.Object && e.TryGetProperty("id", out _))
+                    .Select(e => (object)new { id = e.GetProperty("id").GetString(), name = e.TryGetProperty("name", out var n) ? n.GetString() : null })
+                    .ToArray();
+        }
+        catch { /* malformed → treat as no teams (all) */ }
+        return Array.Empty<object>();
+    }
 }
 
-public sealed record LeagueUpsert(string? Sport, string? Name, string? Provider, string? ExternalLeagueId, string? IcsUrl, int? ScheduleHorizonDays, bool? Monitored, string? Color, int? EventDurationOverrideS);
+public sealed record TeamRef(string Id, string? Name);
+public sealed record LeagueUpsert(string? Sport, string? Name, string? Provider, string? ExternalLeagueId, string? IcsUrl, int? ScheduleHorizonDays, bool? Monitored, string? Color, int? EventDurationOverrideS, List<TeamRef>? MonitoredTeams);
 public sealed record EventCreate(int LeagueId, string? Title, long StartUtc, long? EndUtc, bool? Monitored);
 public sealed record MonitorReq(bool Monitored);
 public sealed record MappingCreate(int LeagueId, int ChannelId, int? Rank, bool? Pinned);

@@ -454,7 +454,7 @@ PAGES.leagues = {
     el.innerHTML = `<div class="note">A <b>monitored</b> league auto-records its events on its mapped channel(s). Leagues come from <b>TheSportsDB</b> — pick a sport then search the league; posters &amp; events sync automatically.</div>
       <div class="section"><h2>Leagues ${ls.length ? `<span class="pill s-done">${ls.length}</span>` : ''}</h2>${ls.length ? `<table><thead><tr><th></th><th>League</th><th>Sport</th><th>Events</th><th>Maps</th><th>Monitored</th><th></th></tr></thead><tbody>${ls.map(l => `
         <tr><td>${l.poster ? `<img class="lg-poster" src="${esc(l.poster)}" alt=""/>` : ''}</td>
-        <td><span class="lg-dot" style="background:${leagueColor(l)}" title="calendar colour"></span><b>${esc(l.name)}</b>${l.externalLeagueId ? ` <span class="tag" title="TheSportsDB id">#${esc(l.externalLeagueId)}</span>` : ''}</td><td class="muted">${esc(l.sport)}</td>
+        <td><span class="lg-dot" style="background:${leagueColor(l)}" title="calendar colour"></span><b>${esc(l.name)}</b>${l.externalLeagueId ? ` <span class="tag" title="TheSportsDB id">#${esc(l.externalLeagueId)}</span>` : ''}${l.monitoredTeams && l.monitoredTeams.length ? `<div class="muted" style="font-size:11px">following ${l.monitoredTeams.length} team${l.monitoredTeams.length === 1 ? '' : 's'}: ${esc(l.monitoredTeams.map(t => t.name).filter(Boolean).join(', '))}</div>` : ''}</td><td class="muted">${esc(l.sport)}</td>
         <td class="mono">${l.events}</td><td class="mono">${l.mappings}</td>
         <td><span class="tag ${l.monitored ? 'ok' : ''}">${l.monitored ? 'yes' : 'no'}</span></td>
         <td class="row" style="gap:6px;flex-wrap:nowrap">
@@ -1006,21 +1006,50 @@ async function saveSettings() {
 async function openLeagueModal(id) {
   const x = id != null ? (window._leagues || []).find(l => l.id === id) : null;
   const edit = !!x;
-  modal(`<h2>${edit ? 'Edit' : 'Add'} league</h2><div class="fields">
-    <label class="field">Sport<select id="lSport"><option>Loading…</option></select></label>
-    <label class="field">League <span class="muted">(search)</span><input id="lLeagueQ" placeholder="e.g. AFL, supercars, premier league…"/><select id="lLeague" size="6"><option>Pick a sport first…</option></select></label>
-    <label class="field">…or paste a TheSportsDB league id <span class="muted">(for anything not listed)</span><input id="lManualId" value="${esc(x?.externalLeagueId || '')}" placeholder="e.g. 4370"/></label>
-    <label class="field">Auto-schedule horizon (days)<input id="lHorizon" type="number" value="${x?.scheduleHorizonDays || 14}"/></label>
-    <label class="field">Event length override <span class="muted">(minutes — blank uses the sport / global default)</span><input id="lDuration" type="number" min="1" value="${x?.eventDurationOverrideS ? Math.round(x.eventDurationOverrideS / 60) : ''}" placeholder="e.g. 180 for a 3-hour race"/></label>
-    <label class="field">Calendar colour<input type="hidden" id="lColor" value="${esc(x?.color || '')}"/>
-      <div class="swatches" id="lSwatches">${LEAGUE_COLORS.map(c => `<span class="swatch${(x?.color || '').toLowerCase() === c ? ' sel' : ''}" data-c="${c}" style="background:${c}" title="${c}"></span>`).join('')}</div></label>
-    <label class="field" style="flex-direction:row;align-items:center;gap:8px"><input id="lMon" type="checkbox" ${(!x || x.monitored) ? 'checked' : ''} style="width:auto"/> Monitored — auto-record this league's events</label>
-    </div><div class="foot"><button class="ghost" onclick="closeModals()">Cancel</button><button onclick="submitLeague(${edit ? x.id : 'null'})">${edit ? 'Save' : 'Add'} league</button></div>`, 'min(560px,94vw)');
+  modal(`<h2>${edit ? 'Edit' : 'Add'} league</h2>
+    <div id="lHeader" class="lg-modal-head"></div>
+    <div class="fields">
+      <label class="field">Sport<select id="lSport"><option>Loading…</option></select></label>
+      <label class="field">League <span class="muted">(search)</span><input id="lLeagueQ" placeholder="e.g. AFL, NRL, supercars, premier league…"/><select id="lLeague" size="6"><option>Pick a sport first…</option></select></label>
+      <label class="field">…or paste a TheSportsDB league id <span class="muted">(for anything not listed)</span><input id="lManualId" value="${esc(x?.externalLeagueId || '')}" placeholder="e.g. 4456"/></label>
+      <label class="field">Auto-schedule horizon (days)<input id="lHorizon" type="number" value="${x?.scheduleHorizonDays || 14}"/></label>
+      <label class="field">Event length override <span class="muted">(minutes — blank uses the sport / global default)</span><input id="lDuration" type="number" min="1" value="${x?.eventDurationOverrideS ? Math.round(x.eventDurationOverrideS / 60) : ''}" placeholder="e.g. 180 for a 3-hour race"/></label>
+      <label class="field">Calendar colour<input type="hidden" id="lColor" value="${esc(x?.color || '')}"/>
+        <div class="swatches" id="lSwatches">${LEAGUE_COLORS.map(c => `<span class="swatch${(x?.color || '').toLowerCase() === c ? ' sel' : ''}" data-c="${c}" style="background:${c}" title="${c}"></span>`).join('')}</div></label>
+      <label class="field" style="flex-direction:row;align-items:center;gap:8px"><input id="lMon" type="checkbox" ${(!x || x.monitored) ? 'checked' : ''} style="width:auto"/> Monitored — auto-record this league's events</label>
+    </div>
+    <div id="lTeamsWrap" style="display:none;margin-top:14px;border-top:1px solid var(--line);padding-top:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px">
+        <b style="font-size:13px">Teams to follow</b>
+        <span><button type="button" class="ghost sm" id="lTeamsAll">All</button> <button type="button" class="ghost sm" id="lTeamsNone">None</button></span>
+      </div>
+      <div class="muted" style="font-size:12px;margin-bottom:8px">Tick the teams you want to record. Tick <b>none</b> (or All) to record <b>every</b> match in the league.</div>
+      <div id="lTeams" class="team-grid"></div>
+    </div>
+    <div class="foot"><button class="ghost" onclick="closeModals()">Cancel</button><button onclick="submitLeague(${edit ? x.id : 'null'})">${edit ? 'Save' : 'Add'} league</button></div>`, 'min(720px,96vw)');
 
   $('#lSwatches').querySelectorAll('.swatch').forEach(sw => sw.addEventListener('click', () => {
     $('#lSwatches').querySelectorAll('.swatch').forEach(o => o.classList.remove('sel'));
     sw.classList.add('sel'); $('#lColor').value = sw.dataset.c;
   }));
+  $('#lTeamsAll').addEventListener('click', () => $('#lTeams').querySelectorAll('input').forEach(i => i.checked = true));
+  $('#lTeamsNone').addEventListener('click', () => $('#lTeams').querySelectorAll('input').forEach(i => i.checked = false));
+
+  const savedTeamIds = new Set((x?.monitoredTeams || []).map(t => String(t.id)));
+
+  // When a league is chosen (dropdown or pasted id), load its logo header + (for team sports) the team picker.
+  const onLeaguePicked = async (leagueId) => {
+    if (!leagueId) { $('#lHeader').innerHTML = ''; $('#lTeamsWrap').style.display = 'none'; return; }
+    $('#lHeader').innerHTML = '<span class="muted" style="font-size:12px">Loading league…</span>';
+    const d = await api.get('/api/tsdb/league/' + encodeURIComponent(leagueId));
+    if (!d || d.error || !d.name) { $('#lHeader').innerHTML = '<span class="muted" style="font-size:12px">Couldn’t load that league id.</span>'; $('#lTeamsWrap').style.display = 'none'; return; }
+    const art = d.badge || d.poster;
+    $('#lHeader').innerHTML = `${art ? `<img src="${esc(art)}" alt="" class="lg-modal-badge"/>` : ''}<div><b>${esc(d.name)}</b><div class="muted" style="font-size:12px">${esc(d.sport || '')} · #${esc(String(d.id))}</div></div>`;
+    if (d.teamSport && Array.isArray(d.teams) && d.teams.length) {
+      $('#lTeamsWrap').style.display = '';
+      $('#lTeams').innerHTML = d.teams.map(t => `<label class="team-pick" title="${esc(t.name)}"><input type="checkbox" data-id="${esc(String(t.id))}" data-name="${esc(t.name)}" ${savedTeamIds.has(String(t.id)) ? 'checked' : ''}/>${t.badge || t.logo ? `<img src="${esc(t.badge || t.logo)}" alt="" loading="lazy"/>` : '<span class="team-pick-dot"></span>'}<span>${esc(t.name)}</span></label>`).join('');
+    } else { $('#lTeamsWrap').style.display = 'none'; $('#lTeams').innerHTML = ''; }
+  };
 
   let leagues = [];
   const renderLeagues = () => {
@@ -1031,26 +1060,36 @@ async function openLeagueModal(id) {
   const loadLeagues = async () => {
     $('#lLeague').innerHTML = '<option>Loading…</option>';
     leagues = await api.get('/api/tsdb/leagues?sport=' + encodeURIComponent($('#lSport').value));
+    if (!Array.isArray(leagues)) leagues = [];
     renderLeagues();
   };
   const sports = await api.get('/api/tsdb/sports');
-  $('#lSport').innerHTML = sports.map(s => `<option ${x?.sport === s.name ? 'selected' : ''}>${esc(s.name)}</option>`).join('') || '<option>(TheSportsDB unavailable)</option>';
+  $('#lSport').innerHTML = (Array.isArray(sports) ? sports : []).map(s => `<option ${x?.sport === s.name ? 'selected' : ''}>${esc(s.name)}</option>`).join('') || '<option>(TheSportsDB unavailable)</option>';
   $('#lSport').onchange = loadLeagues;
   let lt; $('#lLeagueQ').oninput = () => { clearTimeout(lt); lt = setTimeout(renderLeagues, 150); };
+  $('#lLeague').onchange = () => { $('#lManualId').value = ''; onLeaguePicked($('#lLeague').value); };
+  let mt; $('#lManualId').oninput = () => { clearTimeout(mt); mt = setTimeout(() => onLeaguePicked($('#lManualId').value.trim()), 400); };
   await loadLeagues();
+  if (x?.externalLeagueId) await onLeaguePicked(x.externalLeagueId); // edit (or pre-filled id) → load header + teams now
 }
 async function submitLeague(id) {
   const opt = $('#lLeague').selectedOptions[0];
   const manual = $('#lManualId').value.trim();
   const externalLeagueId = manual || $('#lLeague').value;
   if (!externalLeagueId) return toast('Pick a league or paste a TheSportsDB id', 'err');
-  // For a manually-pasted id, let the server fill name/sport from TheSportsDB (lookupleague by id works on the free key).
+  // Team-follow: the ticked teams (empty = follow every match). Only meaningful when the picker is shown (team sports).
+  const teamsShown = $('#lTeamsWrap') && $('#lTeamsWrap').style.display !== 'none';
+  const monitoredTeams = teamsShown
+    ? [...$('#lTeams').querySelectorAll('input:checked')].map(i => ({ id: i.dataset.id, name: i.dataset.name }))
+    : [];
+  // For a manually-pasted id, let the server fill name/sport from TheSportsDB (lookup by id).
   const body = {
     externalLeagueId,
     name: manual ? undefined : opt?.dataset.name,
     sport: manual ? undefined : (opt?.dataset.sport || $('#lSport').value),
     scheduleHorizonDays: parseInt($('#lHorizon').value) || 14, monitored: $('#lMon').checked, color: $('#lColor').value || '',
     eventDurationOverrideS: (() => { const v = parseInt($('#lDuration').value); return v > 0 ? v * 60 : 0; })(),
+    monitoredTeams,
   };
   closeModals();
   if (id == null) { const r = await api.post('/api/leagues', body); toast(r.error ? r.error : 'League added', r.error ? 'err' : 'ok'); }

@@ -74,6 +74,8 @@ public sealed class EventIngestService
                     if (ie.ThumbUrl is not null) ev.ThumbUrl = ie.ThumbUrl;
                     if (ie.Round is not null) ev.Round = ie.Round;
                     if (ie.Season is not null) ev.Season = ie.Season;
+                    if (ie.HomeTeamId is not null) ev.HomeTeamId = ie.HomeTeamId;
+                    if (ie.AwayTeamId is not null) ev.AwayTeamId = ie.AwayTeamId;
                     if (isTsdb) ev.TsdbEventId = ie.ExternalId;
                     ev.LastSeenSyncUtc = now;
                     updated++;
@@ -86,6 +88,7 @@ public sealed class EventIngestService
                         StartUtc = ie.StartUtc, EndUtc = EndFor(ie), StartIsDateOnly = ie.DateOnly,
                         Status = MapStatus(ie.Status), Monitored = l.Monitored, LastSeenSyncUtc = now,
                         ThumbUrl = ie.ThumbUrl, Round = ie.Round, Season = ie.Season,
+                        HomeTeamId = ie.HomeTeamId, AwayTeamId = ie.AwayTeamId,
                         TsdbEventId = isTsdb ? ie.ExternalId : null,
                     });
                     added++;

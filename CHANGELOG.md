@@ -12,6 +12,20 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.19.0] — 2026-06-29
+Premium TheSportsDB v2 API: full-season sync, team-follow, and a refined League screen.
+
+### Added
+- **Follow specific teams in a league.** When adding/editing a team sport (AFL, NRL, soccer, rugby…), tick the teams you want — with their logos — and DVarr arms recordings only for those teams' matches. Tick none (or **All**) to record every match. Motorsport (no teams) is unaffected. The full schedule is still ingested, so episode numbers stay correct; only what gets recorded is filtered. Multiple teams per league supported.
+- **Refined Add/Edit League modal.** Larger, with the league badge/logo header, a searchable picker across the **full** catalogue (AFL, NRL — the free key couldn't browse these), and a logo-rich team-follow picker.
+
+### Changed
+- **TheSportsDB v2 (premium key).** Migrated to the v2 API (`X-API-KEY` header). A league sync now pulls the **complete season in one call** instead of the old free-key day-sweep that silently dropped games (and made ~60 calls). Set your key in Settings → TheSportsDB API key.
+
+### Fixed
+- **League sync grabs every match.** The manual-import "Game" dropdown was missing fixtures because the old sync dropped games; it now lists the complete synced season (from local data).
+- **Episode numbering.** With the complete season synced, a game's episode number is its correct chronological position in the year — e.g. AFL 11 Jun *Western Bulldogs v Adelaide Crows* = **E124**. The "weird AFL numbers" were the free key's incomplete data, not the numbering logic.
+
 ## [1.18.4] — 2026-06-29
 Stop short labels wrapping mid-word.
 

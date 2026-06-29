@@ -29,6 +29,12 @@ public class League
     /// <summary>Per-league assumed event duration (seconds) when the provider gives no end time. Null = fall back to
     /// the per-sport override (event_duration_overrides_json) then default_event_duration_s.</summary>
     public int? EventDurationOverrideS { get; set; }
+
+    /// <summary>Team-follow: JSON array of {id,name} TheSportsDB teams to record in this league. Null/empty = ALL
+    /// teams (record every match). The full schedule is still ingested for correct episode numbering; this only
+    /// filters which events the auto-scheduler arms (an event is kept if either side's team id is in this set).</summary>
+    public string? MonitoredTeamsJson { get; set; }
+
     public long? LastEventSyncUtc { get; set; }
 
     /// <summary>Conflict tie-breaker (higher wins) when demand exceeds both logins for a window: a higher-priority
@@ -84,6 +90,11 @@ public class Event
     public int? Round { get; set; }
     /// <summary>strSeason (e.g. "2026" or "2025-2026") — used for the Plex season.</summary>
     public string? Season { get; set; }
+
+    /// <summary>TheSportsDB idHomeTeam / idAwayTeam — drive the per-league team-follow filter (record only chosen
+    /// teams' matches). Null for non-team-vs-team sports (motorsport).</summary>
+    public string? HomeTeamId { get; set; }
+    public string? AwayTeamId { get; set; }
 
     public long? LastSeenSyncUtc { get; set; }
     public string? SourceMetaJson { get; set; }

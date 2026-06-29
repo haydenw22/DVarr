@@ -53,6 +53,32 @@ public sealed class AutoScheduleService : BackgroundService
         }
     }
 
+    /// <summary>Parse League.MonitoredTeamsJson (a JSON array of {id,name}, or a plain ["id",...] array) into a set of
+    /// TheSportsDB team ids. Empty / invalid / absent → empty set (= follow ALL teams).</summary>
+    private static HashSet<string> ParseMonitoredTeamIds(string? json)
+    {
+        var set = new HashSet<string>(StringComparer.Ordinal);
+        if (string.IsNullOrWhiteSpace(json)) return set;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json!);
+            if (doc.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array)
+                foreach (var el in doc.RootElement.EnumerateArray())
+                {
+                    string? id = el.ValueKind switch
+                    {
+                        System.Text.Json.JsonValueKind.Object when el.TryGetProperty("id", out var v)
+                            => v.ValueKind == System.Text.Json.JsonValueKind.String ? v.GetString() : v.ToString(),
+                        System.Text.Json.JsonValueKind.String => el.GetString(),
+                        _ => null,
+                    };
+                    if (!string.IsNullOrWhiteSpace(id)) set.Add(id!);
+                }
+        }
+        catch { /* malformed → treat as "all teams" */ }
+        return set;
+    }
+
     private async Task<int> TickAsync(CancellationToken ct)
     {
         using var scope = _scopes.CreateScope();
@@ -88,6 +114,19 @@ public sealed class AutoScheduleService : BackgroundService
                         && e.StartUtc > now - 3600 && e.StartUtc < maxLookahead
                         && (e.Status == EventStatus.Scheduled || e.Status == EventStatus.Live || e.Status == EventStatus.Unknown))
             .OrderBy(e => e.StartUtc).Take(500).ToListAsync(ct);
+
+        // Team-follow: a league with MonitoredTeamsJson set records ONLY those teams' matches. (The full schedule is
+        // still ingested so episode numbers stay correct — this filters only what the scheduler arms.) Keep an event
+        // if its league follows all teams (no list) OR either side's team id is in the followed set. A revived event
+        // (1c) re-enters this same candidate pool, so it's covered without a separate guard.
+        var followedTeams = monitoredLeagues.Values
+            .Select(l => (l.Id, Ids: ParseMonitoredTeamIds(l.MonitoredTeamsJson)))
+            .Where(x => x.Ids.Count > 0).ToDictionary(x => x.Id, x => x.Ids);
+        if (followedTeams.Count > 0)
+            candidates = candidates.Where(e =>
+                !followedTeams.TryGetValue(e.LeagueId, out var ids)
+                || (e.HomeTeamId != null && ids.Contains(e.HomeTeamId))
+                || (e.AwayTeamId != null && ids.Contains(e.AwayTeamId))).ToList();
 
         var handledEventIds = (await db.Recordings
             .Where(r => r.EventId != null && Handled.Contains(r.State))
