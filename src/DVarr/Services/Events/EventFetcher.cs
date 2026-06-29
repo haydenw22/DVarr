@@ -65,7 +65,12 @@ public sealed class EventFetcher
         }
         if (hitSeason is not null)
         {
-            var next = hitSeason.Contains('-') ? $"{year + 1}-{year + 2}" : (year + 1).ToString();
+            // Derive the NEXT season from the one we actually matched, not the calendar year — else a split-year league
+            // matched via "{year-1}-{year}" (e.g. "2025-2026") would skip a whole year ("2027-2028" instead of "2026-2027").
+            string next;
+            if (hitSeason.Contains('-') && int.TryParse(hitSeason.Split('-')[1], out var end)) next = $"{end}-{end + 1}";
+            else if (int.TryParse(hitSeason, out var y)) next = (y + 1).ToString();
+            else next = (year + 1).ToString();
             try { Merge(await _tsdb.GetSeasonEventsAsync(leagueId, next, ct)); }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex) { _log.LogDebug(ex, "[Events] next-season pull {Season} failed for league {Id}", next, l.Id); }

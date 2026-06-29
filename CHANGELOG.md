@@ -12,6 +12,20 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.19.1] — 2026-06-29
+Bug-audit fixes for v1.19.0 (adversarial multi-agent review — 12 real issues fixed, 1 false positive rejected).
+
+### Fixed
+- **Split-year leagues could skip a year of fixtures.** When a soccer-style `{year-1}-{year}` season matched, the follow-on season was derived from the wrong year (e.g. `2027-2028` instead of `2026-2027`), dropping months of games and skewing episode numbers. Now derived from the matched season. (Calendar-year sports — AFL, F1, World Cup — were unaffected.)
+- **Team-follow robustness.** Event team ids are written authoritatively on every sync (a provider correction to "no teams" can't leave a stale id that mis-files a match); ids are trimmed consistently; and an event with no team ids at all is recorded rather than silently dropped (don't miss a not-yet-drawn final).
+- **Narrowing a league's followed teams now cancels the dropped teams' pending recordings** instead of letting them still fire.
+- **A partial league edit no longer wipes the TheSportsDB link.** Saving just the team list (or just the horizon) used to null `externalLeagueId`.
+- **Clearer TheSportsDB diagnostics.** No key configured → a plain "set your key in Settings" message instead of doomed requests that looked like an outage; `401/403` → "authentication failed — check the key"; a `200` carrying an error body is no longer mistaken for data. The legacy v1 test key `3` is treated as "no key" (v2 rejects it), so an upgraded install fails loudly rather than silently.
+- Hardened the league catalogue cache so a key change can't cross-pollinate cached results.
+
+### Verified
+- XSS-in-team-logo claim was investigated and **rejected** — `esc()` escapes quotes and HTML entities inside an attribute value don't re-delimit, so there's no breakout.
+
 ## [1.19.0] — 2026-06-29
 Premium TheSportsDB v2 API: full-season sync, team-follow, and a refined League screen.
 

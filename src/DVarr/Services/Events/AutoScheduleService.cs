@@ -72,7 +72,7 @@ public sealed class AutoScheduleService : BackgroundService
                         System.Text.Json.JsonValueKind.String => el.GetString(),
                         _ => null,
                     };
-                    if (!string.IsNullOrWhiteSpace(id)) set.Add(id!);
+                    if (!string.IsNullOrWhiteSpace(id)) set.Add(id!.Trim()); // trim to match SerializeTeams (stored trimmed)
                 }
         }
         catch { /* malformed → treat as "all teams" */ }
@@ -126,7 +126,10 @@ public sealed class AutoScheduleService : BackgroundService
             candidates = candidates.Where(e =>
                 !followedTeams.TryGetValue(e.LeagueId, out var ids)
                 || (e.HomeTeamId != null && ids.Contains(e.HomeTeamId))
-                || (e.AwayTeamId != null && ids.Contains(e.AwayTeamId))).ToList();
+                || (e.AwayTeamId != null && ids.Contains(e.AwayTeamId))
+                // Fail OPEN for an event with NO team ids at all (e.g. a not-yet-drawn final, or pre-v1.19 data): we
+                // can't tell who's playing, so don't silently drop it — better to over-record than miss a real match.
+                || (e.HomeTeamId == null && e.AwayTeamId == null)).ToList();
 
         var handledEventIds = (await db.Recordings
             .Where(r => r.EventId != null && Handled.Contains(r.State))

@@ -39,8 +39,10 @@ public sealed class TheSportsDbClient
     public TheSportsDbClient(HttpClient http, SettingsService settings, ILogger<TheSportsDbClient> log) { _http = http; _settings = settings; _log = log; }
 
     // The premium v2 key (Settings → thesportsdb_api_key) is sent as the X-API-KEY header. Folded into cache keys so a
-    // key change re-fetches. The public test key "3" only works on the legacy v1 URL — v2 needs a real (paid) key.
-    private async Task<string> KeyAsync() { var k = await _settings.GetAsync("thesportsdb_api_key"); return string.IsNullOrWhiteSpace(k) ? "3" : k!.Trim(); }
+    // key change re-fetches. The public test key "3" only works on the legacy v1 URL and 401s on v2, so treat both ""
+    // and the legacy "3" as "no key configured" — GetAsync then fails loudly with a clear message instead of firing
+    // doomed requests that look like "provider unreachable" (this also auto-clears a "3" left over from a v1.18 DB).
+    private async Task<string> KeyAsync() { var k = (await _settings.GetAsync("thesportsdb_api_key"))?.Trim(); return string.IsNullOrEmpty(k) || k == "3" ? "" : k; }
 
     private async Task<T> CachedAsync<T>(string key, TimeSpan ttl, Func<Task<T>> factory)
     {
@@ -61,6 +63,13 @@ public sealed class TheSportsDbClient
     {
         var url = $"https://www.thesportsdb.com/api/v2/json/{path}";
         var key = await KeyAsync();
+        if (key.Length == 0)
+        {
+            // No premium key configured — every v2 call would 401. Don't fire it; surface a clear, actionable reason
+            // (rather than a generic 4xx that reads like a transient outage). HttpOkCount stays 0 → sync reports failure.
+            _log.LogWarning("[TSDB] {Path} skipped — no TheSportsDB v2 API key set (Settings → TheSportsDB API key); v2 requires a premium key", path);
+            return null;
+        }
         for (var attempt = 0; ; attempt++)
         {
             try
@@ -78,10 +87,27 @@ public sealed class TheSportsDbClient
                     await Task.Delay(wait, ct);
                     continue;
                 }
-                if (!resp.IsSuccessStatusCode) { _log.LogWarning("[TSDB] {Path} → {Code}", path, (int)resp.StatusCode); return null; }
-                _httpOk++; // a real, reachable 2xx response (used to tell provider-down from empty)
+                if (!resp.IsSuccessStatusCode)
+                {
+                    // 401/403 on v2-with-a-header almost always means a bad/expired key — say so, don't just log the code.
+                    if (resp.StatusCode is System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden)
+                        _log.LogError("[TSDB] {Path} → {Code}: authentication failed — check the TheSportsDB API key in Settings", path, (int)resp.StatusCode);
+                    else _log.LogWarning("[TSDB] {Path} → {Code}", path, (int)resp.StatusCode);
+                    return null;
+                }
                 await using var s = await resp.Content.ReadAsStreamAsync(ct);
-                return await JsonDocument.ParseAsync(s, default, ct);
+                var doc = await JsonDocument.ParseAsync(s, default, ct);
+                // A 200 can still carry a structured error body ({ "error": ... }); treat that as a failure — not a
+                // reachable success — so TryArray can't latch onto an unrelated array and HttpOkCount stays honest.
+                if (doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("error", out var err)
+                    && err.ValueKind is JsonValueKind.String or JsonValueKind.Object)
+                {
+                    _log.LogWarning("[TSDB] {Path} → error body: {Error}", path, err.ToString());
+                    doc.Dispose();
+                    return null;
+                }
+                _httpOk++; // a real, reachable 2xx response (used to tell provider-down from empty)
+                return doc;
             }
             catch (OperationCanceledException) { throw; } // shutdown/timeout — propagate, don't mask as "no data"
             catch (Exception ex) { _log.LogWarning(ex, "[TSDB] {Path} failed", path); return null; }
@@ -115,27 +141,30 @@ public sealed class TheSportsDbClient
     });
 
     public async Task<List<TsdbLeague>> GetLeaguesAsync(string sport, CancellationToken ct = default)
-        => await CachedAsync($"leagues:{await KeyAsync()}:{sport.ToLowerInvariant()}", TimeSpan.FromHours(24), async () =>
     {
-        // v2 has no per-sport league endpoint; /all/leagues lists every league (id/name/sport/alternate, NO artwork),
-        // so fetch once and filter by sport. Artwork for the chosen league comes from LookupLeagueAsync on demand.
-        var all = await CachedAsync($"allleagues:{await KeyAsync()}", TimeSpan.FromHours(24), async () =>
+        var key = await KeyAsync(); // resolve once so the outer (per-sport) and inner (all-leagues) cache keys can't disagree mid-flight
+        return await CachedAsync($"leagues:{key}:{sport.ToLowerInvariant()}", TimeSpan.FromHours(24), async () =>
         {
-            var raw = new List<TsdbLeague>();
-            using var doc = await GetAsync("all/leagues", ct);
-            if (TryArray(doc, "all", out var arr))
-                foreach (var e in arr.EnumerateArray())
-                {
-                    var id = Str(e, "idLeague"); var name = Str(e, "strLeague");
-                    if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(name)) continue;
-                    raw.Add(new TsdbLeague(id!, name!, Str(e, "strSport") ?? "", Str(e, "strCountry"),
-                        Str(e, "strLeagueAlternate"), null, null));
-                }
-            return raw;
+            // v2 has no per-sport league endpoint; /all/leagues lists every league (id/name/sport/alternate, NO artwork),
+            // so fetch once and filter by sport. Artwork for the chosen league comes from LookupLeagueAsync on demand.
+            var all = await CachedAsync($"allleagues:{key}", TimeSpan.FromHours(24), async () =>
+            {
+                var raw = new List<TsdbLeague>();
+                using var doc = await GetAsync("all/leagues", ct);
+                if (TryArray(doc, "all", out var arr))
+                    foreach (var e in arr.EnumerateArray())
+                    {
+                        var id = Str(e, "idLeague"); var name = Str(e, "strLeague");
+                        if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(name)) continue;
+                        raw.Add(new TsdbLeague(id!, name!, Str(e, "strSport") ?? "", Str(e, "strCountry"),
+                            Str(e, "strLeagueAlternate"), null, null));
+                    }
+                return raw;
+            });
+            return all.Where(l => string.Equals(l.Sport, sport, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(l => l.Name, StringComparer.OrdinalIgnoreCase).ToList();
         });
-        return all.Where(l => string.Equals(l.Sport, sport, StringComparison.OrdinalIgnoreCase))
-            .OrderBy(l => l.Name, StringComparer.OrdinalIgnoreCase).ToList();
-    });
+    }
 
     public async Task<TsdbLeague?> LookupLeagueAsync(string idLeague, CancellationToken ct = default)
         => await CachedAsync($"league:{await KeyAsync()}:{idLeague}", TimeSpan.FromHours(6), async () =>

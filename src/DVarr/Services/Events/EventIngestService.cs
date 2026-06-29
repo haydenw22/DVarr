@@ -74,8 +74,10 @@ public sealed class EventIngestService
                     if (ie.ThumbUrl is not null) ev.ThumbUrl = ie.ThumbUrl;
                     if (ie.Round is not null) ev.Round = ie.Round;
                     if (ie.Season is not null) ev.Season = ie.Season;
-                    if (ie.HomeTeamId is not null) ev.HomeTeamId = ie.HomeTeamId;
-                    if (ie.AwayTeamId is not null) ev.AwayTeamId = ie.AwayTeamId;
+                    // Team ids track the provider authoritatively (the v2 schedule always carries them for team sports);
+                    // assign unconditionally so a correction to null can't leave a stale id that mis-files team-follow.
+                    ev.HomeTeamId = ie.HomeTeamId;
+                    ev.AwayTeamId = ie.AwayTeamId;
                     if (isTsdb) ev.TsdbEventId = ie.ExternalId;
                     ev.LastSeenSyncUtc = now;
                     updated++;

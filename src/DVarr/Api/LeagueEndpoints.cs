@@ -97,7 +97,8 @@ public static class LeagueEndpoints
             var l = await db.Leagues.FindAsync(id);
             if (l is null) return Results.NotFound();
             // Mirror the POST guard: don't let two leagues point at the same TheSportsDB id (would double-ingest the
-            // same events). Only checked when a non-empty id is supplied; clearing it (null) is always allowed.
+            // same events). Only checked/applied when a non-empty id is supplied; a partial PUT that omits it (e.g. a
+            // team-follow-only save) leaves the existing link as-is rather than nulling it.
             var newExt = string.IsNullOrWhiteSpace(req.ExternalLeagueId) ? null : req.ExternalLeagueId!.Trim();
             if (newExt != null && await db.Leagues.AnyAsync(x => x.Id != id && x.ExternalLeagueId == newExt))
                 return Results.Json(new { error = "another league is already linked to that TheSportsDB id" }, statusCode: 409);
@@ -106,7 +107,7 @@ public static class LeagueEndpoints
                 if (!string.IsNullOrWhiteSpace(req.Name)) l.Name = req.Name!.Trim();
                 if (req.Sport != null) l.Sport = req.Sport.Trim();
                 if (!string.IsNullOrWhiteSpace(req.Provider)) l.EventProvider = req.Provider!.Trim();
-                l.ExternalLeagueId = newExt;
+                if (newExt != null) l.ExternalLeagueId = newExt; // omit = leave as-is (a partial PUT must not null the link)
                 // Legacy ICS field: only update when a valid absolute http(s) URL is supplied (SSRF guard); a normal
                 // edit (which omits icsUrl) preserves the existing value rather than nulling it.
                 if (req.IcsUrl != null && Uri.TryCreate(req.IcsUrl.Trim(), UriKind.Absolute, out var iu) && (iu.Scheme == Uri.UriSchemeHttp || iu.Scheme == Uri.UriSchemeHttps))
@@ -115,7 +116,30 @@ public static class LeagueEndpoints
                 if (req.Monitored.HasValue) l.Monitored = req.Monitored.Value;
                 if (req.Color != null) l.Color = ValidColor(req.Color);
                 if (req.EventDurationOverrideS.HasValue) l.EventDurationOverrideS = req.EventDurationOverrideS > 0 ? req.EventDurationOverrideS : null; // 0/blank clears, >0 sets
-                if (req.MonitoredTeams != null) l.MonitoredTeamsJson = SerializeTeams(req.MonitoredTeams); // sending [] = follow all teams; omitting leaves unchanged
+                if (req.MonitoredTeams != null)
+                {
+                    l.MonitoredTeamsJson = SerializeTeams(req.MonitoredTeams); // sending [] = follow all teams; omitting leaves unchanged
+                    // Team-follow narrowed: cancel not-yet-started recordings for this league's events that the new filter
+                    // would now exclude, so a de-selected team's match can't still fire. (Mirrors the DELETE cleanup —
+                    // only Pending/Conflict, never an active capture; an empty list = follow all, so nothing to cancel.)
+                    var followed = req.MonitoredTeams.Where(t => !string.IsNullOrWhiteSpace(t.Id)).Select(t => t.Id!.Trim()).ToHashSet(StringComparer.Ordinal);
+                    if (followed.Count > 0)
+                    {
+                        var leagueEvents = await db.Events.Where(e => e.LeagueId == id)
+                            .Select(e => new { e.Id, e.HomeTeamId, e.AwayTeamId }).ToListAsync();
+                        // Out of scope == the team-follow filter (AutoScheduleService) would drop it: has at least one team
+                        // id, and neither side is followed. Events with no team ids are kept there (fail-open), so skip them.
+                        var outOfScope = leagueEvents.Where(e =>
+                            (e.HomeTeamId != null || e.AwayTeamId != null)
+                            && !(e.HomeTeamId != null && followed.Contains(e.HomeTeamId))
+                            && !(e.AwayTeamId != null && followed.Contains(e.AwayTeamId)))
+                            .Select(e => e.Id).ToList();
+                        if (outOfScope.Count > 0)
+                            await db.Recordings
+                                .Where(r => r.EventId != null && outOfScope.Contains(r.EventId.Value) && (r.State == RecordingState.Pending || r.State == RecordingState.Conflict))
+                                .ExecuteUpdateAsync(s => s.SetProperty(r => r.State, RecordingState.Cancelled).SetProperty(r => r.FailureReason, "team removed from team-follow filter"));
+                    }
+                }
                 await db.SaveChangesAsync();
             });
             return Results.Json(new { l.Id, updated = true });
