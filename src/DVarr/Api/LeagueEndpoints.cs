@@ -1,6 +1,7 @@
 using DVarr.Data;
 using DVarr.Data.Entities;
 using DVarr.Infrastructure;
+using DVarr.Services;
 using DVarr.Services.Events;
 using Microsoft.EntityFrameworkCore;
 
@@ -24,6 +25,7 @@ public static class LeagueEndpoints
                     l.Id, l.Sport, l.Name, l.Monitored, provider = l.EventProvider, l.ExternalLeagueId, l.IcsUrl,
                     poster = l.PosterUrl, badge = l.BadgeUrl, color = l.Color,
                     l.ScheduleHorizonDays, eventDurationOverrideS = l.EventDurationOverrideS, monitoredTeams = ParseTeams(l.MonitoredTeamsJson),
+                    monitoredSessions = ParseSessions(l.MonitoredSessionsJson), sessionDurations = SettingsService.ParseSessionDurations(l.SessionDurationsJson),
                     lastSync = l.LastEventSyncUtc, events, mappings = maps,
                 });
             }
@@ -58,6 +60,8 @@ public static class LeagueEndpoints
                 ScheduleHorizonDays = req.ScheduleHorizonDays is > 0 ? req.ScheduleHorizonDays!.Value : 14,
                 EventDurationOverrideS = req.EventDurationOverrideS is > 0 ? req.EventDurationOverrideS : null,
                 MonitoredTeamsJson = SerializeTeams(req.MonitoredTeams),
+                MonitoredSessionsJson = SerializeSessions(req.MonitoredSessions),
+                SessionDurationsJson = SerializeSessionDurations(req.SessionDurations),
                 Monitored = req.Monitored ?? true, CreatedUtc = now,
             };
             await gate.WriteAsync(async () => { db.Leagues.Add(l); await db.SaveChangesAsync(); });
@@ -87,9 +91,23 @@ public static class LeagueEndpoints
             var fmt = (await tsdb.GetSportsAsync(ct)).FirstOrDefault(s => string.Equals(s.Name, l.Sport, StringComparison.OrdinalIgnoreCase))?.Format;
             var teamSport = string.Equals(fmt, "TeamvsTeam", StringComparison.OrdinalIgnoreCase);
             var teams = new List<object>();
+            var sessionTypes = new List<string>();
             if (teamSport)
                 teams = (await tsdb.GetTeamsAsync(id, ct)).Select(t => (object)new { id = t.Id, t.Name, t.Badge, t.Logo }).ToList();
-            return Results.Json(new { id = l.Id, l.Name, l.Sport, l.Poster, l.Badge, teamSport, teams });
+            else
+            {
+                // Motorsport: offer only the session kinds this league actually runs (V8 → just Race; F1 → the full set),
+                // classified from the current season's event titles.
+                var year = EpochTime.ToBrisbane(EpochTime.Now()).Year;
+                var evs = new List<TsdbEvent>();
+                foreach (var season in new[] { year.ToString(), (year - 1).ToString() })
+                {
+                    evs = await tsdb.GetSeasonEventsAsync(id, season, ct);
+                    if (evs.Count > 0) break;
+                }
+                sessionTypes = MotorsportSession.KindsPresent(evs.Select(e => e.Title));
+            }
+            return Results.Json(new { id = l.Id, l.Name, l.Sport, l.Poster, l.Badge, teamSport, teams, sessionTypes });
         });
 
         app.MapPut("/api/leagues/{id:int}", async (int id, LeagueUpsert req, DVarrDbContext db, DbWriteGate gate) =>
@@ -140,6 +158,25 @@ public static class LeagueEndpoints
                                 .ExecuteUpdateAsync(s => s.SetProperty(r => r.State, RecordingState.Cancelled).SetProperty(r => r.FailureReason, "team removed from team-follow filter"));
                     }
                 }
+                if (req.MonitoredSessions != null)
+                {
+                    l.MonitoredSessionsJson = SerializeSessions(req.MonitoredSessions); // [] = all sessions; omitting leaves unchanged
+                    // Narrowed session-follow: cancel not-yet-started recordings whose session is no longer monitored
+                    // (mirror the team cleanup — only Pending/Conflict, never an active capture).
+                    var followed = req.MonitoredSessions.Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim()).ToHashSet(StringComparer.Ordinal);
+                    if (followed.Count > 0)
+                    {
+                        var leagueEvents = await db.Events.Where(e => e.LeagueId == id).Select(e => new { e.Id, e.Title }).ToListAsync();
+                        var outOfScope = leagueEvents
+                            .Where(e => MotorsportSession.Classify(e.Title) is { } k && !followed.Contains(k))
+                            .Select(e => e.Id).ToList();
+                        if (outOfScope.Count > 0)
+                            await db.Recordings
+                                .Where(r => r.EventId != null && outOfScope.Contains(r.EventId.Value) && (r.State == RecordingState.Pending || r.State == RecordingState.Conflict))
+                                .ExecuteUpdateAsync(s => s.SetProperty(r => r.State, RecordingState.Cancelled).SetProperty(r => r.FailureReason, "session removed from session-follow filter"));
+                    }
+                }
+                if (req.SessionDurations != null) l.SessionDurationsJson = SerializeSessionDurations(req.SessionDurations);
                 await db.SaveChangesAsync();
             });
             return Results.Json(new { l.Id, updated = true });
@@ -208,7 +245,7 @@ public static class LeagueEndpoints
         });
 
         // ---- Events ----
-        app.MapGet("/api/events", async (DVarrDbContext db, int? leagueId, long? from, long? to) =>
+        app.MapGet("/api/events", async (DVarrDbContext db, int? leagueId, long? from, long? to, bool? all) =>
         {
             var q = from e in db.Events
                     join l in db.Leagues on e.LeagueId equals l.Id
@@ -217,6 +254,23 @@ public static class LeagueEndpoints
             if (from is > 0) q = q.Where(x => x.e.StartUtc >= from);
             if (to is > 0) q = q.Where(x => x.e.StartUtc <= to);
             var rows = await q.OrderBy(x => x.e.StartUtc).Take(2000).ToListAsync();
+
+            // Follow filter: a league that follows specific teams (team sport) or sessions (motorsport) only shows THOSE
+            // on the calendar — the full schedule is still ingested for episode numbering, this just declutters the view.
+            // A manually-monitored event (MonitoredLocked) always shows. ?all=true returns the unfiltered set.
+            if (all != true && rows.Count > 0)
+            {
+                var ids = rows.Select(x => x.e.LeagueId).Distinct().ToList();
+                var follow = await db.Leagues.Where(l => ids.Contains(l.Id))
+                    .Select(l => new { l.Id, l.MonitoredTeamsJson, l.MonitoredSessionsJson }).ToListAsync();
+                var teamSets = follow.Select(f => (f.Id, Set: AutoScheduleService.ParseMonitoredTeamIds(f.MonitoredTeamsJson)))
+                    .Where(x => x.Set.Count > 0).ToDictionary(x => x.Id, x => x.Set);
+                var sessionSets = follow.Select(f => (f.Id, Set: AutoScheduleService.ParseMonitoredSessions(f.MonitoredSessionsJson)))
+                    .Where(x => x.Set.Count > 0).ToDictionary(x => x.Id, x => x.Set);
+                if (teamSets.Count > 0 || sessionSets.Count > 0)
+                    rows = rows.Where(x => EventFollowed(x.e, teamSets, sessionSets)).ToList();
+            }
+
             return Results.Json(rows.Select(x => new
             {
                 x.e.Id, x.e.Title, x.league, x.sport, x.color, x.e.LeagueId,
@@ -348,10 +402,45 @@ public static class LeagueEndpoints
         catch { /* malformed → treat as no teams (all) */ }
         return Array.Empty<object>();
     }
+
+    // Session-follow: store the chosen motorsport session kinds as a JSON array of strings. Empty/absent = all sessions.
+    private static string? SerializeSessions(List<string>? sessions)
+    {
+        if (sessions is null) return null;
+        var clean = sessions.Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim()).Distinct().ToList();
+        return clean.Count == 0 ? null : System.Text.Json.JsonSerializer.Serialize(clean);
+    }
+    // Return the monitored session kinds in canonical order for the UI (reuses the scheduler's parser).
+    private static string[] ParseSessions(string? json)
+    {
+        var set = AutoScheduleService.ParseMonitoredSessions(json);
+        return set.Count == 0 ? Array.Empty<string>() : MotorsportSession.CanonicalKinds.Where(set.Contains).ToArray();
+    }
+    // Per-session duration overrides: store a JSON map kind→SECONDS (the modal sends seconds). Drops non-positive.
+    private static string? SerializeSessionDurations(Dictionary<string, int>? d)
+    {
+        if (d is null) return null;
+        var clean = d.Where(kv => !string.IsNullOrWhiteSpace(kv.Key) && kv.Value > 0).ToDictionary(kv => kv.Key.Trim(), kv => kv.Value);
+        return clean.Count == 0 ? null : System.Text.Json.JsonSerializer.Serialize(clean);
+    }
+
+    // Calendar follow filter: keep an event if its league follows everything, it matches the followed teams/sessions, or
+    // the user manually pinned it (MonitoredLocked). Fail-open for team-less / unclassifiable events (don't hide a real game).
+    private static bool EventFollowed(Event e, Dictionary<int, HashSet<string>> teamSets, Dictionary<int, HashSet<string>> sessionSets)
+    {
+        if (e.MonitoredLocked) return true;
+        if (teamSets.TryGetValue(e.LeagueId, out var teams))
+            return (e.HomeTeamId != null && teams.Contains(e.HomeTeamId))
+                || (e.AwayTeamId != null && teams.Contains(e.AwayTeamId))
+                || (e.HomeTeamId == null && e.AwayTeamId == null);
+        if (sessionSets.TryGetValue(e.LeagueId, out var kinds))
+            return MotorsportSession.Classify(e.Title) is not { } k || kinds.Contains(k);
+        return true;
+    }
 }
 
 public sealed record TeamRef(string Id, string? Name);
-public sealed record LeagueUpsert(string? Sport, string? Name, string? Provider, string? ExternalLeagueId, string? IcsUrl, int? ScheduleHorizonDays, bool? Monitored, string? Color, int? EventDurationOverrideS, List<TeamRef>? MonitoredTeams);
+public sealed record LeagueUpsert(string? Sport, string? Name, string? Provider, string? ExternalLeagueId, string? IcsUrl, int? ScheduleHorizonDays, bool? Monitored, string? Color, int? EventDurationOverrideS, List<TeamRef>? MonitoredTeams, List<string>? MonitoredSessions, Dictionary<string, int>? SessionDurations);
 public sealed record EventCreate(int LeagueId, string? Title, long StartUtc, long? EndUtc, bool? Monitored);
 public sealed record MonitorReq(bool Monitored);
 public sealed record MappingCreate(int LeagueId, int ChannelId, int? Rank, bool? Pinned);

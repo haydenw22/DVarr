@@ -111,8 +111,15 @@ public sealed class SettingsService
     /// (event_duration_overrides_json, keyed by lowercased sport), then (3) default_event_duration_s (2h fallback).
     /// Soccer → 2h core (+post-pad); motorsport → 3h so race endings aren't clipped.
     /// </summary>
-    public async Task<int> GetEventDurationSecondsAsync(string? sport, int? leagueOverrideS = null)
+    public async Task<int> GetEventDurationSecondsAsync(string? sport, int? leagueOverrideS = null, string? sessionDurationsJson = null, string? eventTitle = null)
     {
+        // Tier 0 (most specific): a motorsport per-SESSION override for this event's session kind (e.g. a 3h race vs a 1h
+        // practice). Classified from the title via MotorsportSession; only applies when the league set session durations.
+        if (!string.IsNullOrWhiteSpace(sessionDurationsJson) && !string.IsNullOrWhiteSpace(eventTitle))
+        {
+            var map = ParseSessionDurations(sessionDurationsJson);
+            if (map.Count > 0 && Events.MotorsportSession.Classify(eventTitle) is { } kind && map.TryGetValue(kind, out var ss)) return ss;
+        }
         if (leagueOverrideS is > 0) return leagueOverrideS.Value; // tier 1: explicit per-league override wins
         var def = await GetIntAsync("default_event_duration_s"); if (def <= 0) def = 7200;
         if (string.IsNullOrWhiteSpace(sport)) return def;
@@ -132,6 +139,27 @@ public sealed class SettingsService
         }
         catch { /* malformed override JSON → use the base default */ }
         return def;
+    }
+
+    /// <summary>Parse a League.SessionDurationsJson map (session-kind → SECONDS). Tolerates number or string values;
+    /// drops non-positive entries. Empty/malformed → no overrides.</summary>
+    public static Dictionary<string, int> ParseSessionDurations(string? json)
+    {
+        var map = new Dictionary<string, int>(StringComparer.Ordinal);
+        if (string.IsNullOrWhiteSpace(json)) return map;
+        try
+        {
+            using var doc = JsonDocument.Parse(json!);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object)
+                foreach (var p in doc.RootElement.EnumerateObject())
+                {
+                    var v = p.Value.ValueKind == JsonValueKind.Number && p.Value.TryGetInt32(out var n) ? n
+                          : p.Value.ValueKind == JsonValueKind.String && int.TryParse(p.Value.GetString(), out var s) ? s : 0;
+                    if (v > 0 && !string.IsNullOrWhiteSpace(p.Name)) map[p.Name.Trim()] = v;
+                }
+        }
+        catch { /* malformed → no per-session overrides */ }
+        return map;
     }
 
     public async Task<bool> GetBoolAsync(string key)

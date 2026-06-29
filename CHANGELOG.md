@@ -12,6 +12,17 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.20.0] — 2026-06-29
+Calendar follows your teams · motorsport session selection · tabbed Settings · per-session durations.
+
+### Added
+- **Following teams now declutters the calendar.** When a league follows specific teams, only those teams' games appear on the calendar — the full schedule is still synced behind the scenes so episode numbers stay correct. A manually-monitored event always shows.
+- **Motorsport session selection.** Adding/editing a motorsport league (F1, V8…) now offers a session picker — Practice 1/2/3, Qualifying, Sprint Qualifying, Sprint, Race — populated from the sessions that league actually runs (V8 → just Race). New motorsport leagues default to **Race + Qualifying**; the scheduler arms (and the calendar shows) only the chosen sessions.
+- **Per-session length overrides.** Set a different assumed length per session kind (e.g. Race 3 h, Practice 1 h) under "Session lengths (advanced)" in the league modal — for when the provider gives no end time.
+
+### Changed
+- **Settings is now tabbed** — Recording · Reliability · Scheduling & EPG · Data sources · Advanced — with fields laid out in columns/rows instead of one long scroll.
+
 ## [1.19.1] — 2026-06-29
 Bug-audit fixes for v1.19.0 (adversarial multi-agent review — 12 real issues fixed, 1 false positive rejected).
 

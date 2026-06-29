@@ -55,7 +55,7 @@ public sealed class AutoScheduleService : BackgroundService
 
     /// <summary>Parse League.MonitoredTeamsJson (a JSON array of {id,name}, or a plain ["id",...] array) into a set of
     /// TheSportsDB team ids. Empty / invalid / absent → empty set (= follow ALL teams).</summary>
-    private static HashSet<string> ParseMonitoredTeamIds(string? json)
+    public static HashSet<string> ParseMonitoredTeamIds(string? json)
     {
         var set = new HashSet<string>(StringComparer.Ordinal);
         if (string.IsNullOrWhiteSpace(json)) return set;
@@ -76,6 +76,28 @@ public sealed class AutoScheduleService : BackgroundService
                 }
         }
         catch { /* malformed → treat as "all teams" */ }
+        return set;
+    }
+
+    /// <summary>Parse League.MonitoredSessionsJson (a JSON array of session-kind strings, e.g. ["Race","Qualifying"])
+    /// into a set. Empty / invalid / absent → empty set (= record ALL sessions). Mirrors team-follow: the full schedule
+    /// is still ingested; this only filters which motorsport sessions the scheduler arms / the calendar shows.</summary>
+    public static HashSet<string> ParseMonitoredSessions(string? json)
+    {
+        var set = new HashSet<string>(StringComparer.Ordinal);
+        if (string.IsNullOrWhiteSpace(json)) return set;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json!);
+            if (doc.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array)
+                foreach (var el in doc.RootElement.EnumerateArray())
+                {
+                    var k = el.ValueKind == System.Text.Json.JsonValueKind.String ? el.GetString()
+                          : el.ValueKind == System.Text.Json.JsonValueKind.Object && el.TryGetProperty("kind", out var v) ? v.GetString() : null;
+                    if (!string.IsNullOrWhiteSpace(k)) set.Add(k!.Trim());
+                }
+        }
+        catch { /* malformed → treat as "all sessions" */ }
         return set;
     }
 
@@ -130,6 +152,17 @@ public sealed class AutoScheduleService : BackgroundService
                 // Fail OPEN for an event with NO team ids at all (e.g. a not-yet-drawn final, or pre-v1.19 data): we
                 // can't tell who's playing, so don't silently drop it — better to over-record than miss a real match.
                 || (e.HomeTeamId == null && e.AwayTeamId == null)).ToList();
+
+        // Session-follow (motorsport): a league with MonitoredSessionsJson arms only those session kinds. Keep an event
+        // if its league follows all sessions, OR its title classifies to a followed kind (fail-open if unclassifiable).
+        var followedSessions = monitoredLeagues.Values
+            .Select(l => (l.Id, Kinds: ParseMonitoredSessions(l.MonitoredSessionsJson)))
+            .Where(x => x.Kinds.Count > 0).ToDictionary(x => x.Id, x => x.Kinds);
+        if (followedSessions.Count > 0)
+            candidates = candidates.Where(e =>
+                !followedSessions.TryGetValue(e.LeagueId, out var kinds)
+                || MotorsportSession.Classify(e.Title) is not { } k
+                || kinds.Contains(k)).ToList();
 
         var handledEventIds = (await db.Recordings
             .Where(r => r.EventId != null && Handled.Contains(r.State))
@@ -243,7 +276,7 @@ public sealed class AutoScheduleService : BackgroundService
                 var ev = await db.Events.FindAsync(new object?[] { eid }, ct);
                 if (ev is null) continue;
                 var cSport = monitoredLeagues.TryGetValue(ev.LeagueId, out var cLeague) ? cLeague.Sport : "";
-                var newEndC = ev.EndUtc ?? ev.StartUtc + await settings.GetEventDurationSecondsAsync(cSport, cLeague?.EventDurationOverrideS);
+                var newEndC = ev.EndUtc ?? ev.StartUtc + await settings.GetEventDurationSecondsAsync(cSport, cLeague?.EventDurationOverrideS, cLeague?.SessionDurationsJson, ev.Title);
                 var winStartC = ev.StartUtc - r.PrePadS;
                 var winEndC = newEndC + r.PostPadS;
                 if (now >= winEndC) { await MarkConflictMissedAsync(db, r.Id, now); continue; } // window passed while parked
@@ -296,7 +329,7 @@ public sealed class AutoScheduleService : BackgroundService
                     // recording row, not the event). Only Pending is touched; channel re-resolution is left as-is.
                     if (pendingByEvent.TryGetValue(e.Id, out var pend))
                     {
-                        var newEnd = e.EndUtc ?? e.StartUtc + await settings.GetEventDurationSecondsAsync(l.Sport, l.EventDurationOverrideS);
+                        var newEnd = e.EndUtc ?? e.StartUtc + await settings.GetEventDurationSecondsAsync(l.Sport, l.EventDurationOverrideS, l.SessionDurationsJson, e.Title);
                         if (pend.StartUtc != e.StartUtc || pend.EndUtc != newEnd || pend.Title != e.Title)
                         {
                             await _gate.WriteAsync(async () =>
@@ -323,7 +356,7 @@ public sealed class AutoScheduleService : BackgroundService
                 if (opts.Count == 0) { _log.LogDebug("[AutoSchedule] event {Id} '{Title}' not resolvable", e.Id, e.Title); continue; }
 
                 // Defensive: events are given a per-sport EndUtc at ingest, but a legacy/manual row may have none.
-                var endUtc = e.EndUtc ?? e.StartUtc + await settings.GetEventDurationSecondsAsync(l.Sport, l.EventDurationOverrideS);
+                var endUtc = e.EndUtc ?? e.StartUtc + await settings.GetEventDurationSecondsAsync(l.Sport, l.EventDurationOverrideS, l.SessionDurationsJson, e.Title);
                 var winStart = e.StartUtc - pre; var winEnd = endUtc + post;
                 var rank = CreditAwarePlanner.MakeRank(RecordingPriority.Normal, l.Priority, e.StartUtc, e.Id);
                 var decision = planner.Decide(opts, winStart, winEnd, rank, slots);

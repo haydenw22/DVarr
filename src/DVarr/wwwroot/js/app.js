@@ -454,7 +454,7 @@ PAGES.leagues = {
     el.innerHTML = `<div class="note">A <b>monitored</b> league auto-records its events on its mapped channel(s). Leagues come from <b>TheSportsDB</b> — pick a sport then search the league; posters &amp; events sync automatically.</div>
       <div class="section"><h2>Leagues ${ls.length ? `<span class="pill s-done">${ls.length}</span>` : ''}</h2>${ls.length ? `<table><thead><tr><th></th><th>League</th><th>Sport</th><th>Events</th><th>Maps</th><th>Monitored</th><th></th></tr></thead><tbody>${ls.map(l => `
         <tr><td>${l.poster ? `<img class="lg-poster" src="${esc(l.poster)}" alt=""/>` : ''}</td>
-        <td><span class="lg-dot" style="background:${leagueColor(l)}" title="calendar colour"></span><b>${esc(l.name)}</b>${l.externalLeagueId ? ` <span class="tag" title="TheSportsDB id">#${esc(l.externalLeagueId)}</span>` : ''}${l.monitoredTeams && l.monitoredTeams.length ? `<div class="muted" style="font-size:11px">following ${l.monitoredTeams.length} team${l.monitoredTeams.length === 1 ? '' : 's'}: ${esc(l.monitoredTeams.map(t => t.name).filter(Boolean).join(', '))}</div>` : ''}</td><td class="muted">${esc(l.sport)}</td>
+        <td><span class="lg-dot" style="background:${leagueColor(l)}" title="calendar colour"></span><b>${esc(l.name)}</b>${l.externalLeagueId ? ` <span class="tag" title="TheSportsDB id">#${esc(l.externalLeagueId)}</span>` : ''}${l.monitoredTeams && l.monitoredTeams.length ? `<div class="muted" style="font-size:11px">following ${l.monitoredTeams.length} team${l.monitoredTeams.length === 1 ? '' : 's'}: ${esc(l.monitoredTeams.map(t => t.name).filter(Boolean).join(', '))}</div>` : ''}${l.monitoredSessions && l.monitoredSessions.length ? `<div class="muted" style="font-size:11px">sessions: ${esc(l.monitoredSessions.join(', '))}</div>` : ''}</td><td class="muted">${esc(l.sport)}</td>
         <td class="mono">${l.events}</td><td class="mono">${l.mappings}</td>
         <td><span class="tag ${l.monitored ? 'ok' : ''}">${l.monitored ? 'yes' : 'no'}</span></td>
         <td class="row" style="gap:6px;flex-wrap:nowrap">
@@ -619,6 +619,9 @@ window.bumpRec = async (id) => { const r = await api.post(`/api/recordings/${id}
 // Per-setting metadata: clear title (t), one-sentence help (h), group (g), and input type (ty). Keys not listed here
 // still render (under "Advanced") so a new backend setting is never hidden. The flat PUT payload is unchanged.
 const SETTINGS_GROUPS = ['Recording', 'Reliability', 'Scheduling', 'Guide', 'TheSportsDB', 'Integrations', 'Display', 'Backups'];
+// v1.20.0: the functional groups roll up into 5 top-level Settings tabs (laid out in columns/rows, not one long scroll).
+const SETTINGS_TABS = ['Recording', 'Reliability', 'Scheduling & EPG', 'Data sources', 'Advanced'];
+const GROUP_TAB = { Recording: 'Recording', Reliability: 'Reliability', Scheduling: 'Scheduling & EPG', Guide: 'Scheduling & EPG', TheSportsDB: 'Data sources', Integrations: 'Data sources', Display: 'Data sources', Backups: 'Data sources', Advanced: 'Advanced' };
 const SETTINGS_META = {
   max_global_concurrent_recordings: { g: 'Recording', t: 'Max simultaneous recordings', h: 'The most recordings DVarr will run at once across all logins.', ty: 'int' },
   default_pre_pad_s: { g: 'Recording', t: 'Pre-roll padding (seconds)', h: 'How long before an event starts to begin recording.', ty: 'int' },
@@ -643,7 +646,7 @@ const SETTINGS_META = {
   epg_past_window_h: { g: 'Guide', t: 'Guide history (hours)', h: 'How many hours of past guide data to keep.', ty: 'int' },
   epg_future_window_d: { g: 'Guide', t: 'Guide lookahead (days)', h: 'How many days of upcoming guide data to keep.', ty: 'int' },
   epg_max_programmes: { g: 'Guide', t: 'Guide safety cap', h: 'Max programmes stored per source to prevent runaway database growth.', ty: 'int' },
-  thesportsdb_api_key: { g: 'TheSportsDB', t: 'TheSportsDB API key', h: '“3” is the public test key (limited). Paste your own key to unlock all sports & leagues.', ty: 'text' },
+  thesportsdb_api_key: { g: 'TheSportsDB', t: 'TheSportsDB API key', h: 'Your premium TheSportsDB (v2) key — required to browse leagues and sync fixtures.', ty: 'text' },
   ha_webhook_url: { g: 'Integrations', t: 'Home Assistant webhook', h: 'Webhook URL to push recording state changes to Home Assistant. Blank = off.', ty: 'url' },
   default_channel_source_filter: { g: 'Display', t: 'Default channel filter', h: 'Which source’s channels to show by default (“all” or a source id).', ty: 'text' },
   timezone_display: { g: 'Display', t: 'Display timezone', h: 'IANA timezone used to show times (e.g. Australia/Brisbane).', ty: 'text' },
@@ -659,21 +662,25 @@ function settingField(k, v) {
   else if (m.ty === 'url') input = `<input type="url" id="${id}" data-k="${esc(k)}" value="${esc(v)}" placeholder="blank = off"/>`;
   else if (m.ty === 'json') input = `<textarea id="${id}" data-k="${esc(k)}" data-json="1" rows="2" spellcheck="false" style="font-family:var(--mono,monospace);font-size:12px">${esc(v)}</textarea>`;
   else input = `<input type="text" id="${id}" data-k="${esc(k)}" value="${esc(v)}"/>`;
-  return `<label class="set-row"><b>${esc(m.t)}</b>${m.h ? `<div class="muted" style="font-size:12px;margin-bottom:4px">${esc(m.h)}</div>` : ''}${input}</label>`;
+  return `<label class="set-row${m.ty === 'json' ? ' set-wide' : ''}"><b>${esc(m.t)}</b>${m.h ? `<div class="muted" style="font-size:12px;margin-bottom:4px">${esc(m.h)}</div>` : ''}${input}</label>`;
 }
 PAGES.settings = {
   title: 'Settings',
   async render(el) {
     const s = await api.get('/api/settings');
-    const advanced = Object.keys(s).filter(k => !SETTINGS_META[k]);
-    const groups = advanced.length ? SETTINGS_GROUPS.concat('Advanced') : SETTINGS_GROUPS;
-    const card = group => {
-      const keys = group === 'Advanced' ? advanced : Object.keys(SETTINGS_META).filter(k => SETTINGS_META[k].g === group && k in s);
-      if (!keys.length) return '';
-      return `<div class="section" style="max-width:720px"><h2>${group}</h2><div class="card"><div class="fields" style="display:grid;gap:16px">${keys.map(k => settingField(k, s[k])).join('')}</div></div></div>`;
-    };
-    el.innerHTML = `${groups.map(card).join('')}
-      <div class="row" style="margin:8px 0 28px;max-width:720px"><button onclick="saveSettings()">Save settings</button><span id="setMsg" class="muted"></span></div>`;
+    // Bucket every setting into one of the 5 tabs (unknown keys → Advanced, so a new backend setting is never hidden).
+    const buckets = {}; SETTINGS_TABS.forEach(t => buckets[t] = []);
+    Object.keys(SETTINGS_META).filter(k => k in s).forEach(k => buckets[GROUP_TAB[SETTINGS_META[k].g] || 'Advanced'].push(k));
+    Object.keys(s).filter(k => !SETTINGS_META[k]).forEach(k => buckets['Advanced'].push(k));
+    const tabs = SETTINGS_TABS.filter(t => buckets[t].length);
+    const nav = `<div class="tab-nav">${tabs.map((t, i) => `<button class="tab-btn${i === 0 ? ' active' : ''}" data-tab="${esc(t)}">${esc(t)}</button>`).join('')}</div>`;
+    const panes = tabs.map((t, i) => `<div class="tab-pane${i === 0 ? ' active' : ''}" data-tab="${esc(t)}"><div class="set-grid">${buckets[t].map(k => settingField(k, s[k])).join('')}</div></div>`).join('');
+    el.innerHTML = `<div class="settings-wrap">${nav}${panes}
+      <div class="row" style="margin:18px 0 28px"><button onclick="saveSettings()">Save settings</button><span id="setMsg" class="muted"></span></div></div>`;
+    el.querySelectorAll('.tab-btn').forEach(b => b.addEventListener('click', () => {
+      el.querySelectorAll('.tab-btn').forEach(x => x.classList.toggle('active', x === b));
+      el.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p.dataset.tab === b.dataset.tab));
+    }));
   },
 };
 
@@ -1026,6 +1033,18 @@ async function openLeagueModal(id) {
       <div class="muted" style="font-size:12px;margin-bottom:8px">Tick the teams you want to record. Tick <b>none</b> (or All) to record <b>every</b> match in the league.</div>
       <div id="lTeams" class="team-grid"></div>
     </div>
+    <div id="lSessionsWrap" style="display:none;margin-top:14px;border-top:1px solid var(--line);padding-top:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px">
+        <b style="font-size:13px">Sessions to record</b>
+        <span><button type="button" class="ghost sm" id="lSessAll">All</button> <button type="button" class="ghost sm" id="lSessNone">None</button></span>
+      </div>
+      <div class="muted" style="font-size:12px;margin-bottom:8px">Tick the sessions you want to record (e.g. just the Race &amp; Qualifying). Tick <b>none</b> (or All) to record <b>every</b> session.</div>
+      <div id="lSessions" class="team-grid"></div>
+      <details style="margin-top:10px"><summary class="muted" style="font-size:12px;cursor:pointer">Session lengths (advanced)</summary>
+        <div class="muted" style="font-size:11px;margin:6px 0 8px">Assumed length per session when the provider gives no end time. Blank = use the league / global default.</div>
+        <div id="lSessDur" class="set-grid"></div>
+      </details>
+    </div>
     <div class="foot"><button class="ghost" onclick="closeModals()">Cancel</button><button onclick="submitLeague(${edit ? x.id : 'null'})">${edit ? 'Save' : 'Add'} league</button></div>`, 'min(720px,96vw)');
 
   $('#lSwatches').querySelectorAll('.swatch').forEach(sw => sw.addEventListener('click', () => {
@@ -1034,8 +1053,12 @@ async function openLeagueModal(id) {
   }));
   $('#lTeamsAll').addEventListener('click', () => $('#lTeams').querySelectorAll('input').forEach(i => i.checked = true));
   $('#lTeamsNone').addEventListener('click', () => $('#lTeams').querySelectorAll('input').forEach(i => i.checked = false));
+  $('#lSessAll').addEventListener('click', () => $('#lSessions').querySelectorAll('input').forEach(i => i.checked = true));
+  $('#lSessNone').addEventListener('click', () => $('#lSessions').querySelectorAll('input').forEach(i => i.checked = false));
 
   const savedTeamIds = new Set((x?.monitoredTeams || []).map(t => String(t.id)));
+  const savedSessions = new Set(x?.monitoredSessions || []);
+  const savedSessionDur = x?.sessionDurations || {}; // {kind: seconds}
 
   // When a league is chosen (dropdown or pasted id), load its logo header + (for team sports) the team picker.
   const onLeaguePicked = async (leagueId) => {
@@ -1049,6 +1072,18 @@ async function openLeagueModal(id) {
       $('#lTeamsWrap').style.display = '';
       $('#lTeams').innerHTML = d.teams.map(t => `<label class="team-pick" title="${esc(t.name)}"><input type="checkbox" data-id="${esc(String(t.id))}" data-name="${esc(t.name)}" ${savedTeamIds.has(String(t.id)) ? 'checked' : ''}/>${t.badge || t.logo ? `<img src="${esc(t.badge || t.logo)}" alt="" loading="lazy"/>` : '<span class="team-pick-dot"></span>'}<span>${esc(t.name)}</span></label>`).join('');
     } else { $('#lTeamsWrap').style.display = 'none'; $('#lTeams').innerHTML = ''; }
+    // Motorsport: a session picker (which sessions to record) + an advanced per-session length section.
+    if (!d.teamSport && Array.isArray(d.sessionTypes) && d.sessionTypes.length) {
+      $('#lSessionsWrap').style.display = '';
+      $('#lSessions').innerHTML = d.sessionTypes.map(k => {
+        const checked = edit ? savedSessions.has(k) : (k === 'Race' || k === 'Qualifying'); // new league → Race + Qualifying
+        return `<label class="team-pick" title="${esc(k)}"><input type="checkbox" data-kind="${esc(k)}" ${checked ? 'checked' : ''}/><span class="team-pick-dot"></span><span>${esc(k)}</span></label>`;
+      }).join('');
+      $('#lSessDur').innerHTML = d.sessionTypes.map(k => {
+        const mins = savedSessionDur[k] ? Math.round(savedSessionDur[k] / 60) : '';
+        return `<label class="field" style="font-size:12px"><span>${esc(k)} <span class="muted">(min)</span></span><input type="number" min="1" data-kind="${esc(k)}" value="${mins}" placeholder="default"/></label>`;
+      }).join('');
+    } else { $('#lSessionsWrap').style.display = 'none'; $('#lSessions').innerHTML = ''; $('#lSessDur').innerHTML = ''; }
   };
 
   let leagues = [];
@@ -1082,6 +1117,13 @@ async function submitLeague(id) {
   const monitoredTeams = teamsShown
     ? [...$('#lTeams').querySelectorAll('input:checked')].map(i => ({ id: i.dataset.id, name: i.dataset.name }))
     : [];
+  // Session-follow (motorsport): ticked session kinds (empty = every session) + per-session length overrides (→ seconds).
+  const sessionsShown = $('#lSessionsWrap') && $('#lSessionsWrap').style.display !== 'none';
+  const monitoredSessions = sessionsShown
+    ? [...$('#lSessions').querySelectorAll('input:checked')].map(i => i.dataset.kind)
+    : [];
+  const sessionDurations = {};
+  if (sessionsShown) [...$('#lSessDur').querySelectorAll('input')].forEach(i => { const m = parseInt(i.value); if (m > 0) sessionDurations[i.dataset.kind] = m * 60; });
   // For a manually-pasted id, let the server fill name/sport from TheSportsDB (lookup by id).
   const body = {
     externalLeagueId,
@@ -1089,7 +1131,7 @@ async function submitLeague(id) {
     sport: manual ? undefined : (opt?.dataset.sport || $('#lSport').value),
     scheduleHorizonDays: parseInt($('#lHorizon').value) || 14, monitored: $('#lMon').checked, color: $('#lColor').value || '',
     eventDurationOverrideS: (() => { const v = parseInt($('#lDuration').value); return v > 0 ? v * 60 : 0; })(),
-    monitoredTeams,
+    monitoredTeams, monitoredSessions, sessionDurations,
   };
   closeModals();
   if (id == null) { const r = await api.post('/api/leagues', body); toast(r.error ? r.error : 'League added', r.error ? 'err' : 'ok'); }

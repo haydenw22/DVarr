@@ -142,6 +142,20 @@ label.field { display:flex; flex-direction:column; gap:5px; font-size:12px; colo
 .team-pick-dot { width:22px; height:22px; border-radius:50%; background:var(--line2); flex:0 0 auto; }
 .team-pick span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
 
+/* ---- settings: tabbed categories + columns/rows ---- */
+.settings-wrap { max-width:980px; }
+.tab-nav { display:flex; flex-wrap:wrap; gap:2px; border-bottom:1px solid var(--line); margin-bottom:20px; }
+.tab-nav .tab-btn { background:none; color:var(--dim); border:0; border-bottom:2px solid transparent; border-radius:0; padding:9px 15px; font-size:13px; font-weight:600; cursor:pointer; }
+.tab-nav .tab-btn:hover { color:var(--txt); background:transparent; }
+.tab-nav .tab-btn.active { color:var(--acc); border-bottom-color:var(--acc); }
+.tab-pane { display:none; }
+.tab-pane.active { display:block; animation:fadein .15s ease; }
+@keyframes fadein { from { opacity:0 } to { opacity:1 } }
+.set-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:18px 24px; align-items:start; }
+.set-grid .set-wide { grid-column:1 / -1; }
+.set-row { display:flex; flex-direction:column; gap:3px; }
+.set-row > input, .set-row > select, .set-row > textarea { width:100%; }
+
 /* ---- guide timeline ---- */
 .guide-legend { display:flex; align-items:center; gap:14px; margin:12px 0 10px; font-size:12px; color:var(--dim); flex-wrap:wrap; }
 .guide-legend .lg { display:inline-flex; align-items:center; gap:6px; }

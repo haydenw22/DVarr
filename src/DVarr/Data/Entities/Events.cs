@@ -35,6 +35,16 @@ public class League
     /// filters which events the auto-scheduler arms (an event is kept if either side's team id is in this set).</summary>
     public string? MonitoredTeamsJson { get; set; }
 
+    /// <summary>Motorsport session-follow: JSON array of session kinds to record (e.g. ["Race","Qualifying"]; kinds from
+    /// <see cref="DVarr.Services.Events.MotorsportSession"/>). Null = ALL sessions. Like team-follow, the full schedule
+    /// is still ingested; this only filters which sessions the scheduler arms and which show on the calendar.</summary>
+    public string? MonitoredSessionsJson { get; set; }
+
+    /// <summary>Motorsport per-session duration overrides: JSON map of session kind → seconds (e.g. {"Race":10800,
+    /// "Practice 1":3600}) for the assumed length when the provider gives no end time. Beats EventDurationOverrideS
+    /// for a matching session; unset kinds fall through to the normal league/sport/default resolution.</summary>
+    public string? SessionDurationsJson { get; set; }
+
     public long? LastEventSyncUtc { get; set; }
 
     /// <summary>Conflict tie-breaker (higher wins) when demand exceeds both logins for a window: a higher-priority
