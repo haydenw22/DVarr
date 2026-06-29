@@ -1020,7 +1020,6 @@ async function openLeagueModal(id) {
       <label class="field">League <span class="muted">(search)</span><input id="lLeagueQ" placeholder="e.g. AFL, NRL, supercars, premier league…"/><select id="lLeague" size="6"><option>Pick a sport first…</option></select></label>
       <label class="field">…or paste a TheSportsDB league id <span class="muted">(for anything not listed)</span><input id="lManualId" value="${esc(x?.externalLeagueId || '')}" placeholder="e.g. 4456"/></label>
       <label class="field">Auto-schedule horizon (days)<input id="lHorizon" type="number" value="${x?.scheduleHorizonDays || 14}"/></label>
-      <label class="field">Event length override <span class="muted">(minutes — blank uses the sport / global default)</span><input id="lDuration" type="number" min="1" value="${x?.eventDurationOverrideS ? Math.round(x.eventDurationOverrideS / 60) : ''}" placeholder="e.g. 180 for a 3-hour race"/></label>
       <label class="field">Calendar colour<input type="hidden" id="lColor" value="${esc(x?.color || '')}"/>
         <div class="swatches" id="lSwatches">${LEAGUE_COLORS.map(c => `<span class="swatch${(x?.color || '').toLowerCase() === c ? ' sel' : ''}" data-c="${c}" style="background:${c}" title="${c}"></span>`).join('')}</div></label>
       <label class="field" style="flex-direction:row;align-items:center;gap:8px"><input id="lMon" type="checkbox" ${(!x || x.monitored) ? 'checked' : ''} style="width:auto"/> Monitored — auto-record this league's events</label>
@@ -1040,11 +1039,17 @@ async function openLeagueModal(id) {
       </div>
       <div class="muted" style="font-size:12px;margin-bottom:8px">Tick the sessions you want to record (e.g. just the Race &amp; Qualifying). Tick <b>none</b> (or All) to record <b>every</b> session.</div>
       <div id="lSessions" class="team-grid"></div>
-      <details style="margin-top:10px"><summary class="muted" style="font-size:12px;cursor:pointer">Session lengths (advanced)</summary>
-        <div class="muted" style="font-size:11px;margin:6px 0 8px">Assumed length per session when the provider gives no end time. Blank = use the league / global default.</div>
-        <div id="lSessDur" class="set-grid"></div>
-      </details>
     </div>
+    <details id="lLengthWrap" style="margin-top:14px;border-top:1px solid var(--line);padding-top:12px"${(x?.eventDurationOverrideS || (x && x.sessionDurations && Object.keys(x.sessionDurations).length)) ? ' open' : ''}>
+      <summary style="font-size:13px;font-weight:600;cursor:pointer">Event length (advanced)</summary>
+      <div class="muted" style="font-size:11px;margin:8px 0">Assumed length when the provider gives no end time. Blank = use the sport / global default.</div>
+      <label class="field" style="font-size:12px;max-width:340px"><span>Default length override <span class="muted">(minutes)</span></span><input id="lDuration" type="number" min="1" value="${x?.eventDurationOverrideS ? Math.round(x.eventDurationOverrideS / 60) : ''}" placeholder="e.g. 120"/></label>
+      <div id="lSessDurBlock" style="display:none;margin-top:12px">
+        <div style="font-size:12px;font-weight:600;margin-bottom:2px">Per-session overrides <span class="muted">(motorsport)</span></div>
+        <div class="muted" style="font-size:11px;margin-bottom:8px">A length per session kind — overrides the default above for that session.</div>
+        <div id="lSessDur" class="set-grid"></div>
+      </div>
+    </details>
     <div class="foot"><button class="ghost" onclick="closeModals()">Cancel</button><button onclick="submitLeague(${edit ? x.id : 'null'})">${edit ? 'Save' : 'Add'} league</button></div>`, 'min(720px,96vw)');
 
   $('#lSwatches').querySelectorAll('.swatch').forEach(sw => sw.addEventListener('click', () => {
@@ -1062,10 +1067,10 @@ async function openLeagueModal(id) {
 
   // When a league is chosen (dropdown or pasted id), load its logo header + (for team sports) the team picker.
   const onLeaguePicked = async (leagueId) => {
-    if (!leagueId) { $('#lHeader').innerHTML = ''; $('#lTeamsWrap').style.display = 'none'; return; }
+    if (!leagueId) { $('#lHeader').innerHTML = ''; $('#lTeamsWrap').style.display = 'none'; $('#lSessionsWrap').style.display = 'none'; $('#lSessDurBlock').style.display = 'none'; return; }
     $('#lHeader').innerHTML = '<span class="muted" style="font-size:12px">Loading league…</span>';
     const d = await api.get('/api/tsdb/league/' + encodeURIComponent(leagueId));
-    if (!d || d.error || !d.name) { $('#lHeader').innerHTML = '<span class="muted" style="font-size:12px">Couldn’t load that league id.</span>'; $('#lTeamsWrap').style.display = 'none'; return; }
+    if (!d || d.error || !d.name) { $('#lHeader').innerHTML = '<span class="muted" style="font-size:12px">Couldn’t load that league id.</span>'; $('#lTeamsWrap').style.display = 'none'; $('#lSessionsWrap').style.display = 'none'; $('#lSessDurBlock').style.display = 'none'; return; }
     const art = d.badge || d.poster;
     $('#lHeader').innerHTML = `${art ? `<img src="${esc(art)}" alt="" class="lg-modal-badge"/>` : ''}<div><b>${esc(d.name)}</b><div class="muted" style="font-size:12px">${esc(d.sport || '')} · #${esc(String(d.id))}</div></div>`;
     if (d.teamSport && Array.isArray(d.teams) && d.teams.length) {
@@ -1075,6 +1080,7 @@ async function openLeagueModal(id) {
     // Motorsport: a session picker (which sessions to record) + an advanced per-session length section.
     if (!d.teamSport && Array.isArray(d.sessionTypes) && d.sessionTypes.length) {
       $('#lSessionsWrap').style.display = '';
+      $('#lSessDurBlock').style.display = '';
       $('#lSessions').innerHTML = d.sessionTypes.map(k => {
         const checked = edit ? savedSessions.has(k) : (k === 'Race' || k === 'Qualifying'); // new league → Race + Qualifying
         return `<label class="team-pick" title="${esc(k)}"><input type="checkbox" data-kind="${esc(k)}" ${checked ? 'checked' : ''}/><span class="team-pick-dot"></span><span>${esc(k)}</span></label>`;
@@ -1083,7 +1089,7 @@ async function openLeagueModal(id) {
         const mins = savedSessionDur[k] ? Math.round(savedSessionDur[k] / 60) : '';
         return `<label class="field" style="font-size:12px"><span>${esc(k)} <span class="muted">(min)</span></span><input type="number" min="1" data-kind="${esc(k)}" value="${mins}" placeholder="default"/></label>`;
       }).join('');
-    } else { $('#lSessionsWrap').style.display = 'none'; $('#lSessions').innerHTML = ''; $('#lSessDur').innerHTML = ''; }
+    } else { $('#lSessionsWrap').style.display = 'none'; $('#lSessions').innerHTML = ''; $('#lSessDurBlock').style.display = 'none'; $('#lSessDur').innerHTML = ''; }
   };
 
   let leagues = [];

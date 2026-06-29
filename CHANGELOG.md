@@ -12,6 +12,12 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.20.1] — 2026-06-29
+Consistent per-league "Event length (advanced)" control for every sport.
+
+### Changed
+- The per-league length override now lives in an **"Event length (advanced)"** disclosure on the league modal for **all** sports (previously a plain inline field for team sports, while only motorsport had the expandable). For motorsport the same disclosure also holds the per-session overrides, so length settings are in one consistent place regardless of sport.
+
 ## [1.20.0] — 2026-06-29
 Calendar follows your teams · motorsport session selection · tabbed Settings · per-session durations.
 
