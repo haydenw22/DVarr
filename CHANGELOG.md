@@ -12,19 +12,25 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
-## [1.18.2] — 2026-06-26
+## [1.18.3] — 2026-06-29
+Dashboard fills the full width.
+
+### Changed
+- **Dashboard uses the full screen width again.** v1.18.2 capped it at 1600px, which left a wide empty band on an ultrawide monitor. The panels now stretch to fill the whole width while still capping at 3 columns (1 on a phone, 2 on a tablet, 3 on desktop). The service-worker cache version was bumped so the updated layout loads without a manual hard-refresh.
+
+## [1.18.2] — 2026-06-29
 Calmer dashboard layout.
 
 ### Changed
 - **Dashboard is capped at 3 columns and a 1600px max width.** On wide / ultrawide / vertical monitors it no longer spreads its panels across a single long row — they now stack into a calmer, mostly-vertical layout (1 column on a phone, 2 on a tablet, up to 3 on desktop), kept to a comfortable reading width.
 
-## [1.18.1] — 2026-06-26
+## [1.18.1] — 2026-06-29
 Dashboard layout fix.
 
 ### Fixed
 - **Dashboard no longer overlaps on wide / ultrawide / vertical monitors.** The *Recording now* and *Scheduled* panels reused the full multi-column Recordings table, which overflowed its narrow dashboard panel and spilled into the neighbouring panel. They now use compact flexbox rows (title + when + state, with a **stop** button on live recordings; tap a row for full controls on the Recordings page) that can never push wider than their panel. The panel grid also snaps to column counts that divide its six panels evenly (1 / 2 / 3 / 6), so rows stay balanced at every width instead of cramming skinny columns.
 
-## [1.18.0] — 2026-06-26
+## [1.18.0] — 2026-06-29
 Mobile/PWA + a full UI refresh, richer dashboard, and GPU-accelerated dead-feed detection.
 
 ### Added
