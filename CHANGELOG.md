@@ -12,6 +12,12 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.18.4] — 2026-06-29
+Stop short labels wrapping mid-word.
+
+### Fixed
+- **Buttons, status pills and tags no longer break mid-word** ("EP/G", "Inges/t", "monitor/ed"). The dashboard's long-title wrap rule (`overflow-wrap`) was inheriting into these short labels; they now stay on one line.
+
 ## [1.18.3] — 2026-06-29
 Dashboard fills the full width.
 

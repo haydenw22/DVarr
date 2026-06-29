@@ -56,16 +56,16 @@ tbody tr:hover { background:#1e232d; }
 .mono { font-family:ui-monospace,Consolas,"Courier New",monospace; font-size:12px; }
 .muted { color:var(--dim); }
 
-.pill { display:inline-block; font-size:11px; padding:2px 9px; border-radius:20px; font-weight:700; letter-spacing:.3px; }
+.pill { display:inline-block; font-size:11px; padding:2px 9px; border-radius:20px; font-weight:700; letter-spacing:.3px; white-space:nowrap; }
 .s-recording,.s-starting{ background:#0f3326; color:var(--ok); }
 .s-pending,.s-cancelled{ background:#22272f; color:var(--dim); }
 .s-recovering,.s-failingover,.s-degraded,.s-finalizing,.s-stopping,.s-finalizeretry,.s-conflict{ background:#3a2f12; color:var(--warn); }
 .s-done{ background:#0e2b3b; color:var(--info); }
 .s-missed,.s-needsattention{ background:#3a1b1f; color:var(--crit); }
-.tag { display:inline-block; font-size:11px; padding:1px 8px; border-radius:6px; background:var(--panel2); color:var(--dim); border:1px solid var(--line2); }
+.tag { display:inline-block; font-size:11px; padding:1px 8px; border-radius:6px; background:var(--panel2); color:var(--dim); border:1px solid var(--line2); white-space:nowrap; }
 .tag.ok { color:var(--ok); border-color:#1f5a40; } .tag.busy { color:var(--warn); border-color:#5a4410; }
 
-button,.btn { font:inherit; background:var(--acc); color:#fff; border:0; border-radius:8px; padding:8px 14px; cursor:pointer; font-weight:600; display:inline-flex; align-items:center; gap:7px; }
+button,.btn { font:inherit; background:var(--acc); color:#fff; border:0; border-radius:8px; padding:8px 14px; cursor:pointer; font-weight:600; display:inline-flex; align-items:center; gap:7px; white-space:nowrap; }
 button:hover { background:var(--acc-d); }
 button.ghost { background:var(--panel2); color:var(--txt); border:1px solid var(--line2); font-weight:500; }
 button.ghost:hover { background:#2a313d; }
