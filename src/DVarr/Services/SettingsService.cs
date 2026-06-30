@@ -62,6 +62,14 @@ public sealed class SettingsService
         ["epg_past_window_h"] = "48",
         ["epg_future_window_d"] = "21",
         ["epg_max_programmes"] = "3000000",
+        // Optional automatic EPG refresh: when ON, DVarr syncs every enabled source's guide once a day at
+        // epg_auto_sync_time (HH:MM) in the FIXED offset epg_auto_sync_offset_minutes (minutes east of UTC; 600 =
+        // Brisbane +10). The container ships no tz database, so this is a pure offset (no daylight-saving shift) — exact
+        // for Brisbane. OFF by default; the manual per-source EPG button is unaffected. (epg_auto_sync_time's default
+        // must stay non-numeric so the /api/settings int-guard treats it as text.)
+        ["epg_auto_sync_enabled"] = "false",
+        ["epg_auto_sync_time"] = "04:00",
+        ["epg_auto_sync_offset_minutes"] = "600",
         // TheSportsDB v2 API key (premium / Patreon), sent as the X-API-KEY header. Empty by default — v2 needs a real
         // (paid) key; paste yours in Settings to unlock the full catalogue (AFL, NRL, all sports) + complete seasons.
         // NOTE: a text setting whose default must NOT look numeric, or the /api/settings int-guard would reject a

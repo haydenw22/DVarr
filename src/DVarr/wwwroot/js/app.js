@@ -646,6 +646,17 @@ const SETTINGS_META = {
   epg_past_window_h: { g: 'Guide', t: 'Guide history (hours)', h: 'How many hours of past guide data to keep.', ty: 'int' },
   epg_future_window_d: { g: 'Guide', t: 'Guide lookahead (days)', h: 'How many days of upcoming guide data to keep.', ty: 'int' },
   epg_max_programmes: { g: 'Guide', t: 'Guide safety cap', h: 'Max programmes stored per source to prevent runaway database growth.', ty: 'int' },
+  epg_auto_sync_enabled: { g: 'Guide', t: 'Auto-sync EPG daily', h: 'Automatically refresh every source’s TV guide once a day at the time below.', ty: 'bool' },
+  epg_auto_sync_time: { g: 'Guide', t: 'EPG sync time', h: 'Time of day (24-hour) to auto-refresh the guide, in the timezone below.', ty: 'time' },
+  epg_auto_sync_offset_minutes: { g: 'Guide', t: 'EPG sync timezone', h: 'Timezone for the sync time — a fixed offset (no daylight-saving adjustment).', ty: 'select', opts: [
+    { v: '600', l: 'UTC+10:00 — Brisbane, Sydney, Melbourne' },
+    { v: '570', l: 'UTC+09:30 — Adelaide' },
+    { v: '480', l: 'UTC+08:00 — Perth' },
+    { v: '720', l: 'UTC+12:00 — Auckland' },
+    { v: '0', l: 'UTC+00:00 — UTC, London' },
+    { v: '-300', l: 'UTC-05:00 — New York' },
+    { v: '-480', l: 'UTC-08:00 — Los Angeles' },
+  ] },
   thesportsdb_api_key: { g: 'TheSportsDB', t: 'TheSportsDB API key', h: 'Your premium TheSportsDB (v2) key — required to browse leagues and sync fixtures.', ty: 'text' },
   ha_webhook_url: { g: 'Integrations', t: 'Home Assistant webhook', h: 'Webhook URL to push recording state changes to Home Assistant. Blank = off.', ty: 'url' },
   default_channel_source_filter: { g: 'Display', t: 'Default channel filter', h: 'Which source’s channels to show by default (“all” or a source id).', ty: 'text' },
@@ -659,6 +670,8 @@ function settingField(k, v) {
     return `<label class="set-row" style="display:flex;gap:10px;align-items:flex-start"><input type="checkbox" id="${id}" data-k="${esc(k)}" data-bool="1" ${v === 'true' ? 'checked' : ''} style="width:auto;margin-top:3px"/><span><b>${esc(m.t)}</b>${m.h ? `<div class="muted" style="font-size:12px">${esc(m.h)}</div>` : ''}</span></label>`;
   let input;
   if (m.ty === 'int') input = `<input type="number" id="${id}" data-k="${esc(k)}" value="${esc(v)}"/>`;
+  else if (m.ty === 'time') input = `<input type="time" id="${id}" data-k="${esc(k)}" value="${esc(v)}"/>`;
+  else if (m.ty === 'select') input = `<select id="${id}" data-k="${esc(k)}">${(m.opts || []).map(o => `<option value="${esc(o.v)}" ${String(v) === String(o.v) ? 'selected' : ''}>${esc(o.l)}</option>`).join('')}</select>`;
   else if (m.ty === 'url') input = `<input type="url" id="${id}" data-k="${esc(k)}" value="${esc(v)}" placeholder="blank = off"/>`;
   else if (m.ty === 'json') input = `<textarea id="${id}" data-k="${esc(k)}" data-json="1" rows="2" spellcheck="false" style="font-family:var(--mono,monospace);font-size:12px">${esc(v)}</textarea>`;
   else input = `<input type="text" id="${id}" data-k="${esc(k)}" value="${esc(v)}"/>`;

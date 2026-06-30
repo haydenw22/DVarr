@@ -12,6 +12,12 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.21.0] — 2026-06-29
+Scheduled automatic EPG refresh.
+
+### Added
+- **Auto-sync the TV guide on a daily schedule.** Settings → Scheduling & EPG now has **Auto-sync EPG daily** (on/off), an **EPG sync time** (time of day), and an **EPG sync timezone**. When on, DVarr refreshes every source's EPG once a day at that local time. A failed source keeps its previous guide (last-known-good); the manual per-source EPG button still works. Off by default. The timezone is a fixed UTC offset (no daylight-saving shift) — exact for Brisbane; the container intentionally ships no timezone database.
+
 ## [1.20.1] — 2026-06-29
 Consistent per-league "Event length (advanced)" control for every sport.
 

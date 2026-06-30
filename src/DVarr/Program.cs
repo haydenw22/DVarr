@@ -73,6 +73,7 @@ builder.Services.AddHttpClient();
 builder.Services.AddHostedService<SchedulerService>();
 builder.Services.AddHostedService<AutoScheduleService>();
 builder.Services.AddHostedService<HaWebhookService>();
+builder.Services.AddHostedService<EpgAutoSyncService>();
 
 var urls = builder.Configuration["DVarr:Urls"] ?? "http://0.0.0.0:1867";
 builder.WebHost.UseUrls(urls);
