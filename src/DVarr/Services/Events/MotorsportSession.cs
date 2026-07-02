@@ -15,6 +15,12 @@ public static class MotorsportSession
         "Practice 1", "Practice 2", "Practice 3", "Sprint Qualifying", "Sprint", "Qualifying", "Race", "Testing",
     };
 
+    /// <summary>Whether a league's sport is motorsport — the ONLY place session-follow / per-session logic may apply.
+    /// Any other sport's titles all classify as "Race" (the fallback), so applying a session filter to a team-sport
+    /// league would silently drop every match; every consumer must gate on this.</summary>
+    public static bool IsMotorsport(string? sport)
+        => sport != null && sport.Contains("motorsport", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>Best-effort session kind for a motorsport event title. A bare event/Grand-Prix name (no session word)
     /// is the main Race. Returns null only for an empty title. Order matters: longer/more-specific matches win.</summary>
     public static string? Classify(string? title)

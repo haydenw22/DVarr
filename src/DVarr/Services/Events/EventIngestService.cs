@@ -42,7 +42,10 @@ public sealed class EventIngestService
         // carry a real DTEND keep it (the ?? only fills when EndUtc is null). Resolve the league base ONCE (async), then
         // per-event apply a motorsport per-session override (Race vs Practice length) synchronously — no async-in-loop.
         var baseDurationS = await _settings.GetEventDurationSecondsAsync(l.Sport, l.EventDurationOverrideS);
-        var sessionDurations = SettingsService.ParseSessionDurations(l.SessionDurationsJson);
+        // Per-session lengths are motorsport-only (any other sport's titles all classify as "Race", which would apply
+        // one session's length to every match) — same guard as the scheduler/API.
+        var sessionDurations = MotorsportSession.IsMotorsport(l.Sport)
+            ? SettingsService.ParseSessionDurations(l.SessionDurationsJson) : new Dictionary<string, int>();
         long DurationFor(IngestedEvent ie)
             => sessionDurations.Count > 0 && MotorsportSession.Classify(ie.Title) is { } k && sessionDurations.TryGetValue(k, out var s) ? s : baseDurationS;
         long? EndFor(IngestedEvent ie) => ie.EndUtc ?? ie.StartUtc + DurationFor(ie);

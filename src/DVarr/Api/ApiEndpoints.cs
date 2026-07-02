@@ -585,6 +585,10 @@ public static class ApiEndpoints
                     return Results.Json(new { error = $"unknown setting key: {kv.Key}" }, statusCode: 400);
                 if (int.TryParse(def, out _) && !int.TryParse(kv.Value, out _))
                     return Results.Json(new { error = $"setting '{kv.Key}' must be an integer" }, statusCode: 400);
+                // Time-of-day settings must be HH:MM (a junk value would otherwise be accepted, shown in the UI, and
+                // silently fall back to the default at runtime).
+                if (kv.Key == "epg_auto_sync_time" && !System.Text.RegularExpressions.Regex.IsMatch(kv.Value.Trim(), "^([01]?[0-9]|2[0-3]):[0-5][0-9]$"))
+                    return Results.Json(new { error = $"setting '{kv.Key}' must be a time in HH:MM (24-hour) format" }, statusCode: 400);
             }
             foreach (var kv in values) await settings.SetAsync(kv.Key, kv.Value);
             return Results.Json(await settings.GetAllAsync());

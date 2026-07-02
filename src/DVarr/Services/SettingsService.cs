@@ -70,6 +70,10 @@ public sealed class SettingsService
         ["epg_auto_sync_enabled"] = "false",
         ["epg_auto_sync_time"] = "04:00",
         ["epg_auto_sync_offset_minutes"] = "600",
+        // Internal bookkeeping (NOT a user setting; hidden by the UI): the local date ("yyyy-MM-dd") the daily EPG sync
+        // last fired — persisted so a container redeploy after the fire time doesn't re-run the whole sync. Must live in
+        // Defaults or EnsureDefaultsAsync's orphan-prune would delete the row on every boot.
+        ["epg_auto_sync_last"] = "",
         // TheSportsDB v2 API key (premium / Patreon), sent as the X-API-KEY header. Empty by default — v2 needs a real
         // (paid) key; paste yours in Settings to unlock the full catalogue (AFL, NRL, all sports) + complete seasons.
         // NOTE: a text setting whose default must NOT look numeric, or the /api/settings int-guard would reject a
@@ -122,8 +126,9 @@ public sealed class SettingsService
     public async Task<int> GetEventDurationSecondsAsync(string? sport, int? leagueOverrideS = null, string? sessionDurationsJson = null, string? eventTitle = null)
     {
         // Tier 0 (most specific): a motorsport per-SESSION override for this event's session kind (e.g. a 3h race vs a 1h
-        // practice). Classified from the title via MotorsportSession; only applies when the league set session durations.
-        if (!string.IsNullOrWhiteSpace(sessionDurationsJson) && !string.IsNullOrWhiteSpace(eventTitle))
+        // practice). Classified from the title via MotorsportSession; only applies when the league set session durations,
+        // and ONLY for motorsport — any other sport's titles all classify as "Race", which would misapply one length everywhere.
+        if (Events.MotorsportSession.IsMotorsport(sport) && !string.IsNullOrWhiteSpace(sessionDurationsJson) && !string.IsNullOrWhiteSpace(eventTitle))
         {
             var map = ParseSessionDurations(sessionDurationsJson);
             if (map.Count > 0 && Events.MotorsportSession.Classify(eventTitle) is { } kind && map.TryGetValue(kind, out var ss)) return ss;

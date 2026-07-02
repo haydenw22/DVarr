@@ -681,10 +681,12 @@ PAGES.settings = {
   title: 'Settings',
   async render(el) {
     const s = await api.get('/api/settings');
+    // Internal bookkeeping keys — persisted server-side but not user settings; never render them.
+    const HIDDEN = ['epg_auto_sync_last'];
     // Bucket every setting into one of the 5 tabs (unknown keys → Advanced, so a new backend setting is never hidden).
     const buckets = {}; SETTINGS_TABS.forEach(t => buckets[t] = []);
     Object.keys(SETTINGS_META).filter(k => k in s).forEach(k => buckets[GROUP_TAB[SETTINGS_META[k].g] || 'Advanced'].push(k));
-    Object.keys(s).filter(k => !SETTINGS_META[k]).forEach(k => buckets['Advanced'].push(k));
+    Object.keys(s).filter(k => !SETTINGS_META[k] && !HIDDEN.includes(k)).forEach(k => buckets['Advanced'].push(k));
     const tabs = SETTINGS_TABS.filter(t => buckets[t].length);
     const nav = `<div class="tab-nav">${tabs.map((t, i) => `<button class="tab-btn${i === 0 ? ' active' : ''}" data-tab="${esc(t)}">${esc(t)}</button>`).join('')}</div>`;
     const panes = tabs.map((t, i) => `<div class="tab-pane${i === 0 ? ' active' : ''}" data-tab="${esc(t)}"><div class="set-grid">${buckets[t].map(k => settingField(k, s[k])).join('')}</div></div>`).join('');
@@ -1079,10 +1081,13 @@ async function openLeagueModal(id) {
   const savedSessionDur = x?.sessionDurations || {}; // {kind: seconds}
 
   // When a league is chosen (dropdown or pasted id), load its logo header + (for team sports) the team picker.
+  let pickSeq = 0; // latest-request-wins: rapid league switching must not let a stale response repaint the pickers
   const onLeaguePicked = async (leagueId) => {
+    const seq = ++pickSeq;
     if (!leagueId) { $('#lHeader').innerHTML = ''; $('#lTeamsWrap').style.display = 'none'; $('#lSessionsWrap').style.display = 'none'; $('#lSessDurBlock').style.display = 'none'; return; }
     $('#lHeader').innerHTML = '<span class="muted" style="font-size:12px">Loading league…</span>';
     const d = await api.get('/api/tsdb/league/' + encodeURIComponent(leagueId));
+    if (seq !== pickSeq) return; // a newer pick superseded this response — drop it
     if (!d || d.error || !d.name) { $('#lHeader').innerHTML = '<span class="muted" style="font-size:12px">Couldn’t load that league id.</span>'; $('#lTeamsWrap').style.display = 'none'; $('#lSessionsWrap').style.display = 'none'; $('#lSessDurBlock').style.display = 'none'; return; }
     const art = d.badge || d.poster;
     $('#lHeader').innerHTML = `${art ? `<img src="${esc(art)}" alt="" class="lg-modal-badge"/>` : ''}<div><b>${esc(d.name)}</b><div class="muted" style="font-size:12px">${esc(d.sport || '')} · #${esc(String(d.id))}</div></div>`;

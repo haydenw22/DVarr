@@ -49,9 +49,11 @@ public static class LeagueEndpoints
             // persist a junk "League" row that can never sync events.
             if (meta is null && string.IsNullOrWhiteSpace(req.Name))
                 return Results.BadRequest(new { error = "No TheSportsDB league found for that id." });
+            var sport = (meta?.Sport ?? req.Sport ?? "").Trim();
+            var motorsport = MotorsportSession.IsMotorsport(sport); // session-follow / per-session lengths are motorsport-only
             var l = new League
             {
-                Sport = (meta?.Sport ?? req.Sport ?? "").Trim(),
+                Sport = sport,
                 Name = (req.Name ?? meta?.Name ?? "League").Trim(),
                 EventProvider = "thesportsdb",
                 ExternalLeagueId = req.ExternalLeagueId!.Trim(),
@@ -60,8 +62,8 @@ public static class LeagueEndpoints
                 ScheduleHorizonDays = req.ScheduleHorizonDays is > 0 ? req.ScheduleHorizonDays!.Value : 14,
                 EventDurationOverrideS = req.EventDurationOverrideS is > 0 ? req.EventDurationOverrideS : null,
                 MonitoredTeamsJson = SerializeTeams(req.MonitoredTeams),
-                MonitoredSessionsJson = SerializeSessions(req.MonitoredSessions),
-                SessionDurationsJson = SerializeSessionDurations(req.SessionDurations),
+                MonitoredSessionsJson = motorsport ? SerializeSessions(req.MonitoredSessions) : null,
+                SessionDurationsJson = motorsport ? SerializeSessionDurations(req.SessionDurations) : null,
                 Monitored = req.Monitored ?? true, CreatedUtc = now,
             };
             await gate.WriteAsync(async () => { db.Leagues.Add(l); await db.SaveChangesAsync(); });
@@ -160,10 +162,15 @@ public static class LeagueEndpoints
                 }
                 if (req.MonitoredSessions != null)
                 {
-                    l.MonitoredSessionsJson = SerializeSessions(req.MonitoredSessions); // [] = all sessions; omitting leaves unchanged
+                    // Session-follow only applies to MOTORSPORT (every other sport's titles classify as "Race", so a
+                    // session list on a team-sport league would silently drop all its matches AND mass-cancel its pending
+                    // recordings below). For non-motorsport a non-empty list is ignored/cleared; [] always clears.
+                    var followed = MotorsportSession.IsMotorsport(l.Sport)
+                        ? req.MonitoredSessions.Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim()).ToHashSet(StringComparer.Ordinal)
+                        : new HashSet<string>(StringComparer.Ordinal);
+                    l.MonitoredSessionsJson = followed.Count == 0 ? null : SerializeSessions(req.MonitoredSessions);
                     // Narrowed session-follow: cancel not-yet-started recordings whose session is no longer monitored
                     // (mirror the team cleanup — only Pending/Conflict, never an active capture).
-                    var followed = req.MonitoredSessions.Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim()).ToHashSet(StringComparer.Ordinal);
                     if (followed.Count > 0)
                     {
                         var leagueEvents = await db.Events.Where(e => e.LeagueId == id).Select(e => new { e.Id, e.Title }).ToListAsync();
@@ -176,7 +183,8 @@ public static class LeagueEndpoints
                                 .ExecuteUpdateAsync(s => s.SetProperty(r => r.State, RecordingState.Cancelled).SetProperty(r => r.FailureReason, "session removed from session-follow filter"));
                     }
                 }
-                if (req.SessionDurations != null) l.SessionDurationsJson = SerializeSessionDurations(req.SessionDurations);
+                if (req.SessionDurations != null) // per-session lengths are motorsport-only for the same reason
+                    l.SessionDurationsJson = MotorsportSession.IsMotorsport(l.Sport) ? SerializeSessionDurations(req.SessionDurations) : null;
                 await db.SaveChangesAsync();
             });
             return Results.Json(new { l.Id, updated = true });
@@ -253,23 +261,29 @@ public static class LeagueEndpoints
             if (leagueId is > 0) q = q.Where(x => x.e.LeagueId == leagueId);
             if (from is > 0) q = q.Where(x => x.e.StartUtc >= from);
             if (to is > 0) q = q.Where(x => x.e.StartUtc <= to);
-            var rows = await q.OrderBy(x => x.e.StartUtc).Take(2000).ToListAsync();
+            // Generous SQL cap only (bounded memory); the response cap is applied AFTER the follow filter below so a
+            // heavily-filtered league can't eat the page budget with rows that then get discarded.
+            var rows = await q.OrderBy(x => x.e.StartUtc).Take(10000).ToListAsync();
 
             // Follow filter: a league that follows specific teams (team sport) or sessions (motorsport) only shows THOSE
             // on the calendar — the full schedule is still ingested for episode numbering, this just declutters the view.
-            // A manually-monitored event (MonitoredLocked) always shows. ?all=true returns the unfiltered set.
+            // A manually-monitored event (MonitoredLocked + Monitored) always shows. ?all=true returns the unfiltered set.
             if (all != true && rows.Count > 0)
             {
                 var ids = rows.Select(x => x.e.LeagueId).Distinct().ToList();
                 var follow = await db.Leagues.Where(l => ids.Contains(l.Id))
-                    .Select(l => new { l.Id, l.MonitoredTeamsJson, l.MonitoredSessionsJson }).ToListAsync();
+                    .Select(l => new { l.Id, l.Sport, l.MonitoredTeamsJson, l.MonitoredSessionsJson }).ToListAsync();
                 var teamSets = follow.Select(f => (f.Id, Set: AutoScheduleService.ParseMonitoredTeamIds(f.MonitoredTeamsJson)))
                     .Where(x => x.Set.Count > 0).ToDictionary(x => x.Id, x => x.Set);
-                var sessionSets = follow.Select(f => (f.Id, Set: AutoScheduleService.ParseMonitoredSessions(f.MonitoredSessionsJson)))
+                // Session-follow is meaningful only for motorsport (any other title classifies as "Race", so applying it
+                // to a team-sport league would blank the whole calendar) — guard by sport, mirroring the scheduler.
+                var sessionSets = follow.Where(f => MotorsportSession.IsMotorsport(f.Sport))
+                    .Select(f => (f.Id, Set: AutoScheduleService.ParseMonitoredSessions(f.MonitoredSessionsJson)))
                     .Where(x => x.Set.Count > 0).ToDictionary(x => x.Id, x => x.Set);
                 if (teamSets.Count > 0 || sessionSets.Count > 0)
                     rows = rows.Where(x => EventFollowed(x.e, teamSets, sessionSets)).ToList();
             }
+            if (rows.Count > 2000) rows = rows.Take(2000).ToList();
 
             return Results.Json(rows.Select(x => new
             {
@@ -425,10 +439,12 @@ public static class LeagueEndpoints
     }
 
     // Calendar follow filter: keep an event if its league follows everything, it matches the followed teams/sessions, or
-    // the user manually pinned it (MonitoredLocked). Fail-open for team-less / unclassifiable events (don't hide a real game).
+    // the user manually pinned it (MonitoredLocked + Monitored). Fail-open for team-less / unclassifiable events (don't
+    // hide a real game). A locked-but-UNmonitored event (user clicked "don't record") gets no special treatment — it
+    // follows the normal rules like any other event, so un-monitoring can't resurrect a hidden game on the calendar.
     private static bool EventFollowed(Event e, Dictionary<int, HashSet<string>> teamSets, Dictionary<int, HashSet<string>> sessionSets)
     {
-        if (e.MonitoredLocked) return true;
+        if (e.MonitoredLocked && e.Monitored) return true;
         if (teamSets.TryGetValue(e.LeagueId, out var teams))
             return (e.HomeTeamId != null && teams.Contains(e.HomeTeamId))
                 || (e.AwayTeamId != null && teams.Contains(e.AwayTeamId))

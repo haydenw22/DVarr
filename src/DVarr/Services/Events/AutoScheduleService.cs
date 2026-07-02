@@ -153,9 +153,12 @@ public sealed class AutoScheduleService : BackgroundService
                 // can't tell who's playing, so don't silently drop it — better to over-record than miss a real match.
                 || (e.HomeTeamId == null && e.AwayTeamId == null)).ToList();
 
-        // Session-follow (motorsport): a league with MonitoredSessionsJson arms only those session kinds. Keep an event
-        // if its league follows all sessions, OR its title classifies to a followed kind (fail-open if unclassifiable).
+        // Session-follow (motorsport ONLY — guarded by sport, since every non-motorsport title classifies as "Race" and
+        // an API-set session list on a team-sport league would silently drop all its matches): a league with
+        // MonitoredSessionsJson arms only those session kinds. Keep an event if its league follows all sessions, OR its
+        // title classifies to a followed kind (fail-open if unclassifiable).
         var followedSessions = monitoredLeagues.Values
+            .Where(l => MotorsportSession.IsMotorsport(l.Sport))
             .Select(l => (l.Id, Kinds: ParseMonitoredSessions(l.MonitoredSessionsJson)))
             .Where(x => x.Kinds.Count > 0).ToDictionary(x => x.Id, x => x.Kinds);
         if (followedSessions.Count > 0)

@@ -12,6 +12,19 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.21.1] — 2026-07-02
+Bug-audit fixes for v1.20.0–v1.21.0 (adversarial multi-agent review — 12 confirmed issues fixed, 4 false positives rejected).
+
+### Fixed
+- **Session-follow / per-session lengths are now hard-gated to motorsport everywhere** (scheduler, calendar, league create/edit, duration resolution). Any other sport's titles all classify as "Race", so an API-set session list on a team-sport league could have silently dropped every match — and worse, mass-cancelled its pending recordings. The UI never allowed this; the guard is defence-in-depth at every boundary.
+- **A container redeploy no longer re-runs the daily EPG sync.** The fired-today marker is persisted (hidden `epg_auto_sync_last` setting), so only the first pass after the scheduled time syncs — not every deploy after 4am. Written before the sync starts so a mid-sync restart can't double-fire either.
+- **EPG auto-sync robustness:** a fresh DI scope per source (a guide sync streams for minutes); a skipped/failed source now logs a *warning* (visible) instead of info; a corrupted timezone-offset value warns and falls back to Brisbane instead of silently meaning UTC; `epg_auto_sync_time` is validated as HH:MM at the API.
+- **Calendar:** the response cap is applied *after* the follow filter (a heavily-filtered league can't eat the page budget); un-monitoring an event no longer force-shows it on a filtered calendar (a manual *monitor* still always shows).
+- **League modal:** rapid league-switching can no longer let a stale response repaint the team/session pickers (latest-request-wins guard).
+
+### Verified / rejected
+- Four audit claims rejected as false positives: the "EPG fires twice per local day" claim (disproven by `DateTimeOffset.Date` semantics *and* the production log — one fire per Brisbane day); two "stale field when switching leagues mid-edit" claims (the override belongs to the league row being edited — by design); and the "empty open disclosure" claim (the disclosure holds the universal default-length field since v1.20.1).
+
 ## [1.21.0] — 2026-06-29
 Scheduled automatic EPG refresh.
 
