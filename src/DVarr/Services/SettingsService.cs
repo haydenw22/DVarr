@@ -79,6 +79,9 @@ public sealed class SettingsService
         // NOTE: a text setting whose default must NOT look numeric, or the /api/settings int-guard would reject a
         // numeric key that overflows Int32 (premium keys are 10 digits).
         ["thesportsdb_api_key"] = "",
+        // Arm-window EPG re-pick: when ON, a Pending recording within ~24h of start is re-resolved against the live
+        // guide and moved (same credential only) to whichever mapped channel's EPG actually shows the event.
+        ["epg_repick_enabled"] = "true",
         ["recorder_input_mode"] = "direct_ts",
         // When a recording's pre-roll attempt captures nothing (e.g. the channel isn't live yet), make ONE guaranteed
         // fresh attempt at the event's real start time. Never interrupts a recording that's already capturing.

@@ -58,6 +58,7 @@ builder.Services.AddScoped<IngestService>();
 builder.Services.AddScoped<EpgIngestService>();
 builder.Services.AddScoped<EventIngestService>();
 builder.Services.AddScoped<ResolverService>();
+builder.Services.AddScoped<EpgRepickService>();
 builder.Services.AddScoped<CreditAwarePlanner>();
 builder.Services.AddScoped<DVarr.Services.Media.MediaImportService>();
 builder.Services.AddHttpClient<XtreamClient>()

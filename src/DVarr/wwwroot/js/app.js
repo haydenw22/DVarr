@@ -646,6 +646,7 @@ const SETTINGS_META = {
   epg_past_window_h: { g: 'Guide', t: 'Guide history (hours)', h: 'How many hours of past guide data to keep.', ty: 'int' },
   epg_future_window_d: { g: 'Guide', t: 'Guide lookahead (days)', h: 'How many days of upcoming guide data to keep.', ty: 'int' },
   epg_max_programmes: { g: 'Guide', t: 'Guide safety cap', h: 'Max programmes stored per source to prevent runaway database growth.', ty: 'int' },
+  epg_repick_enabled: { g: 'Guide', t: 'Guide-match channel pick', h: 'Within ~24 h of start, re-check each mapped channel’s guide and record from the channel that actually shows the event (e.g. Fox 503 vs 504). Manual channel choices are never moved.', ty: 'bool' },
   epg_auto_sync_enabled: { g: 'Guide', t: 'Auto-sync EPG daily', h: 'Automatically refresh every source’s TV guide once a day at the time below.', ty: 'bool' },
   epg_auto_sync_time: { g: 'Guide', t: 'EPG sync time', h: 'Time of day (24-hour) to auto-refresh the guide, in the timezone below.', ty: 'time' },
   epg_auto_sync_offset_minutes: { g: 'Guide', t: 'EPG sync timezone', h: 'Timezone for the sync time — a fixed offset (no daylight-saving adjustment).', ty: 'select', opts: [

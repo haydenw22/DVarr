@@ -12,6 +12,14 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.22.0] — 2026-07-03
+Guide-match channel picking, and no more silent "couldn't schedule" skips.
+
+### Added
+- **Records from the channel that actually shows the game.** Map two (or more) channels to a league — e.g. Fox Sports 503 + 504 for AFL — and within ~24 h of start DVarr re-checks each mapped channel's guide and moves the recording to the one whose EPG lists the event (with a final check right before recording starts). Same login only, with threshold + hysteresis so it never flaps; an `EpgRepick` entry appears in the Activity feed when it moves. If every mapped channel's guide is blank close to an event, DVarr quietly refreshes that source's EPG (at most once per 30 min). Toggle: Settings → Scheduling & EPG → *Guide-match channel pick*.
+- **Loud warning when a monitored event can't be scheduled.** A league with monitored events but no usable channel mapping now raises an `Unresolvable` warning in the Activity feed (once per league per day) instead of a debug-only skip — the failure mode behind the missed West Coast v Adelaide game.
+- Manually reassigned recordings are now **channel-locked** (new `Recording.ChannelLocked`, migration Phase20): the guide-match picker never moves a channel you chose by hand.
+
 ## [1.21.1] — 2026-07-02
 Bug-audit fixes for v1.20.0–v1.21.0 (adversarial multi-agent review — 12 confirmed issues fixed, 4 false positives rejected).
 

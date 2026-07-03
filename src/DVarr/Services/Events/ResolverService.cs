@@ -5,7 +5,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace DVarr.Services.Events;
 
-public sealed record ResolvedChannel(int ChannelId, int SourceId, int StreamId, string ChannelName, double Score, int Rank);
+public sealed record ResolvedChannel(int ChannelId, int SourceId, int StreamId, string ChannelName, double Score, int Rank, double EpgScore = 0);
 public sealed record ResolveResult(bool Ok, ResolvedChannel? Primary, List<ResolvedChannel> Fallbacks, double Confidence, string? Reason);
 
 /// <summary>
@@ -24,7 +24,9 @@ public sealed class ResolverService
 
     public ResolverService(DVarrDbContext db, ILogger<ResolverService> log) { _db = db; _log = log; }
 
-    public async Task<ResolveResult> ResolveAsync(int eventId, CancellationToken ct = default)
+    /// <param name="restrictSourceId">When set, only channels on THIS credential are considered — used by the
+    /// arm-window EPG re-pick, which must never move a recording across credentials (slot planning owns that).</param>
+    public async Task<ResolveResult> ResolveAsync(int eventId, CancellationToken ct = default, int? restrictSourceId = null)
     {
         var ev = await _db.Events.FindAsync(new object?[] { eventId }, ct);
         if (ev is null) return new ResolveResult(false, null, new(), 0, "event not found");
@@ -41,9 +43,11 @@ public sealed class ResolverService
         {
             var ch = await _db.Channels.FindAsync(new object?[] { m.ChannelId }, ct);
             if (ch is null || !ch.Enabled || disabledSources.Contains(ch.SourceId)) continue;
+            if (restrictSourceId is { } rs && ch.SourceId != rs) continue;
 
             // Pinned mappings dominate; ranked mappings score below them. EPG can only ADD a bounded bonus.
             var score = m.Pinned ? PinFloor - m.Rank : Math.Max(0, 100 - (m.Rank - 1) * 5);
+            double epgSim = 0;
 
             // For a date-only event we only know the day (anchored to Brisbane midnight) — match across the whole
             // local day; for a timed event keep the tight 30-min window. Pick the BEST-matching programme, not the
@@ -59,10 +63,13 @@ public sealed class ResolverService
                     .Where(p => p.SourceId == ch.SourceId && p.EpgChannelId == eid && p.StartUtc <= winEnd && p.StopUtc >= ev.StartUtc)
                     .Select(p => p.Title).Take(50).ToListAsync(ct);
                 if (progTitles.Count > 0)
-                    score += progTitles.Max(t => Similarity(t, ev.Title)) * EpgBonusMax;
+                {
+                    epgSim = progTitles.Max(t => Similarity(t, ev.Title));
+                    score += epgSim * EpgBonusMax;
+                }
             }
 
-            scored.Add(new ResolvedChannel(ch.Id, ch.SourceId, ch.StreamId, ch.Name, score, m.Rank));
+            scored.Add(new ResolvedChannel(ch.Id, ch.SourceId, ch.StreamId, ch.Name, score, m.Rank, epgSim));
         }
         if (scored.Count == 0) return new ResolveResult(false, null, new(), 0, "mapped channels are missing or disabled");
 

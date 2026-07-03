@@ -513,6 +513,7 @@ public static class ApiEndpoints
                     // SourceId is part of the (Id, SourceId) alternate key — re-point via RecordingRepoint (it can't be
                     // changed on the tracked entity). Drops the auto-fallbacks too (a credential change invalidates them).
                     await RecordingRepoint.ApplyAsync(db, id, equiv.SourceId, equiv.ChannelId, equiv.StreamId, now);
+                    r.ChannelLocked = true; // a manual placement is durable — the arm-window EPG re-pick must not move it
                     placed = true;
                 }
                 // Only unpark a Conflict to Pending on an EXPLICIT placement (the user picked a specific login). A

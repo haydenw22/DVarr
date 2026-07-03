@@ -49,6 +49,9 @@ public enum NotificationKind
 {
     Started, Completed, Failed, Missed, StalledRelaunched, FailedOver,
     PlaceholderDetected, Degraded, NeedsAttention, Conflict, Cancelled,
+    // Appended only (int-stored — existing rows keep their meaning):
+    EpgRepick,     // arm-window guide match moved a recording to the channel actually showing the event
+    Unresolvable,  // a monitored event can't be scheduled (league has no usable channel mapping)
 }
 
 public enum Severity { Info, Warn, Critical }

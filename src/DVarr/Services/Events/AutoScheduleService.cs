@@ -35,6 +35,10 @@ public sealed class AutoScheduleService : BackgroundService
         RecordingState.FailingOver, RecordingState.Degraded, RecordingState.Stopping, RecordingState.Finalizing,
     };
 
+    // Per-league stamp of the last "no channel mapping" warning (≤1 per league per day; static — service is a singleton
+    // hosted service but keep it instance-independent for safety).
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, long> _lastNoMapWarn = new();
+
     public AutoScheduleService(IServiceScopeFactory scopes, DbWriteGate gate, ILogger<AutoScheduleService> log)
     { _scopes = scopes; _gate = gate; _log = log; }
 
@@ -356,7 +360,23 @@ public sealed class AutoScheduleService : BackgroundService
                 }
 
                 var opts = await planner.OptionsForEventAsync(e.Id, ct);
-                if (opts.Count == 0) { _log.LogDebug("[AutoSchedule] event {Id} '{Title}' not resolvable", e.Id, e.Title); continue; }
+                if (opts.Count == 0)
+                {
+                    _log.LogDebug("[AutoSchedule] event {Id} '{Title}' not resolvable", e.Id, e.Title);
+                    // A monitored event that CAN'T be scheduled is a silent recording loss (tonight's Crows game) —
+                    // surface it in the Activity feed, at most once per league per day so 20 fixtures don't spam.
+                    if (_lastNoMapWarn.GetOrAdd(e.LeagueId, 0) is var lastWarn && now - lastWarn > 86400 && _lastNoMapWarn.TryUpdate(e.LeagueId, now, lastWarn))
+                        await _gate.WriteAsync(async () =>
+                        {
+                            db.Notifications.Add(new Notification
+                            {
+                                TsUtc = now, Kind = NotificationKind.Unresolvable, Severity = Severity.Warn,
+                                Message = $"League '{l.Name}': monitored event '{e.Title}' can't be scheduled — no usable channel mapping. Map a channel on the Leagues page.",
+                            });
+                            await db.SaveChangesAsync(ct);
+                        }, ct);
+                    continue;
+                }
 
                 // Defensive: events are given a per-sport EndUtc at ingest, but a legacy/manual row may have none.
                 var endUtc = e.EndUtc ?? e.StartUtc + await settings.GetEventDurationSecondsAsync(l.Sport, l.EventDurationOverrideS, l.SessionDurationsJson, e.Title);
@@ -411,6 +431,23 @@ public sealed class AutoScheduleService : BackgroundService
         }
         if (placed > 0 || conflicted > 0 || promoted > 0)
             _log.LogInformation("[AutoSchedule] placed {P}, promoted {Pr}, conflicted {C} (across {N} credential(s))", placed, promoted, conflicted, slots.Select(s => s.SourceId).Distinct().Count());
+
+        // 3) Arm-window EPG re-pick sweep: recordings starting within 24h are inside the provider's ~28h guide depth,
+        //    so re-resolve them against the LIVE guide and move to the mapped channel that actually shows the event
+        //    (same credential only; EpgRepickService applies threshold + hysteresis + ChannelLocked + kill-switch).
+        var repick = scope.ServiceProvider.GetRequiredService<EpgRepickService>();
+        var repickIds = await db.Recordings.AsNoTracking()
+            .Where(r => r.State == RecordingState.Pending && r.EventId != null && !r.ChannelLocked
+                        && r.StartUtc > now && r.StartUtc <= now + 86400)
+            .Select(r => r.Id).ToListAsync(ct);
+        var repicked = 0;
+        foreach (var rid in repickIds)
+        {
+            try { if (await repick.TryRepickAsync(rid, ct)) repicked++; }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception ex) { _log.LogWarning(ex, "[AutoSchedule] EPG re-pick failed for recording {Id}", rid); }
+        }
+        if (repicked > 0) _log.LogInformation("[AutoSchedule] EPG re-pick moved {N} recording(s) to guide-matched channels", repicked);
         return interval;
     }
 

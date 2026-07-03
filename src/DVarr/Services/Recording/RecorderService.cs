@@ -70,6 +70,13 @@ public sealed class RecorderService
             var xtream = scope.ServiceProvider.GetRequiredService<XtreamClient>();
             var settings = scope.ServiceProvider.GetRequiredService<SettingsService>();
 
+            // Final EPG re-pick against the freshest guide, BEFORE the recording row is loaded/leased — if another
+            // mapped channel's guide shows the event, the row is re-pointed (same credential) and the load below sees
+            // the new channel. No-op for manual recordings, locked channels, or when the feature is off.
+            try { await scope.ServiceProvider.GetRequiredService<DVarr.Services.Events.EpgRepickService>().TryRepickAsync(recordingId, stoppingToken); }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { _log.LogWarning(ex, "[Recorder] arm-time EPG re-pick failed for {Id} — recording on the planned channel", recordingId); }
+
             var rec = await db.Recordings.FindAsync(recordingId);
             if (rec is null) return "recording not found";
 

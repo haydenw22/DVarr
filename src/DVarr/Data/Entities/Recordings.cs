@@ -27,6 +27,10 @@ public class Recording
 
     public RecordingPriority Priority { get; set; } = RecordingPriority.Normal;
 
+    /// <summary>Set when the user manually places this recording on a channel (reassign) — the arm-window EPG
+    /// re-pick must never move a locked recording; a manual choice is durable.</summary>
+    public bool ChannelLocked { get; set; }
+
     /// <summary>OFF at v1 (D4); default false. Same-credential dual capture is impossible (one login = one slot).</summary>
     public bool DualCapture { get; set; }
 
