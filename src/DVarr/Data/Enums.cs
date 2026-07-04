@@ -52,6 +52,7 @@ public enum NotificationKind
     // Appended only (int-stored — existing rows keep their meaning):
     EpgRepick,     // arm-window guide match moved a recording to the channel actually showing the event
     Unresolvable,  // a monitored event can't be scheduled (league has no usable channel mapping)
+    AutoExtended,  // smart auto-stop adjusted a live recording's window from the guide's live status (extended / capped / closed)
 }
 
 public enum Severity { Info, Warn, Critical }

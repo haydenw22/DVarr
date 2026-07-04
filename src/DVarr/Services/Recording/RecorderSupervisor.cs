@@ -79,18 +79,39 @@ public sealed class RecorderSupervisor
         var fallbacksUsed = 0;
         var cleanEofWindow = new Queue<long>(); // wall-clock marks of recent clean EOFs (flap detector)
 
+        // ---- Live window end (Phase 21 smart auto-stop) ----
+        // AutoStopService may EXTEND Recording.EndUtc mid-capture (extra time / penalties) or trim an unused
+        // extension back once the guide reports the event finished. The windowEndUtc PARAMETER is therefore only
+        // the INITIAL value; this throttled reader re-checks the row (at most one DB read per 15s — the capture
+        // monitor already wakes every 3s, so an extension is picked up well within a step) and refreshes the
+        // effective window. SAFETY: the result is floored at the initial windowEndUtc, so a missing row, a read
+        // failure, or ANY external shrink can never end a capture before the window it was armed with — with no
+        // auto-stop writes this behaves exactly like the old read-once local.
+        var windowEnd = windowEndUtc;
+        long windowEndReadUtc = 0;
+        async Task<long> CurrentWindowEndAsync()
+        {
+            var nowW = EpochTime.Now();
+            if (nowW - windowEndReadUtc >= 15)
+            {
+                windowEndReadUtc = nowW;
+                windowEnd = Math.Max(windowEndUtc, await ReadWindowEndAsync(recordingId, windowEnd));
+            }
+            return windowEnd;
+        }
+
         try
         {
             await SetStateAsync(recordingId, RecordingState.Starting, r => { r.SegmentDir = segDir; r.OutputPath = outputPath; });
 
-            while (!stopToken.IsCancellationRequested && EpochTime.Now() < windowEndUtc)
+            while (!stopToken.IsCancellationRequested && EpochTime.Now() < await CurrentWindowEndAsync())
             {
                 try
                 {
-                    var exit = await CaptureUntilStopOrStallAsync(recordingId, url, segDir, windowEndUtc, stallTimeoutS, nativeRate, contentVerify, contentDeadTimeoutS, contentVerifyHwaccel, contentVerifyFps, userAgent, lease, stopToken);
+                    var exit = await CaptureUntilStopOrStallAsync(recordingId, url, segDir, CurrentWindowEndAsync, stallTimeoutS, nativeRate, contentVerify, contentDeadTimeoutS, contentVerifyHwaccel, contentVerifyFps, userAgent, lease, stopToken);
 
                     // Normal end of window or explicit stop → leave the capture loop and finalize.
-                    if (stopToken.IsCancellationRequested || EpochTime.Now() >= windowEndUtc)
+                    if (stopToken.IsCancellationRequested || EpochTime.Now() >= await CurrentWindowEndAsync())
                         break;
                     if (exit.Kind is ExitKind.WindowClosed or ExitKind.StopRequested)
                         break;
@@ -249,9 +270,12 @@ public sealed class RecorderSupervisor
         }
     }
 
-    /// <summary>Launch one ffmpeg, watch output growth, return a typed reason when it exits or stalls.</summary>
+    /// <summary>Launch one ffmpeg, watch output growth, return a typed reason when it exits or stalls.
+    /// <paramref name="windowEndAsync"/> is RunAsync's throttled live window-end reader (initial value floored),
+    /// evaluated by the 3s monitor loop below so a mid-capture auto-stop extension moves the cut-off without
+    /// touching ffmpeg — the segmenter just keeps rolling until the (possibly extended) window closes.</summary>
     private async Task<CaptureExit> CaptureUntilStopOrStallAsync(
-        int recordingId, string url, string segDir, long windowEndUtc, int stallTimeoutS, bool nativeRate,
+        int recordingId, string url, string segDir, Func<Task<long>> windowEndAsync, int stallTimeoutS, bool nativeRate,
         bool contentVerify, int contentDeadTimeoutS, string? contentVerifyHwaccel, int contentVerifyFps,
         string? userAgent, TunerLease lease, CancellationToken stopToken)
     {
@@ -398,7 +422,7 @@ public sealed class RecorderSupervisor
                 return new CaptureExit(rc == 0 ? ExitKind.CleanEof : ExitKind.Crashed, $"exited rc={rc}: {tail}");
             }
 
-            if (stopToken.IsCancellationRequested || EpochTime.Now() >= windowEndUtc)
+            if (stopToken.IsCancellationRequested || EpochTime.Now() >= await windowEndAsync())
             {
                 await GracefulStopAsync(proc);
                 return new CaptureExit(ExitKind.WindowClosed, "window closed / stop requested");
@@ -745,6 +769,25 @@ public sealed class RecorderSupervisor
     }
 
     // ----- state persistence + SSE -----
+
+    /// <summary>Re-read the recording's current window end (EndUtc + PostPadS) from the DB — a fresh short
+    /// AsNoTracking scope, same pattern as <see cref="UpdateProgressAsync"/>. Returns <paramref name="fallback"/>
+    /// (the last-known window) on a missing row or ANY read error, so a transient DB hiccup can never shrink or
+    /// abort a live capture. Callers additionally floor the result at the initial window (see RunAsync).</summary>
+    private async Task<long> ReadWindowEndAsync(int recordingId, long fallback)
+    {
+        try
+        {
+            using var scope = _d.Scopes.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<DVarrDbContext>();
+            var row = await db.Recordings.AsNoTracking()
+                .Where(r => r.Id == recordingId)
+                .Select(r => new { r.EndUtc, r.PostPadS })
+                .FirstOrDefaultAsync();
+            return row is null ? fallback : row.EndUtc + row.PostPadS;
+        }
+        catch { return fallback; }
+    }
 
     private async Task UpdateProgressAsync(int recordingId, long bytes, long? contentOkUtc = null)
     {

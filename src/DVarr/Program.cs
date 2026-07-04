@@ -73,6 +73,7 @@ builder.Services.AddHttpClient("preview", c => c.Timeout = Timeout.InfiniteTimeS
 builder.Services.AddHttpClient();
 builder.Services.AddHostedService<SchedulerService>();
 builder.Services.AddHostedService<AutoScheduleService>();
+builder.Services.AddHostedService<AutoStopService>(); // smart auto-stop: extends live recordings while the guide says the event is still in play
 builder.Services.AddHostedService<HaWebhookService>();
 builder.Services.AddHostedService<EpgAutoSyncService>();
 

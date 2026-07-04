@@ -45,6 +45,17 @@ public class League
     /// for a matching session; unset kinds fall through to the normal league/sport/default resolution.</summary>
     public string? SessionDurationsJson { get; set; }
 
+    /// <summary>Smart auto-stop mode for this league's recordings. Null or "auto" = Auto (AutoStopService may extend a
+    /// live recording's end while the guide says the event is still in play — extra time/penalties — and close it once
+    /// the provider reports a terminal status). "fixed" = Fixed (never touch the window; record exactly the scheduled
+    /// window + pads, the pre-Phase-21 behaviour).</summary>
+    public string? AutoStopMode { get; set; }
+
+    /// <summary>Cap (seconds) on the TOTAL auto-stop extension beyond the event's scheduled end for this league.
+    /// Null = the per-sport default (2h for motorsport — "keep full race endings" — else 1h). Only meaningful when
+    /// <see cref="AutoStopMode"/> is Auto.</summary>
+    public int? AutoStopMaxExtendS { get; set; }
+
     public long? LastEventSyncUtc { get; set; }
 
     /// <summary>Conflict tie-breaker (higher wins) when demand exceeds both logins for a window: a higher-priority

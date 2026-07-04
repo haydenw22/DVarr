@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#0f1116" />
+  <meta name="theme-color" content="#0a0f1c" />
   <meta name="color-scheme" content="dark" />
   <title>DVarr</title>
   <link rel="manifest" href="manifest.webmanifest" />
@@ -20,9 +20,9 @@
   <div class="app">
     <div class="scrim" id="scrim"></div>
     <aside class="sidebar">
-      <div class="brand">D<span>V</span>arr<small>IPTV Sports DVR</small></div>
+      <div class="brand"><img src="dvarr-logo.png" alt="" /><div><span>DV</span>arr<small>IPTV Sports DVR</small></div></div>
       <nav class="menu" id="menu"></nav>
-      <div class="sidebar-foot"><span class="dot" id="footDot"></span><span id="footTxt">connecting…</span></div>
+      <div class="sidebar-foot"><span class="foot-chip"><span class="dot" id="footDot"></span><span id="footTxt">connecting…</span></span></div>
     </aside>
     <div class="content">
       <header class="topbar">
@@ -32,7 +32,8 @@
         <h1 id="pageTitle">Dashboard</h1>
         <div class="actions" id="pageActions"></div>
         <div class="status">
-          <span id="stSlots" title="free / total credential slots">— / —</span>
+          <span class="chip" title="free / total credential slots"><span class="dot" id="stSlotsDot"></span><span id="stSlots">— / —</span></span>
+          <span class="chip" title="database health"><span class="dot" id="stDbDot"></span><span id="stDbTxt">Database</span></span>
           <span id="stClock" class="mono"></span>
         </div>
       </header>

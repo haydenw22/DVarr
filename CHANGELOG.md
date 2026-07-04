@@ -12,6 +12,19 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.23.0] — 2026-07-04
+Smart auto-stop (no more missed extra time) · full UI redesign · league filters.
+
+### Added
+- **Smart auto-stop.** Recordings no longer cut off when a game runs long (extra time, penalties, red flags). Near the scheduled end, DVarr checks TheSportsDB: while the guide says the event is still in play (or gives no signal — motorsport), the recording **extends in 15-minute steps**, capped per league (default +60 min, motorsport +120 min) and never into the next recording's slot on the same login; once a terminal status (FT / AET / **AP — After Penalties**, the exact status of the Australia v Egypt game this missed) is reported, it closes after the normal post-pad. Auto never shortens a window. Per-league control in the league modal ("Recording stop": Auto [default] / Fixed + max extension); kill-switch `auto_stop_enabled`; every extension/close shows as an `AutoExtended` entry in the Activity feed. Migration Phase21.
+- **League filters**: the Recordings page can filter by league (recordings now carry their league), and the Leagues page's channel-mappings table gets a league filter + aligned full-width layout.
+
+### Changed
+- **Complete UI redesign** — new deep-navy design language across every page: KPI stat cards, icon-chip panel cards with count pills and "View all" links, pill status badges, gradient primary buttons, redesigned sidebar (active-state accent bar, version chip) and topbar (slots + Database status chips), rebuilt dashboard (Recording Now / Scheduled 24h / Recently Completed / Sources / Next 24 Hours / Leagues panels), restyled tables, modals, tabs, guide and calendar.
+
+### Docs
+- `docs/12-remote-access-and-calendar.md` — full design (nothing built yet) for the subscribable calendar feed, external access at dvr.whittledigitalsolutions.com via SWAG/Cloudflare, and built-in accounts/roles with a simplified member UI. Includes a security finding: the IPTV stream-proxy redirect embeds provider credentials — external exposure stays blocked until auth ships.
+
 ## [1.22.0] — 2026-07-03
 Guide-match channel picking, and no more silent "couldn't schedule" skips.
 

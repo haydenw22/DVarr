@@ -66,6 +66,9 @@ const I = {
   plus: '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>',
   refresh: '<svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>',
   conflicts: '<svg viewBox="0 0 24 24"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>',
+  clock: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
+  check: '<svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>',
+  layers: '<svg viewBox="0 0 24 24"><path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="M2 12l10 5 10-5"/><path d="M2 17l10 5 10-5"/></svg>',
 };
 
 const NAV = [
@@ -120,6 +123,10 @@ async function pollHealth() {
     const h = await api.get('/api/health');
     $('#stSlots').textContent = `${h.sources.free_credentials} / ${h.sources.total} free`;
     $('#stClock').textContent = h.time.brisbane.replace(/:\d\d /, ' ');
+    // topbar chips (same poll as before — no extra requests): slots dot + database health
+    const sd = $('#stSlotsDot'); if (sd) sd.className = 'dot ' + (h.sources.free_credentials > 0 ? 'ok' : 'warn');
+    const dd = $('#stDbDot'); if (dd) dd.className = 'dot ' + (h.db.ok ? 'ok' : 'bad');
+    const dt = $('#stDbTxt'); if (dt) dt.textContent = 'Database ' + (h.db.ok ? 'OK' : 'down');
     $('#footDot').className = 'dot ' + (h.db.ok ? 'ok' : 'bad');
     $('#footTxt').textContent = `v${(h.version || '0').split('.').slice(0, 3).join('.')} · db ${h.db.ok ? 'ok' : 'down'}`;
     const badge = $('#menu .nav-item[data-route="recordings"] .nav-badge');
@@ -127,7 +134,12 @@ async function pollHealth() {
       if (h.recordings.active > 0) { badge.textContent = h.recordings.active; badge.className = 'nav-badge live'; badge.style.display = ''; }
       else { badge.style.display = 'none'; }
     }
-  } catch { $('#footDot').className = 'dot bad'; $('#footTxt').textContent = 'offline'; }
+  } catch {
+    $('#footDot').className = 'dot bad'; $('#footTxt').textContent = 'offline';
+    const sd = $('#stSlotsDot'); if (sd) sd.className = 'dot bad';
+    const dd = $('#stDbDot'); if (dd) dd.className = 'dot bad';
+    const dt = $('#stDbTxt'); if (dt) dt.textContent = 'Database ?';
+  }
 }
 
 function buildNav() {
@@ -161,64 +173,86 @@ PAGES.dashboard = {
       const upcoming = events.filter(e => e.start <= now + 86400).sort((a, b) => a.start - b.start); // next 24h only
       const completed = recs.filter(r => DASH_TERMINAL.includes(r.state)).sort((a, b) => (b.endUtc || b.startUtc) - (a.endUtc || a.startUtc)).slice(0, 6);
       const srcList = Array.isArray(sources) ? sources : [];
-      const hd = (title, n, cls) => `${esc(title)}${n ? ` <span class="pill ${cls}">${n}</span>` : ''}`;
-      // Responsive panel grid (auto-fit) so it's a single readable column on a phone and 2–3 across on desktop.
+      // openCalEvent (row click in "Next 24 hours") reads window._calEvents — populate it from this fetch too.
+      window._calEvents = window._calEvents || {}; events.forEach(e => { window._calEvents[e.id] = e; });
+      // KPI row + responsive panel grid (single column on a phone, 2–3 across on desktop).
       el.innerHTML = `
         ${statRow(health, live.length, scheduled.length)}
         <div class="dash-grid">
-          <div class="section dash-cell"><h2>${hd('Recording now', live.length, 's-recording')}</h2>${live.length ? dashRecList(live) : emptyBox('Nothing recording right now.')}</div>
-          <div class="section dash-cell"><h2>${hd('Scheduled — next 24h', scheduled.length, 's-pending')}</h2>${scheduled.length ? dashRecList(scheduled) : emptyBox('Nothing scheduled in the next 24 hours.')}</div>
-          <div class="section dash-cell"><h2>${hd('Recently completed', completed.length, 's-done')}</h2>${completed.length ? completedTable(completed) : emptyBox('No finished recordings yet.')}</div>
-          <div class="section dash-cell"><h2>${hd('Sources', srcList.length, 's-done')}</h2>${srcList.length ? sourcesPanel(srcList) : emptyBox('No sources yet — add one on the Sources page.')}</div>
-          <div class="section dash-cell"><h2>${hd('Next 24 hours', upcoming.length, 's-done')}</h2>${upcoming.length ? upcomingEvents(upcoming, leagues) : emptyBox('No monitored events in the next 24 hours.')}</div>
-          <div class="section dash-cell"><h2>${hd('Leagues', leagues.length, 's-done')}</h2>${leagues.length ? leagueChips(leagues) : emptyBox('No leagues yet — add one on the Leagues page.')}</div>
+          ${dashPanel({ icon: I.recordings, title: 'Recording now', count: live.length, link: '#/recordings', body: live.length ? dashRecList(live, leagues) : radarEmpty() })}
+          ${dashPanel({ icon: I.clock, title: 'Scheduled — next 24h', count: scheduled.length, link: '#/recordings', body: scheduled.length ? dashRecList(scheduled, leagues) : emptyBox('Nothing scheduled in the next 24 hours.') })}
+          ${dashPanel({ icon: I.check, title: 'Recently completed', count: completed.length, link: '#/recordings', body: completed.length ? completedTable(completed, leagues) : emptyBox('No finished recordings yet.') })}
+          ${dashPanel({ icon: I.sources, title: 'Sources', count: srcList.length, body: srcList.length ? sourcesPanel(srcList) : emptyBox('No sources yet — add one on the Sources page.'), foot: { href: '#/sources', label: 'Manage sources' } })}
+          ${dashPanel({ icon: I.calendar, title: 'Next 24 hours', count: upcoming.length, body: upcoming.length ? upcomingEvents(upcoming, leagues) : emptyBox('No monitored events in the next 24 hours.'), foot: { href: '#/calendar', label: 'View full schedule' } })}
+          ${dashPanel({ icon: I.leagues, title: 'Leagues', count: leagues.length, body: leagues.length ? leagueChips(leagues) : emptyBox('No leagues yet — add one on the Leagues page.'), foot: { href: '#/leagues', label: 'Browse all leagues' } })}
         </div>`;
     };
     await draw();
     setLive(draw);
   },
 };
-// At-a-glance counters across the top of the dashboard (reuses the .cards/.stat component).
+// KPI stat cards across the top of the dashboard (icon chip + label + value + subcaption + accent underline).
 function statRow(h, liveN, schedN) {
-  const card = (label, val) => `<div class="card stat-card"><h3>${esc(label)}</h3><div class="stat">${val}</div></div>`;
+  const kpi = (cls, icon, label, val, sub) => `<div class="kpi${cls ? ' ' + cls : ''}"><span class="kpi-ic">${icon}</span><div class="kpi-meta"><div class="kpi-label">${esc(label)}</div><div class="kpi-value">${val}</div><div class="kpi-sub">${esc(sub)}</div></div></div>`;
   const slots = h && h.sources ? `${h.sources.free_credentials}<small> / ${h.sources.total}</small>` : '—';
-  const db = h && h.db ? (h.db.ok ? '<span style="color:var(--ok)">OK</span>' : '<span style="color:var(--crit)">down</span>') : '—';
-  return `<div class="cards stat-row">
-    ${card('Recording now', liveN)}
-    ${card('Scheduled · 24h', schedN)}
-    ${card('Free slots', slots)}
-    ${card('Database', db)}</div>`;
+  const dbOk = h && h.db ? !!h.db.ok : null;
+  return `<div class="kpi-row">
+    ${kpi('', I.recordings, 'Recording now', liveN, liveN ? 'live capture in progress' : 'idle')}
+    ${kpi('', I.clock, 'Scheduled · 24h', schedN, 'in the next 24 hours')}
+    ${kpi('', I.layers, 'Free slots', slots, 'provider stream slots')}
+    ${kpi(dbOk == null ? '' : dbOk ? 'ok' : 'bad', I.check, 'Database', dbOk == null ? '—' : dbOk ? 'OK' : 'DOWN', dbOk == null ? 'no health data' : dbOk ? 'storage healthy' : 'check the server')}</div>`;
+}
+// Panel card: header (icon + uppercase title + count pill + "View all") over a list body, optional footer link.
+function dashPanel(o) {
+  return `<div class="panel dash-cell">
+    <div class="panel-head">${o.icon || ''}<span class="panel-title">${esc(o.title)}</span>${o.count ? `<span class="count-pill">${o.count}</span>` : ''}${o.link ? `<a class="panel-link" href="${o.link}">View all</a>` : ''}</div>
+    <div class="panel-body">${o.body}</div>
+    ${o.foot ? `<a class="panel-foot" href="${o.foot.href}">${esc(o.foot.label)} →</a>` : ''}
+  </div>`;
+}
+// Pure-CSS radar (concentric circles) empty state for the "Recording now" panel.
+function radarEmpty() {
+  return `<div class="radar-empty"><div class="radar"></div><b>Nothing recording right now.</b><span>You're all caught up!</span></div>`;
+}
+// 44px icon chip for a list row: league poster when we know it, else a tinted monogram.
+function rowChip(r, leagues) {
+  const lg = (leagues || []).find(l => l.id === r.leagueId);
+  if (lg && lg.poster) return `<span class="prow-ic"><img src="${esc(lg.poster)}" alt="" loading="lazy"/></span>`;
+  const c = lg ? leagueColor(lg) : '#3b82f6'; // leagueColor is #rrggbb-validated → safe in a style attr
+  const ch = String(r.league || r.title || '?').trim().charAt(0).toUpperCase() || '?';
+  return `<span class="prow-ic prow-mono" style="background:${c}22;color:${c};border-color:${c}44">${esc(ch)}</span>`;
 }
 // Compact recording rows for the dashboard panels — narrow-friendly (title + when + state, with stop for live ones).
 // The full management table with all actions lives on the Recordings page; tap a row to go there.
-function dashRecList(rows) {
+function dashRecList(rows, leagues) {
   return `<div class="dash-rec">${rows.map(r => {
     const active = ACTIVE.includes(r.state);
-    return `<div class="dash-rec-row clickrow" onclick="location.hash='#/recordings'">
-      <div class="dash-rec-main"><b>${esc(r.title)}</b><div class="muted dash-rec-sub">${brisbane(r.startUtc)}${r.channel ? ' · ' + esc(r.channel) : ''}</div></div>
-      <div class="dash-rec-side"><span class="pill ${sc(r.state)}">${r.state}</span>${active ? `<button class="ghost sm" onclick="event.stopPropagation();stopRec(${r.id})">stop</button>` : ''}</div>
+    return `<div class="prow clickrow" onclick="location.hash='#/recordings'">
+      ${rowChip(r, leagues)}
+      <div class="prow-main"><b>${esc(r.title)}</b><div class="prow-sub">${brisbane(r.startUtc)}${r.channel ? ' · ' + esc(r.channel) : ''}</div></div>
+      <div class="prow-side"><span class="pill ${sc(r.state)}">${r.state}</span>${active ? `<button class="ghost sm" onclick="event.stopPropagation();stopRec(${r.id})">stop</button>` : ''}</div>
     </div>`;
   }).join('')}</div>`;
 }
-// Recently-finished recordings (Done/Missed/NeedsAttention/Cancelled) — tap a row to jump to the Recordings page.
-function completedTable(rows) {
-  return `<table><tbody>${rows.map(r => `
-    <tr class="clickrow" onclick="location.hash='#/recordings'">
-      <td>${esc(r.title)}<div class="muted" style="font-size:11px">${brisbane(r.endUtc || r.startUtc)}</div></td>
-      <td class="mono muted" style="width:74px;text-align:right">${mb(r.bytesWritten)}</td>
-      <td style="width:108px"><span class="pill ${sc(r.state)}">${r.state}</span></td>
-    </tr>`).join('')}</tbody></table>`;
+// Recently-finished recordings (Done/Missed/NeedsAttention/Cancelled) — size in MB + state pill; tap → Recordings page.
+function completedTable(rows, leagues) {
+  return `<div class="dash-rec">${rows.map(r => `
+    <div class="prow clickrow" onclick="location.hash='#/recordings'">
+      ${rowChip(r, leagues)}
+      <div class="prow-main"><b>${esc(r.title)}</b><div class="prow-sub">${brisbane(r.endUtc || r.startUtc)} · ${mb(r.bytesWritten)}</div></div>
+      <div class="prow-side"><span class="pill ${sc(r.state)}">${r.state}</span></div>
+    </div>`).join('')}</div>`;
 }
 // Available sources with one-tap EPG refresh + ingest, right on the dashboard.
 function sourcesPanel(sources) {
-  return `<table><tbody>${sources.map(x => `
-    <tr>
-      <td><b>${esc(x.label)}</b><div class="muted" style="font-size:11px">${x.channels} ch · ${x.programmes || 0} epg · <span style="color:${x.slotFree ? 'var(--ok)' : 'var(--warn)'}">${x.slotFree ? 'slot free' : 'slot busy'}</span></div></td>
-      <td style="width:152px"><div class="row" style="gap:6px;flex-wrap:nowrap;justify-content:flex-end">
+  return `<div class="dash-rec">${sources.map(x => `
+    <div class="prow">
+      <div class="prow-main"><b>${esc(x.label)}</b><div class="prow-sub">${x.channels} ch · ${x.programmes || 0} epg · <span style="color:${x.slotFree ? 'var(--ok)' : 'var(--warn)'}">${x.slotFree ? 'slot free' : 'slot busy'}</span></div></div>
+      <div class="prow-side">
         <button class="ghost sm" onclick="syncEpg(${x.id},'${jsq(x.label)}')" title="Refresh this source's EPG">${I.refresh} EPG</button>
         <button class="ghost sm" onclick="ingest(${x.id},'${jsq(x.label)}')" title="Re-ingest this source's channels">Ingest</button>
-      </div></td>
-    </tr>`).join('')}</tbody></table>`;
+      </div>
+    </div>`).join('')}</div>`;
 }
 
 // ---- Recordings ----
@@ -228,17 +262,33 @@ PAGES.recordings = {
   async render(el) {
     el.innerHTML = `<div class="toolbar">
         <select id="recFilter"><option value="">All states</option><option>Recording</option><option>Pending</option><option>Done</option><option>NeedsAttention</option><option>Missed</option></select>
+        <select id="recLeague"><option value="">All leagues</option></select>
         <span class="muted" id="recCount"></span></div>
       <div id="recTableWrap"></div>`;
     const draw = async () => {
       const recs = await api.get('/api/recordings');
       if (!Array.isArray(recs)) return; // transient API error — don't blow away the table on a failed refresh
-      const f = $('#recFilter').value;
-      const rows = f === 'Recording' ? recs.filter(r => ACTIVE.includes(r.state)) : (f ? recs.filter(r => r.state === f) : recs);
+      // League filter options — distinct leagues present in the loaded rows (null/manual grouped separately).
+      // Rebuilt on every refresh (SSE) but the current selection is preserved.
+      const lSel = $('#recLeague'); const prevLeague = lSel.value;
+      const seen = new Map(); let hasManual = false;
+      recs.forEach(r => {
+        if (r.leagueId != null) { const k = String(r.leagueId); if (!seen.has(k)) seen.set(k, r.league || ('League #' + k)); }
+        else hasManual = true;
+      });
+      lSel.innerHTML = `<option value="">All leagues</option>`
+        + [...seen.entries()].sort((a, b) => a[1].localeCompare(b[1])).map(([id, name]) => `<option value="${esc(id)}">${esc(name)}</option>`).join('')
+        + (hasManual ? `<option value="manual">Manual / no league</option>` : '');
+      if ([...lSel.options].some(o => o.value === prevLeague)) lSel.value = prevLeague;
+      const f = $('#recFilter').value, lf = lSel.value;
+      let rows = f === 'Recording' ? recs.filter(r => ACTIVE.includes(r.state)) : (f ? recs.filter(r => r.state === f) : recs);
+      if (lf === 'manual') rows = rows.filter(r => r.leagueId == null);
+      else if (lf) rows = rows.filter(r => String(r.leagueId) === lf);
       $('#recCount').textContent = `${rows.length} recording${rows.length === 1 ? '' : 's'}`;
       $('#recTableWrap').innerHTML = rows.length ? recTable(rows, true) : emptyBox('No recordings yet. Use “Schedule” or “Test”.');
     };
     $('#recFilter').addEventListener('change', draw);
+    $('#recLeague').addEventListener('change', draw);
     await draw();
     setLive(draw);
   },
@@ -262,14 +312,14 @@ function notesList(notes) {
     <td>${esc(n.message || (n.fromState ? n.fromState + ' → ' + n.toState : ''))}${n.recordingId ? ` <span class="muted">#${n.recordingId}</span>` : ''}</td></tr>`).join('')}</tbody></table>`;
 }
 function upcomingEvents(events, leagues) {
-  return `<table><tbody>${events.map(e => {
+  return `<div class="dash-rec">${events.map(e => {
     const c = leagueColor(leagues.find(l => l.id === e.leagueId) || e);
-    return `<tr class="clickrow" onclick="openCalEvent(${e.id})">
-      <td style="width:14px;padding-right:0"><span class="lg-dot" style="background:${c};margin:0"></span></td>
-      <td class="mono muted" style="width:118px">${brisbane(e.start)}</td>
-      <td>${esc(e.title)}<div class="muted" style="font-size:11px">${esc(e.league)}</div></td>
-      <td style="width:90px">${e.monitored ? '<span class="tag ok">monitored</span>' : ''}</td></tr>`;
-  }).join('')}</tbody></table>`;
+    return `<div class="prow clickrow" onclick="openCalEvent(${e.id})">
+      <span class="lg-dot" style="background:${c}"></span>
+      <div class="prow-main"><b>${esc(e.title)}</b><div class="prow-sub">${brisbane(e.start)} · ${esc(e.league)}</div></div>
+      <div class="prow-side">${e.monitored ? '<span class="tag ok">monitored</span>' : ''}</div>
+    </div>`;
+  }).join('')}</div>`;
 }
 function leagueChips(leagues) {
   return `<div class="league-chips">${leagues.map(l => `
@@ -451,10 +501,10 @@ PAGES.leagues = {
   async render(el) {
     const ls = await api.get('/api/leagues');
     window._leagues = ls;
-    el.innerHTML = `<div class="note">A <b>monitored</b> league auto-records its events on its mapped channel(s). Leagues come from <b>TheSportsDB</b> — pick a sport then search the league; posters &amp; events sync automatically.</div>
-      <div class="section"><h2>Leagues ${ls.length ? `<span class="pill s-done">${ls.length}</span>` : ''}</h2>${ls.length ? `<table><thead><tr><th></th><th>League</th><th>Sport</th><th>Events</th><th>Maps</th><th>Monitored</th><th></th></tr></thead><tbody>${ls.map(l => `
+    el.innerHTML = `<div class="page-wide"><div class="note">A <b>monitored</b> league auto-records its events on its mapped channel(s). Leagues come from <b>TheSportsDB</b> — pick a sport then search the league; posters &amp; events sync automatically.</div>
+      <div class="section"><h2>Leagues ${ls.length ? `<span class="count-pill">${ls.length}</span>` : ''}</h2>${ls.length ? `<table><thead><tr><th></th><th>League</th><th>Sport</th><th>Events</th><th>Maps</th><th>Monitored</th><th></th></tr></thead><tbody>${ls.map(l => `
         <tr><td>${l.poster ? `<img class="lg-poster" src="${esc(l.poster)}" alt=""/>` : ''}</td>
-        <td><span class="lg-dot" style="background:${leagueColor(l)}" title="calendar colour"></span><b>${esc(l.name)}</b>${l.externalLeagueId ? ` <span class="tag" title="TheSportsDB id">#${esc(l.externalLeagueId)}</span>` : ''}${l.monitoredTeams && l.monitoredTeams.length ? `<div class="muted" style="font-size:11px">following ${l.monitoredTeams.length} team${l.monitoredTeams.length === 1 ? '' : 's'}: ${esc(l.monitoredTeams.map(t => t.name).filter(Boolean).join(', '))}</div>` : ''}${l.monitoredSessions && l.monitoredSessions.length ? `<div class="muted" style="font-size:11px">sessions: ${esc(l.monitoredSessions.join(', '))}</div>` : ''}</td><td class="muted">${esc(l.sport)}</td>
+        <td><span class="lg-dot" style="background:${leagueColor(l)}" title="calendar colour"></span><b>${esc(l.name)}</b>${l.externalLeagueId ? ` <span class="tag" title="TheSportsDB id">#${esc(l.externalLeagueId)}</span>` : ''}${l.monitoredTeams && l.monitoredTeams.length ? `<div class="muted" style="font-size:11px">following ${l.monitoredTeams.length} team${l.monitoredTeams.length === 1 ? '' : 's'}: ${esc(l.monitoredTeams.map(t => t.name).filter(Boolean).join(', '))}</div>` : ''}${l.monitoredSessions && l.monitoredSessions.length ? `<div class="muted" style="font-size:11px">sessions: ${esc(l.monitoredSessions.join(', '))}</div>` : ''}${l.autoStopMode === 'fixed' ? `<div class="muted" style="font-size:11px">auto-stop: fixed</div>` : ''}</td><td class="muted">${esc(l.sport)}</td>
         <td class="mono">${l.events}</td><td class="mono">${l.mappings}</td>
         <td><span class="tag ${l.monitored ? 'ok' : ''}">${l.monitored ? 'yes' : 'no'}</span></td>
         <td class="row" style="gap:6px;flex-wrap:nowrap">
@@ -471,12 +521,24 @@ PAGES.leagues = {
           <div style="margin-top:6px"><b>★ Pinned</b> means your pick wins over EPG guesswork — a similar-looking guide entry can't hijack the recording. Unpinned mappings still work but let a strong EPG title match reorder them.</div>
           <div class="muted" style="margin-top:6px;font-size:12px;line-height:1.5">All fallbacks must be on the <b>same provider login</b> as the primary (one stream per login). With <b>content check</b> on (Settings), DVarr also fails over when a channel is alive but stuck on a dead <b>black or frozen</b> slate. It does <b>not</b> watch the picture to decide whether the “right” match is on — that relies on your ranks, the EPG, and pre/post-padding, which is exactly why a pre-show/intro is captured rather than skipped.</div>
         </div>
-        <div id="mapsWrap" class="loading">…</div></div>`;
-    const maps = await api.get('/api/mappings');
-    $('#mapsWrap').innerHTML = maps.length ? `<table><thead><tr><th>League</th><th>Channel</th><th>Source</th><th>Rank</th><th>Pinned</th><th></th></tr></thead><tbody>${maps.map(m => {
-      const lg = ls.find(x => x.id === m.leagueId);
-      return `<tr><td>${esc(lg ? lg.name : '#' + m.leagueId)}</td><td>${esc(m.channel)}</td><td class="muted">${esc(m.source)}</td><td class="mono">${m.rank}</td><td>${m.pinned ? '★' : ''}</td><td><button class="danger sm" onclick="deleteMapping(${m.id})">Del</button></td></tr>`;
-    }).join('')}</tbody></table>` : emptyBox('No mappings. Use “Map” on a league to pin a channel.');
+        <div class="toolbar" style="margin:12px 0">
+          <select id="mapLeagueFilter"><option value="">All leagues</option>${ls.map(l => `<option value="${l.id}">${esc(l.name)}</option>`).join('')}</select>
+          <span class="muted" id="mapCount"></span>
+        </div>
+        <div id="mapsWrap" class="loading">…</div></div></div>`;
+    const maps0 = await api.get('/api/mappings');
+    const maps = Array.isArray(maps0) ? maps0 : [];
+    const drawMaps = () => {
+      const lf = $('#mapLeagueFilter').value;
+      const rows = lf ? maps.filter(m => String(m.leagueId) === lf) : maps;
+      $('#mapCount').textContent = maps.length ? (lf ? `${rows.length} of ${maps.length} mapping${maps.length === 1 ? '' : 's'}` : `${maps.length} mapping${maps.length === 1 ? '' : 's'}`) : '';
+      $('#mapsWrap').innerHTML = rows.length ? `<table><thead><tr><th>League</th><th>Channel</th><th>Source</th><th>Rank</th><th>Pinned</th><th></th></tr></thead><tbody>${rows.map(m => {
+        const lg = ls.find(x => x.id === m.leagueId);
+        return `<tr><td>${esc(lg ? lg.name : '#' + m.leagueId)}</td><td>${esc(m.channel)}</td><td class="muted">${esc(m.source)}</td><td class="mono">${m.rank}</td><td>${m.pinned ? '★' : ''}</td><td><button class="danger sm" onclick="deleteMapping(${m.id})">Del</button></td></tr>`;
+      }).join('')}</tbody></table>` : emptyBox(lf ? 'No mappings for this league yet — use “Map” on it above.' : 'No mappings. Use “Map” on a league to pin a channel.');
+    };
+    $('#mapLeagueFilter').addEventListener('change', drawMaps);
+    drawMaps();
   },
 };
 
@@ -1036,6 +1098,11 @@ async function openLeagueModal(id) {
       <label class="field">League <span class="muted">(search)</span><input id="lLeagueQ" placeholder="e.g. AFL, NRL, supercars, premier league…"/><select id="lLeague" size="6"><option>Pick a sport first…</option></select></label>
       <label class="field">…or paste a TheSportsDB league id <span class="muted">(for anything not listed)</span><input id="lManualId" value="${esc(x?.externalLeagueId || '')}" placeholder="e.g. 4456"/></label>
       <label class="field">Auto-schedule horizon (days)<input id="lHorizon" type="number" value="${x?.scheduleHorizonDays || 14}"/></label>
+      <label class="field">Recording stop<select id="lAutoStop">
+        <option value="auto" ${(x?.autoStopMode || 'auto') === 'fixed' ? '' : 'selected'}>Auto — extend while the guide says it's live (recommended)</option>
+        <option value="fixed" ${(x?.autoStopMode || 'auto') === 'fixed' ? 'selected' : ''}>Fixed window</option>
+      </select></label>
+      <label class="field" id="lAutoStopMaxWrap" style="${(x?.autoStopMode || 'auto') === 'fixed' ? 'display:none' : ''}">Max extension (minutes)<input id="lAutoStopMax" type="number" min="0" placeholder="60 (motorsport 120)" value="${x?.autoStopMaxExtendS ? Math.round(x.autoStopMaxExtendS / 60) : ''}"/></label>
       <label class="field">Calendar colour<input type="hidden" id="lColor" value="${esc(x?.color || '')}"/>
         <div class="swatches" id="lSwatches">${LEAGUE_COLORS.map(c => `<span class="swatch${(x?.color || '').toLowerCase() === c ? ' sel' : ''}" data-c="${c}" style="background:${c}" title="${c}"></span>`).join('')}</div></label>
       <label class="field" style="flex-direction:row;align-items:center;gap:8px"><input id="lMon" type="checkbox" ${(!x || x.monitored) ? 'checked' : ''} style="width:auto"/> Monitored — auto-record this league's events</label>
@@ -1076,6 +1143,8 @@ async function openLeagueModal(id) {
   $('#lTeamsNone').addEventListener('click', () => $('#lTeams').querySelectorAll('input').forEach(i => i.checked = false));
   $('#lSessAll').addEventListener('click', () => $('#lSessions').querySelectorAll('input').forEach(i => i.checked = true));
   $('#lSessNone').addEventListener('click', () => $('#lSessions').querySelectorAll('input').forEach(i => i.checked = false));
+  // "Max extension" only applies to the auto stop mode — hide it for a fixed window.
+  $('#lAutoStop').addEventListener('change', () => { $('#lAutoStopMaxWrap').style.display = $('#lAutoStop').value === 'auto' ? '' : 'none'; });
 
   const savedTeamIds = new Set((x?.monitoredTeams || []).map(t => String(t.id)));
   const savedSessions = new Set(x?.monitoredSessions || []);
@@ -1156,6 +1225,9 @@ async function submitLeague(id) {
     sport: manual ? undefined : (opt?.dataset.sport || $('#lSport').value),
     scheduleHorizonDays: parseInt($('#lHorizon').value) || 14, monitored: $('#lMon').checked, color: $('#lColor').value || '',
     eventDurationOverrideS: (() => { const v = parseInt($('#lDuration').value); return v > 0 ? v * 60 : 0; })(),
+    autoStopMode: $('#lAutoStop').value,
+    autoStopMaxExtendS: (parseInt($('#lAutoStopMax')?.value) > 0 ? parseInt($('#lAutoStopMax').value) * 60 : 0), // 0 = clear to default
+
     monitoredTeams, monitoredSessions, sessionDurations,
   };
   closeModals();

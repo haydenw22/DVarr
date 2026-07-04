@@ -86,6 +86,10 @@ public sealed class SettingsService
         // When a recording's pre-roll attempt captures nothing (e.g. the channel isn't live yet), make ONE guaranteed
         // fresh attempt at the event's real start time. Never interrupts a recording that's already capturing.
         ["retry_at_event_start"] = "true",
+        // Smart auto-stop (Phase 21) kill-switch: when ON, AutoStopService polls TheSportsDB near a live recording's
+        // scheduled end and EXTENDS the window while the event is still in play (extra time / penalties), closing it
+        // once the guide reports a terminal status. Never shortens below the scheduled window. OFF = fixed windows only.
+        ["auto_stop_enabled"] = "true",
         ["default_channel_source_filter"] = "all",
         ["timezone_display"] = "Australia/Brisbane",
         ["ha_webhook_url"] = "",

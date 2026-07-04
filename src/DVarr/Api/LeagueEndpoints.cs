@@ -26,6 +26,7 @@ public static class LeagueEndpoints
                     poster = l.PosterUrl, badge = l.BadgeUrl, color = l.Color,
                     l.ScheduleHorizonDays, eventDurationOverrideS = l.EventDurationOverrideS, monitoredTeams = ParseTeams(l.MonitoredTeamsJson),
                     monitoredSessions = ParseSessions(l.MonitoredSessionsJson), sessionDurations = SettingsService.ParseSessionDurations(l.SessionDurationsJson),
+                    autoStopMode = l.AutoStopMode ?? "auto", autoStopMaxExtendS = l.AutoStopMaxExtendS,
                     lastSync = l.LastEventSyncUtc, events, mappings = maps,
                 });
             }
@@ -64,6 +65,9 @@ public static class LeagueEndpoints
                 MonitoredTeamsJson = SerializeTeams(req.MonitoredTeams),
                 MonitoredSessionsJson = motorsport ? SerializeSessions(req.MonitoredSessions) : null,
                 SessionDurationsJson = motorsport ? SerializeSessionDurations(req.SessionDurations) : null,
+                // Auto-stop: only the explicit opt-out ("fixed") is persisted; anything else = null = Auto (the default).
+                AutoStopMode = req.AutoStopMode == "fixed" ? "fixed" : null,
+                AutoStopMaxExtendS = req.AutoStopMaxExtendS is > 0 ? req.AutoStopMaxExtendS : null,
                 Monitored = req.Monitored ?? true, CreatedUtc = now,
             };
             await gate.WriteAsync(async () => { db.Leagues.Add(l); await db.SaveChangesAsync(); });
@@ -185,6 +189,9 @@ public static class LeagueEndpoints
                 }
                 if (req.SessionDurations != null) // per-session lengths are motorsport-only for the same reason
                     l.SessionDurationsJson = MotorsportSession.IsMotorsport(l.Sport) ? SerializeSessionDurations(req.SessionDurations) : null;
+                // Auto-stop: omitting the field leaves the mode unchanged; anything but "fixed" normalizes to Auto (null).
+                if (req.AutoStopMode != null) l.AutoStopMode = req.AutoStopMode == "fixed" ? "fixed" : null;
+                if (req.AutoStopMaxExtendS.HasValue) l.AutoStopMaxExtendS = req.AutoStopMaxExtendS > 0 ? req.AutoStopMaxExtendS : null; // 0/blank clears → sport default
                 await db.SaveChangesAsync();
             });
             return Results.Json(new { l.Id, updated = true });
@@ -456,7 +463,7 @@ public static class LeagueEndpoints
 }
 
 public sealed record TeamRef(string Id, string? Name);
-public sealed record LeagueUpsert(string? Sport, string? Name, string? Provider, string? ExternalLeagueId, string? IcsUrl, int? ScheduleHorizonDays, bool? Monitored, string? Color, int? EventDurationOverrideS, List<TeamRef>? MonitoredTeams, List<string>? MonitoredSessions, Dictionary<string, int>? SessionDurations);
+public sealed record LeagueUpsert(string? Sport, string? Name, string? Provider, string? ExternalLeagueId, string? IcsUrl, int? ScheduleHorizonDays, bool? Monitored, string? Color, int? EventDurationOverrideS, List<TeamRef>? MonitoredTeams, List<string>? MonitoredSessions, Dictionary<string, int>? SessionDurations, string? AutoStopMode, int? AutoStopMaxExtendS);
 public sealed record EventCreate(int LeagueId, string? Title, long StartUtc, long? EndUtc, bool? Monitored);
 public sealed record MonitorReq(bool Monitored);
 public sealed record MappingCreate(int LeagueId, int ChannelId, int? Rank, bool? Pinned);

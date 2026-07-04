@@ -147,6 +147,8 @@ public sealed class RecorderService
                 nativeRate = !string.IsNullOrWhiteSpace(ch.DirectUrl);
                 segDir = Path.Combine(_paths.SegmentDir, recordingId.ToString(), "A");
                 outputPath = BuildOutputPath(rec, ch);
+                // INITIAL window only — the supervisor re-reads EndUtc + PostPadS live while capturing, so a smart
+                // auto-stop extension (AutoStopService mutating Recording.EndUtc) takes effect mid-recording.
                 windowEnd = rec.EndUtc + rec.PostPadS;
                 stall = await settings.GetIntAsync("segment_no_progress_timeout_s");
                 if (stall <= 0) stall = 25;

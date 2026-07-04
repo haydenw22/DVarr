@@ -246,8 +246,32 @@ public static class ApiEndpoints
                                   channel = ch != null ? ch.Name : null, source = s != null ? s.Label : null,
                                   r.StartUtc, r.EndUtc, r.PrePadS, r.PostPadS,
                                   r.BytesWritten, r.AttemptCount, r.OutputPath, r.FailureReason,
+                                  r.EventId,
                               }).Take(200).ToListAsync();
-            return Results.Json(rows);
+
+            // League per row (EventId → Event.LeagueId → League.Name), batched as two small IN lookups over the ≤200
+            // returned rows and stitched in memory — no per-row query. Manual recordings (no EventId) get nulls.
+            var evIds = rows.Where(r => r.EventId != null).Select(r => r.EventId!.Value).Distinct().ToList();
+            var evLeague = evIds.Count == 0
+                ? new Dictionary<int, int>()
+                : await db.Events.Where(e => evIds.Contains(e.Id)).Select(e => new { e.Id, e.LeagueId }).ToDictionaryAsync(x => x.Id, x => x.LeagueId);
+            var lgIds = evLeague.Values.Distinct().ToList();
+            var lgName = lgIds.Count == 0
+                ? new Dictionary<int, string>()
+                : await db.Leagues.Where(l => lgIds.Contains(l.Id)).Select(l => new { l.Id, l.Name }).ToDictionaryAsync(x => x.Id, x => x.Name);
+
+            return Results.Json(rows.Select(r =>
+            {
+                int? leagueId = r.EventId is { } eid && evLeague.TryGetValue(eid, out var lid) ? lid : null;
+                return new
+                {
+                    r.Id, r.Title, r.state, r.channel, r.source,
+                    r.StartUtc, r.EndUtc, r.PrePadS, r.PostPadS,
+                    r.BytesWritten, r.AttemptCount, r.OutputPath, r.FailureReason,
+                    leagueId,
+                    league = leagueId is { } l && lgName.TryGetValue(l, out var ln) ? ln : null,
+                };
+            }));
         });
 
         app.MapGet("/api/recordings/{id:int}", async (int id, DVarrDbContext db, RecorderService rec) =>

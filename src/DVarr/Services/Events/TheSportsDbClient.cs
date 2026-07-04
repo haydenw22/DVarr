@@ -13,6 +13,9 @@ public sealed record TsdbTeam(string Id, string Name, string? Badge, string? Log
 public sealed record TsdbEvent(string Id, string Title, long? StartUtc, bool DateOnly, string? Status,
     string? Thumb, string? Poster, int? Round, string? Season, string? League, string? Sport, string? LeagueId,
     string? HomeTeamId, string? HomeTeamName, string? AwayTeamId, string? AwayTeamName);
+/// <summary>One in-play event from v2 /livescore/{sport}: Status = strStatus (1H/HT/2H/ET/P …),
+/// Progress = strProgress (the match minute). Presence in the livescore feed itself means "in play".</summary>
+public sealed record TsdbLiveScore(string EventId, string? Status, string? Progress);
 
 /// <summary>
 /// Thin wrapper over TheSportsDB <b>v2</b> (premium key, sent as the <c>X-API-KEY</c> header). Backs the league
@@ -230,6 +233,22 @@ public sealed class TheSportsDbClient
         using var doc = await GetAsync(path, ct);
         if (TryArray(doc, "search", out var arr))
             foreach (var e in arr.EnumerateArray()) { var ev = MapEvent(e); if (ev != null) list.Add(ev); }
+        return list;
+    }
+
+    /// <summary>Currently in-play events for a sport (v2 /livescore/{sport}) — feeds the smart auto-stop's
+    /// "still in play?" check. NOT cached (live data; the caller rate-limits). Any failure → empty list, so a
+    /// livescore outage can only ever degrade auto-stop to its event-lookup path, never break a recording.</summary>
+    public async Task<List<TsdbLiveScore>> GetLiveScoresAsync(string sport, CancellationToken ct = default)
+    {
+        var list = new List<TsdbLiveScore>();
+        using var doc = await GetAsync($"livescore/{Uri.EscapeDataString(sport.Trim().ToLowerInvariant())}", ct);
+        if (TryArray(doc, "livescore", out var arr))
+            foreach (var e in arr.EnumerateArray())
+            {
+                var id = Str(e, "idEvent");
+                if (!string.IsNullOrWhiteSpace(id)) list.Add(new TsdbLiveScore(id!, Str(e, "strStatus"), Str(e, "strProgress")));
+            }
         return list;
     }
 
