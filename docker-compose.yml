@@ -21,6 +21,11 @@ services:
       - HOME=/config            # keep .NET from writing to / when running as non-root
       - NVIDIA_VISIBLE_DEVICES=0000:01:00.0               # pin to the GTX 1070 (same PCI id Plex uses)
       - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility  # 'video' = NVENC/NVDEC, 'compute' = CUDA (scale_cuda)
+      # HTTP Basic auth for the public UI/API (DVarr is exposed at dvarr.whittledigitalsolutions.com).
+      # Put the REAL username/password in an untracked `.env` file next to this compose file — NEVER commit it.
+      # Falls back to user/password if unset (see the DEFAULT-credentials warning in the container log).
+      - DVARR_AUTH_USER=${DVARR_AUTH_USER:-user}
+      - DVARR_AUTH_PASS=${DVARR_AUTH_PASS:-password}
     volumes:
       - /mnt/user/appdata/dvarr:/config
       - /mnt/user/Media/Sports:/media

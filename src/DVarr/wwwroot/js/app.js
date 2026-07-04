@@ -435,7 +435,10 @@ PAGES.channels = {
 const GUIDE_PX_PER_HOUR = 200;
 // Channel-name column: narrower on phones so the timeline isn't pushed off-screen. The CSS (.g-corner/.g-ch) reads
 // --gch, which renderGuide sets inline on .guide-inner from this same value, so the now-line offset stays aligned.
-const guideChCol = () => (window.innerWidth <= 640 ? 132 : 250);
+const guideChCol = () => (window.innerWidth <= 640 ? 78 : 250);
+// Phone: tapping a channel NAME reveals the full name (heavily truncated at 78px) instead of starting a preview —
+// the desktop click (and the row's play affordance there) still previews.
+function chanTap(id, name) { if (window.innerWidth <= 640) return toast(name); openPreview(id, name); }
 PAGES.guide = {
   title: 'Guide',
   async render(el) {
@@ -444,7 +447,7 @@ PAGES.guide = {
     // Default to the source that actually has EPG (most programmes), so the guide opens on data — not an empty source.
     const epgSrc = sources.filter(s => s.enabled && s.programmes > 0).sort((a, b) => b.programmes - a.programmes)[0];
     const defSrc = epgSrc || sources.find(s => s.enabled) || sources[0];
-    const state = { sourceId: String(defSrc.id), group: 'all', q: '', start: Math.floor(Date.now() / 1000) - 1800, hours: 12, groups: [] };
+    const state = { sourceId: String(defSrc.id), group: 'all', q: '', start: Math.floor(Date.now() / 1000) - 1800, hours: 24, groups: [] };
     el.innerHTML = `
       <div class="toolbar">
         <select id="gSrc">${sources.map(s => `<option value="${s.id}" ${String(s.id) === state.sourceId ? 'selected' : ''}>${esc(s.label)}${s.enabled ? '' : ' — disabled'}</option>`).join('')}</select>
@@ -455,7 +458,7 @@ PAGES.guide = {
         <button class="ghost sm" id="gPrev">‹ earlier</button>
         <button class="ghost sm" id="gNow">now</button>
         <button class="ghost sm" id="gNext">later ›</button>
-        <select id="gHours"><option value="6">6h</option><option value="12" selected>12h</option><option value="24">24h</option></select>
+        <select id="gHours"><option value="6">6h</option><option value="12">12h</option><option value="24" selected>24h</option></select>
       </div>
       <div class="guide-legend"><span class="lg lg-live">live now</span><span class="lg lg-rec">recording</span><span class="lg lg-pad">pre/post buffer</span><span class="lg lg-play">▶ click a channel name to watch · click a programme to schedule</span></div>
       <div id="gWrap" class="loading">…</div>`;

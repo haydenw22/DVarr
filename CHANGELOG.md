@@ -12,6 +12,17 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.26.0] — 2026-07-04
+Login protection · every sport type audited · guide QoL.
+
+### Added
+- **Login (HTTP Basic).** The UI and API now require a username/password, configurable via docker-compose environment variables `DVARR_AUTH_USER` / `DVARR_AUTH_PASS` (defaults `user`/`password`; put real values in an untracked `.env` — never committed). Machine surfaces keep working without it: container health check, the token-guarded calendar feed (Google), the Plex agent, Prowlarr's keyed API, LAN playlists/streams, and Home Assistant. Constant-time credential comparison; a warning is logged when the defaults are in use.
+- The public URL moved to **dvarr.whittledigitalsolutions.com** (matches the app name; old `dvr` record removed). *(Server-side DNS/nginx, not in this repo.)*
+
+### Changed
+- **Sport-type audit (all 37 TheSportsDB sports).** Follow-up to the UFC fix: verified every TeamvsTeam sport gets the team picker and ONLY Motorsport gets the session picker. Duration defaults now match reality for long sports — golf 6 h, fight cards 5 h, tennis & cricket 4 h (motorsport stays 3 h); auto-stop still covers genuine overruns.
+- **Guide:** default span is now 24 h everywhere; on phones the channel column shrinks to 78 px so the timeline gets nearly the full width, and tapping a channel name shows its full name (the play behaviour is desktop's click).
+
 ## [1.25.0] — 2026-07-04
 Sport-aware league modal · smarter guide-match timing · subscribable calendar · public access.
 

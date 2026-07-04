@@ -33,7 +33,11 @@ public sealed class SettingsService
         // lowercased sport name to its own seconds so motorsport keeps a long window ("keep full race endings"
         // rule) instead of being cut at 2h. Edit the JSON to add sports (e.g. add "american football": 12600).
         ["default_event_duration_s"] = "7200",
-        ["event_duration_overrides_json"] = "{\"motorsport\":10800}",
+        // Sport-audit defaults (2026-07-04): sports whose events routinely exceed the 2h base get their own assumed
+        // length — golf rounds ~6h, fight cards (UFC etc.) ~5h, tennis/cricket ~4h (T20-ish; long formats use the
+        // per-league override). Keys = lowercased TheSportsDB strSport; matching is case-insensitive. Auto-stop
+        // extends past these when the event genuinely runs long.
+        ["event_duration_overrides_json"] = "{\"motorsport\":10800,\"fighting\":18000,\"golf\":21600,\"cricket\":14400,\"tennis\":14400}",
         ["bitrate_floor_kbps_sd"] = "400",
         ["bitrate_floor_kbps_hd"] = "800",
         ["segment_no_progress_timeout_s"] = "25",

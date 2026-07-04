@@ -13,6 +13,8 @@ media/
 *.db
 *.db-wal
 *.db-shm
+.env
+*.env
 README.md
 deploy/
 tests/

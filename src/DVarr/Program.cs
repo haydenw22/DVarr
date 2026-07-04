@@ -112,6 +112,19 @@ using (var scope = app.Services.CreateScope())
     app.Logger.LogInformation("ffmpeg check: {Ver}", ff.CachedVersion ?? "NOT FOUND (recording will fail until ffmpeg is on PATH)");
 }
 
+// Gate the WHOLE site (SPA shell + static assets + /api/*) behind HTTP Basic auth — must precede
+// UseDefaultFiles/UseStaticFiles so index.html and assets are protected too. Exempt list (m2m surfaces)
+// lives in the middleware. Log the credential MODE only — never the values.
+{
+    var authUser = builder.Configuration["DVARR_AUTH_USER"] ?? builder.Configuration["DVarr:AuthUser"];
+    var authPass = builder.Configuration["DVARR_AUTH_PASS"] ?? builder.Configuration["DVarr:AuthPass"];
+    if (authUser is null && authPass is null)
+        app.Logger.LogWarning("Basic auth: DEFAULT credentials (user/password) — set DVARR_AUTH_USER/DVARR_AUTH_PASS in .env!");
+    else
+        app.Logger.LogInformation("Basic auth: custom credentials configured");
+}
+app.UseMiddleware<DVarr.Infrastructure.BasicAuthMiddleware>();
+
 app.UseDefaultFiles();
 // .webmanifest isn't in the default extension→MIME map, so without this the PWA manifest would be skipped (404 →
 // SPA fallback) instead of served. Register it (other shell assets — .js/.css/.png — are already known types).
