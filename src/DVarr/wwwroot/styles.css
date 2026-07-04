@@ -364,6 +364,11 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, .clickrow:foc
 /* Phone: stacked-card table reflow + comfortable touch sizing. */
 @media (max-width:640px){
   input, select, textarea { font-size:16px; }   /* ≥16px avoids iOS focus-zoom */
+  /* Side-by-side field rows in modals (e.g. schedule's Start + Duration) STACK on phones — iOS renders
+     datetime-local at intrinsic width and it collides with its neighbour otherwise (iPhone 15 PWA report). */
+  .modal .row { flex-wrap:wrap; }
+  .modal .row > .field { flex:1 1 100%; min-width:0; }
+  input[type="datetime-local"] { min-width:0; max-width:100%; width:100%; }
   .nav-item { padding:13px 15px; }
   button, .btn { min-height:40px; }
   button.sm, .btn.sm { min-height:34px; }

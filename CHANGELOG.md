@@ -12,6 +12,13 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.26.1] — 2026-07-04
+iPhone fixes: schedule-modal overlap + guide defaults.
+
+### Fixed
+- **Schedule modal on iPhone**: the Start (local) and Duration (minutes) fields overlapped — iOS renders date-time inputs at a fixed intrinsic width. Side-by-side modal field rows now stack full-width on phones (verified at 390 px).
+- **Guide**: default span is **24 h** on every device (was 12 h); on phones the channel column narrows to 78 px so the timeline gets nearly the full width, and **tapping a channel name shows the full channel name** instead of starting a playback.
+
 ## [1.26.0] — 2026-07-04
 Login protection · every sport type audited · guide QoL.
 
