@@ -96,14 +96,16 @@ public static class LeagueEndpoints
             if (l is null) return Results.Json(new { error = "league not found" }, statusCode: 404);
             var fmt = (await tsdb.GetSportsAsync(ct)).FirstOrDefault(s => string.Equals(s.Name, l.Sport, StringComparison.OrdinalIgnoreCase))?.Format;
             var teamSport = string.Equals(fmt, "TeamvsTeam", StringComparison.OrdinalIgnoreCase);
+            var motorsport = MotorsportSession.IsMotorsport(l.Sport); // session-follow / per-session lengths are motorsport-only
             var teams = new List<object>();
             var sessionTypes = new List<string>();
             if (teamSport)
                 teams = (await tsdb.GetTeamsAsync(id, ct)).Select(t => (object)new { id = t.Id, t.Name, t.Badge, t.Logo }).ToList();
-            else
+            else if (motorsport)
             {
                 // Motorsport: offer only the session kinds this league actually runs (V8 → just Race; F1 → the full set),
-                // classified from the current season's event titles.
+                // classified from the current season's event titles. Non-motorsport, non-team sports (UFC, boxing, …) get
+                // neither a team picker nor a session picker — so skip the schedule fetch entirely for them.
                 var year = EpochTime.ToBrisbane(EpochTime.Now()).Year;
                 var evs = new List<TsdbEvent>();
                 foreach (var season in new[] { year.ToString(), (year - 1).ToString() })
@@ -113,7 +115,7 @@ public static class LeagueEndpoints
                 }
                 sessionTypes = MotorsportSession.KindsPresent(evs.Select(e => e.Title));
             }
-            return Results.Json(new { id = l.Id, l.Name, l.Sport, l.Poster, l.Badge, teamSport, teams, sessionTypes });
+            return Results.Json(new { id = l.Id, l.Name, l.Sport, l.Poster, l.Badge, teamSport, motorsport, teams, sessionTypes });
         });
 
         app.MapPut("/api/leagues/{id:int}", async (int id, LeagueUpsert req, DVarrDbContext db, DbWriteGate gate) =>
@@ -449,7 +451,7 @@ public static class LeagueEndpoints
     // the user manually pinned it (MonitoredLocked + Monitored). Fail-open for team-less / unclassifiable events (don't
     // hide a real game). A locked-but-UNmonitored event (user clicked "don't record") gets no special treatment — it
     // follows the normal rules like any other event, so un-monitoring can't resurrect a hidden game on the calendar.
-    private static bool EventFollowed(Event e, Dictionary<int, HashSet<string>> teamSets, Dictionary<int, HashSet<string>> sessionSets)
+    internal static bool EventFollowed(Event e, Dictionary<int, HashSet<string>> teamSets, Dictionary<int, HashSet<string>> sessionSets)
     {
         if (e.MonitoredLocked && e.Monitored) return true;
         if (teamSets.TryGetValue(e.LeagueId, out var teams))

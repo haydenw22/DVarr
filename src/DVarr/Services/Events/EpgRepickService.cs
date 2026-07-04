@@ -10,18 +10,22 @@ namespace DVarr.Services.Events;
 /// <summary>
 /// Arm-window EPG re-pick (docs: "map Fox 503+504 and record whichever the guide says has the game"). The resolver
 /// already scores mapped channels by guide-title similarity, but it runs at PLACEMENT — days before the provider's
-/// ~28h guide can see the event, so the pick degenerates to rank order. This service re-runs that same resolver once
-/// the guide window covers the event and re-points the recording (SAME credential only — slot planning is untouched)
-/// when another mapped channel's guide actually shows the event. If the guide is blank for every mapped channel close
-/// to start, it opportunistically refreshes that source's EPG (rate-limited; the ingest's per-source semaphore and
-/// last-known-good swap make this safe). Manual choices are respected via Recording.ChannelLocked.
+/// guide can see the event, so the pick degenerates to rank order. This service re-runs that same resolver ≈1h before
+/// start (the sweep horizon — the provider's EPG often has no content 24h out) and re-points the recording (SAME
+/// credential only — slot planning is untouched) when another mapped channel's guide actually shows the event.
+/// It also keeps the guide fresh: if this source's last successful EPG sync is >12h old (or never), it kicks a
+/// background refresh before re-picking (the next sweep re-picks against the fresh data); and if the guide is blank for
+/// every mapped channel close to start it does the same. Both are rate-limited by a shared 30-min per-source cooldown,
+/// and the ingest's per-source semaphore + last-known-good swap make an opportunistic refresh safe. Manual choices are
+/// respected via Recording.ChannelLocked.
 /// </summary>
 public sealed class EpgRepickService
 {
     // Tuning (constants, not settings — one kill-switch setting `epg_repick_enabled` governs the feature):
     private const double MinEpgScore = 0.25;   // proposed channel must actually look like the event
     private const double Hysteresis = 0.10;    // and beat the current channel by this much (no tick-to-tick flapping)
-    private const int BlankRefreshWindowS = 12 * 3600; // only chase a blank guide when the event is this close
+    private const int BlankRefreshWindowS = 3600;      // only chase a blank guide when the event is this close (matches the sweep horizon)
+    private const int StaleEpgS = 12 * 3600;           // refresh the source's guide if its last good sync is older than this
     private const int RefreshCooldownS = 30 * 60;      // at most one opportunistic EPG refresh per source per 30 min
 
     // Per-source last opportunistic-refresh stamp (static: the service is scoped per tick/request).
@@ -50,6 +54,15 @@ public sealed class EpgRepickService
         if (ev is null) return false;
 
         var now = EpochTime.Now();
+
+        // Stale-guide refresh: the provider's EPG often has no content 24h out, so re-picking is worthless against an
+        // old guide. If this source's last successful EPG sync is >12h old (or it never synced), kick a background
+        // refresh (shared 30-min per-source cooldown guards against repeated kicks) and re-pick against the current data
+        // anyway — the next sweep after the refresh lands re-picks against the fresh guide.
+        var src = await _db.Sources.AsNoTracking().FirstOrDefaultAsync(x => x.Id == rec.SourceId, ct);
+        if (src is not null && (src.LastEpgSyncUtc is not { } last || now - last > StaleEpgS))
+            KickEpgRefresh(rec.SourceId, ev.Title);
+
         var res = await _resolver.ResolveAsync(eventId, ct, restrictSourceId: rec.SourceId);
 
         // Blank-guide chase: if NO mapped channel on this credential has any programme overlapping the event window

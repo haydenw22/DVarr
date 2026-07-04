@@ -12,6 +12,19 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.25.0] — 2026-07-04
+Sport-aware league modal · smarter guide-match timing · subscribable calendar · public access.
+
+### Added
+- **Subscribable calendar feed** — `GET /api/calendar.ics?token=…` (token auto-generated, kept in the Secrets store; `GET /api/calendar/url` returns your URL). One entry per upcoming monitored event honoring your team/session follow filters, with a 30-minute reminder alarm. Built for Google Calendar's URL subscription via the new public domain.
+- **Public access** — DVarr is reachable at `dvr.whittledigitalsolutions.com` (SWAG + Cloudflare, same pattern as n8n). The credential-leaking stream-proxy redirect and the slot-burning live preview are blocked from outside (403); LAN unaffected. *(Server-side config, not in this repo.)*
+
+### Changed
+- **League modal is sport-aware** — the session picker + per-session lengths now appear ONLY for motorsport (UFC/boxing/etc. no longer get a bogus "Race" session picker); "Recording stop" reads *"Auto — extend while the event is still live (via TheSportsDB)"*; max-extension shows a plain `60` placeholder and pre-fills `120` when you pick a motorsport league (never clobbering a saved or typed value).
+- **Guide-match channel pick now runs ~1 hour before start** (was 24 h — the provider's guide often has nothing that far out), and if the source's EPG is more than 12 h old it refreshes the guide first, then re-checks. Migration Phase22 stamps each source's last successful EPG sync.
+- **Mobile**: the four status cards are gone from the phone dashboard; the topbar drops the status dots and fits the full page name, with Schedule + the ⋯ menu at the far right.
+- The accounts/multi-user plan is scrapped (docs/12 updated) — the calendar + public URL ship without it.
+
 ## [1.24.0] — 2026-07-04
 Mobile-first overhaul — the phone UI is now genuinely app-like.
 

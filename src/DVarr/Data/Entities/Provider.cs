@@ -48,6 +48,10 @@ public class ProviderSource
     public bool Healthy { get; set; }
     public long? LastAuthAtUtc { get; set; }
 
+    /// <summary>Epoch seconds of the last SUCCESSFUL EPG sync for this source. Stamped in the ingest's success path;
+    /// null until the first good sync. The EPG re-pick sweep uses it to trigger a refresh when the guide is &gt;12h stale.</summary>
+    public long? LastEpgSyncUtc { get; set; }
+
     public bool Enabled { get; set; } = true;
     public long CreatedUtc { get; set; }
     public long UpdatedUtc { get; set; }

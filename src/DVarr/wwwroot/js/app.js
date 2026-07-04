@@ -825,7 +825,7 @@ const SETTINGS_META = {
   epg_past_window_h: { g: 'Guide', t: 'Guide history (hours)', h: 'How many hours of past guide data to keep.', ty: 'int' },
   epg_future_window_d: { g: 'Guide', t: 'Guide lookahead (days)', h: 'How many days of upcoming guide data to keep.', ty: 'int' },
   epg_max_programmes: { g: 'Guide', t: 'Guide safety cap', h: 'Max programmes stored per source to prevent runaway database growth.', ty: 'int' },
-  epg_repick_enabled: { g: 'Guide', t: 'Guide-match channel pick', h: 'Within ~24 h of start, re-check each mapped channel’s guide and record from the channel that actually shows the event (e.g. Fox 503 vs 504). Manual channel choices are never moved.', ty: 'bool' },
+  epg_repick_enabled: { g: 'Guide', t: 'Guide-match channel pick', h: 'Within ~1 hour of start, re-check each mapped channel’s guide — refreshing the source’s EPG first if it’s more than 12 hours old — and record from the channel that actually shows the event. Manual channel choices are never moved.', ty: 'bool' },
   epg_auto_sync_enabled: { g: 'Guide', t: 'Auto-sync EPG daily', h: 'Automatically refresh every source’s TV guide once a day at the time below.', ty: 'bool' },
   epg_auto_sync_time: { g: 'Guide', t: 'EPG sync time', h: 'Time of day (24-hour) to auto-refresh the guide, in the timezone below.', ty: 'time' },
   epg_auto_sync_offset_minutes: { g: 'Guide', t: 'EPG sync timezone', h: 'Timezone for the sync time — a fixed offset (no daylight-saving adjustment).', ty: 'select', opts: [
@@ -1216,10 +1216,10 @@ async function openLeagueModal(id) {
       <label class="field">…or paste a TheSportsDB league id <span class="muted">(for anything not listed)</span><input id="lManualId" value="${esc(x?.externalLeagueId || '')}" placeholder="e.g. 4456"/></label>
       <label class="field">Auto-schedule horizon (days)<input id="lHorizon" type="number" value="${x?.scheduleHorizonDays || 14}"/></label>
       <label class="field">Recording stop<select id="lAutoStop">
-        <option value="auto" ${(x?.autoStopMode || 'auto') === 'fixed' ? '' : 'selected'}>Auto — extend while the guide says it's live (recommended)</option>
+        <option value="auto" ${(x?.autoStopMode || 'auto') === 'fixed' ? '' : 'selected'}>Auto — extend while the event is still live (via TheSportsDB)</option>
         <option value="fixed" ${(x?.autoStopMode || 'auto') === 'fixed' ? 'selected' : ''}>Fixed window</option>
       </select></label>
-      <label class="field" id="lAutoStopMaxWrap" style="${(x?.autoStopMode || 'auto') === 'fixed' ? 'display:none' : ''}">Max extension (minutes)<input id="lAutoStopMax" type="number" min="0" placeholder="60 (motorsport 120)" value="${x?.autoStopMaxExtendS ? Math.round(x.autoStopMaxExtendS / 60) : ''}"/></label>
+      <label class="field" id="lAutoStopMaxWrap" style="${(x?.autoStopMode || 'auto') === 'fixed' ? 'display:none' : ''}">Max extension (minutes)<input id="lAutoStopMax" type="number" min="0" placeholder="60" value="${x?.autoStopMaxExtendS ? Math.round(x.autoStopMaxExtendS / 60) : ''}"/></label>
       <label class="field">Calendar colour<input type="hidden" id="lColor" value="${esc(x?.color || '')}"/>
         <div class="swatches" id="lSwatches">${LEAGUE_COLORS.map(c => `<span class="swatch${(x?.color || '').toLowerCase() === c ? ' sel' : ''}" data-c="${c}" style="background:${c}" title="${c}"></span>`).join('')}</div></label>
       <label class="field" style="flex-direction:row;align-items:center;gap:8px"><input id="lMon" type="checkbox" ${(!x || x.monitored) ? 'checked' : ''} style="width:auto"/> Monitored — auto-record this league's events</label>
@@ -1262,6 +1262,8 @@ async function openLeagueModal(id) {
   $('#lSessNone').addEventListener('click', () => $('#lSessions').querySelectorAll('input').forEach(i => i.checked = false));
   // "Max extension" only applies to the auto stop mode — hide it for a fixed window.
   $('#lAutoStop').addEventListener('change', () => { $('#lAutoStopMaxWrap').style.display = $('#lAutoStop').value === 'auto' ? '' : 'none'; });
+  // Mark a user-typed max-extension so onLeaguePicked's motorsport prefill never overwrites (or later clears) it.
+  $('#lAutoStopMax').addEventListener('input', () => { const el = $('#lAutoStopMax'); el.dataset.userEdited = 'true'; delete el.dataset.prefilled; });
 
   const savedTeamIds = new Set((x?.monitoredTeams || []).map(t => String(t.id)));
   const savedSessions = new Set(x?.monitoredSessions || []);
@@ -1278,12 +1280,15 @@ async function openLeagueModal(id) {
     if (!d || d.error || !d.name) { $('#lHeader').innerHTML = '<span class="muted" style="font-size:12px">Couldn’t load that league id.</span>'; $('#lTeamsWrap').style.display = 'none'; $('#lSessionsWrap').style.display = 'none'; $('#lSessDurBlock').style.display = 'none'; return; }
     const art = d.badge || d.poster;
     $('#lHeader').innerHTML = `${art ? `<img src="${esc(art)}" alt="" class="lg-modal-badge"/>` : ''}<div><b>${esc(d.name)}</b><div class="muted" style="font-size:12px">${esc(d.sport || '')} · #${esc(String(d.id))}</div></div>`;
+    const motorsport = d.motorsport === true;
+    // Three exclusive cases: team sport → team picker only; motorsport → session picker + per-session lengths;
+    // neither (UFC/boxing/wrestling) → clean base fields, no team picker and no session picker.
     if (d.teamSport && Array.isArray(d.teams) && d.teams.length) {
       $('#lTeamsWrap').style.display = '';
       $('#lTeams').innerHTML = d.teams.map(t => `<label class="team-pick" title="${esc(t.name)}"><input type="checkbox" data-id="${esc(String(t.id))}" data-name="${esc(t.name)}" ${savedTeamIds.has(String(t.id)) ? 'checked' : ''}/>${t.badge || t.logo ? `<img src="${esc(t.badge || t.logo)}" alt="" loading="lazy"/>` : '<span class="team-pick-dot"></span>'}<span>${esc(t.name)}</span></label>`).join('');
     } else { $('#lTeamsWrap').style.display = 'none'; $('#lTeams').innerHTML = ''; }
-    // Motorsport: a session picker (which sessions to record) + an advanced per-session length section.
-    if (!d.teamSport && Array.isArray(d.sessionTypes) && d.sessionTypes.length) {
+    // Motorsport ONLY: a session picker (which sessions to record) + an advanced per-session length section.
+    if (motorsport && Array.isArray(d.sessionTypes) && d.sessionTypes.length) {
       $('#lSessionsWrap').style.display = '';
       $('#lSessDurBlock').style.display = '';
       $('#lSessions').innerHTML = d.sessionTypes.map(k => {
@@ -1295,6 +1300,17 @@ async function openLeagueModal(id) {
         return `<label class="field" style="font-size:12px"><span>${esc(k)} <span class="muted">(min)</span></span><input type="number" min="1" data-kind="${esc(k)}" value="${mins}" placeholder="default"/></label>`;
       }).join('');
     } else { $('#lSessionsWrap').style.display = 'none'; $('#lSessions').innerHTML = ''; $('#lSessDurBlock').style.display = 'none'; $('#lSessDur').innerHTML = ''; }
+    // Max-extension prefill: motorsport events usually need ~120 min. Prefill 120 only when the field is empty and the
+    // user hasn't typed their own value (and we're not clobbering a saved override on an edit). data-prefilled marks a
+    // value WE injected so we can cleanly revert it back to the placeholder (60) when switching to a non-motorsport league.
+    const maxIn = $('#lAutoStopMax');
+    if (maxIn) {
+      if (motorsport) {
+        if (maxIn.value === '' && maxIn.dataset.userEdited !== 'true') { maxIn.value = '120'; maxIn.dataset.prefilled = 'true'; }
+      } else if (maxIn.dataset.prefilled === 'true') {
+        maxIn.value = ''; delete maxIn.dataset.prefilled; // revert only our own prefill → placeholder 60
+      }
+    }
   };
 
   let leagues = [];

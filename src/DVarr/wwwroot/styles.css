@@ -367,12 +367,9 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, .clickrow:foc
   .nav-item { padding:13px 15px; }
   button, .btn { min-height:40px; }
   button.sm, .btn.sm { min-height:34px; }
-  /* status chips shrink to bare dots (text stays in the title tooltip) — rules live in the phone section at the end of this file */
+  /* status chips are hidden entirely on phones — see the topbar rules in the phone section at the end of this file */
   .toolbar { gap:8px; }
   .toolbar select, .toolbar input { flex:1 1 140px; min-width:0; }
-  .kpi { padding:13px; gap:11px; }
-  .kpi-ic { width:38px; height:38px; }
-  .kpi-value { font-size:24px; }
 
   /* Dense tables stay readable via contained horizontal scroll (display:block keeps internal table layout). */
   #view table:not(.rtable) { display:block; overflow-x:auto; width:100%; -webkit-overflow-scrolling:touch; }
@@ -442,14 +439,14 @@ body.drawer-locked { overflow:hidden; }  /* page scroll locked while the drawer 
 @media (max-width:640px){
   .hide-sm { display:none !important; }
 
-  /* Topbar: hamburger + title + ONE primary action; secondary actions live in the ⋯ menu; status chips = bare dots. */
-  .topbar { gap:10px; }
-  .topbar .actions { margin-left:auto; gap:6px; }
+  /* Topbar order: [hamburger][page title, flex:1, full text][primary + Schedule][topbar ⋯ far right].
+     Status chips/dots are hidden entirely — DB/slot health stays visible in the sidebar footer chip. */
+  .topbar { gap:8px; padding-left:12px; padding-right:12px; }
+  .topbar h1 { flex:1 1 auto; min-width:0; font-size:15px; overflow:visible; text-overflow:clip; }
+  .topbar .actions { margin-left:0; gap:6px; }
   .topbar .actions > button.ghost { display:none; }   /* mirrored inside the topbar ⋯ menu */
   .topbar .actions .kebab-btn { width:38px; height:38px; }
-  .topbar .status { margin-left:0; gap:6px; }
-  .topbar .status .chip { padding:5px; }
-  .topbar .status .chip > span:not(.dot) { display:none; }
+  .topbar .status { display:none; }   /* no chips/dots on phones */
 
   /* Row action clusters collapse into one kebab. */
   .kebab-wrap { display:inline-flex; }
@@ -465,6 +462,9 @@ body.drawer-locked { overflow:hidden; }  /* page scroll locked while the drawer 
   /* Filter rows: compact two-up wrap, no overflow. */
   .toolbar { margin-bottom:12px; }
   .toolbar select { flex:1 1 40%; }
+
+  /* Dashboard: the four KPI status cards add little on a phone — hide the whole row (panels below carry the same numbers). */
+  .kpi-row { display:none; }
 
   /* Dashboard: panel order (Recording now → Scheduled → Completed → Next 24h → Leagues → Sources) + 2-up league tiles. */
   .dash-grid > .dash-cell:nth-child(1) { order:1; }

@@ -95,12 +95,17 @@ using (var scope = app.Services.CreateScope())
     await scope.ServiceProvider.GetRequiredService<SettingsService>().EnsureDefaultsAsync();
     await scope.ServiceProvider.GetRequiredService<SourceSeeder>().SeedFromFileAsync(configDir);
 
-    var (apiKey, apiKeyCreated) = await DVarr.Api.ParityEndpoints.EnsureApiKeyAsync(db, scope.ServiceProvider.GetRequiredService<DbWriteGate>());
+    var gate = scope.ServiceProvider.GetRequiredService<DbWriteGate>();
+    var (apiKey, apiKeyCreated) = await DVarr.Api.ParityEndpoints.EnsureApiKeyAsync(db, gate);
     // Echo the secret only on the boot that generates it — don't re-print it into the log on every restart.
     if (apiKeyCreated)
         app.Logger.LogInformation("Sonarr-emulation API key generated (paste into Prowlarr): {Key}", apiKey);
     else
         app.Logger.LogInformation("Sonarr-emulation API key already configured.");
+
+    var (_, calTokenCreated) = await DVarr.Api.CalendarEndpoints.EnsureCalendarTokenAsync(db, gate);
+    // Only note the token was created (the copy-me URL is available at /api/calendar/url); don't re-log it every boot.
+    if (calTokenCreated) app.Logger.LogInformation("Calendar feed token generated (subscribe URL at /api/calendar/url).");
 
     var ff = scope.ServiceProvider.GetRequiredService<FfmpegLocator>();
     ff.CachedVersion = await ff.VersionAsync();
@@ -118,6 +123,7 @@ app.MapHealthEndpoints();
 app.MapDVarrApi();
 app.MapLeagueApi();
 app.MapParityApi();
+app.MapCalendarApi();
 app.MapPreviewApi();
 app.MapPlexApi();
 app.MapFallbackToFile("index.html");

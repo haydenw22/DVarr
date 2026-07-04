@@ -169,8 +169,16 @@ public sealed class EpgIngestService
             Complete();             // flush a trailing <programme> whose <title> was the final child read
             await FlushBatchAsync();
             if (!truncated)
-                // Full parse succeeded → swap: drop the OLD guide, leaving only this run's rows.
-                await _gate.WriteAsync(async () => { await _db.Programmes.Where(p => p.SourceId == sourceId && p.Id <= maxOldId).ExecuteDeleteAsync(ct); }, ct);
+                // Full parse succeeded → swap: drop the OLD guide, leaving only this run's rows. Stamp the source's
+                // last-good EPG sync time in the same write — the re-pick sweep reads it to detect a >12h-stale guide.
+                await _gate.WriteAsync(async () =>
+                {
+                    await _db.Programmes.Where(p => p.SourceId == sourceId && p.Id <= maxOldId).ExecuteDeleteAsync(ct);
+                    // Re-load the row inside the gate — the batch flushes above call ChangeTracker.Clear(), so the `s`
+                    // captured before streaming may be detached. FindAsync returns the tracked (or freshly-read) entity.
+                    var src = await _db.Sources.FindAsync(new object?[] { sourceId }, ct);
+                    if (src is not null) { src.LastEpgSyncUtc = EpochTime.Now(); await _db.SaveChangesAsync(ct); }
+                }, ct);
             else
                 // Hit the safety cap mid-stream → this run's guide is INCOMPLETE. Keep the last-known-good guide and
                 // discard this run's partial rows, rather than overwriting a complete guide with a truncated one.

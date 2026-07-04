@@ -432,13 +432,14 @@ public sealed class AutoScheduleService : BackgroundService
         if (placed > 0 || conflicted > 0 || promoted > 0)
             _log.LogInformation("[AutoSchedule] placed {P}, promoted {Pr}, conflicted {C} (across {N} credential(s))", placed, promoted, conflicted, slots.Select(s => s.SourceId).Distinct().Count());
 
-        // 3) Arm-window EPG re-pick sweep: recordings starting within 24h are inside the provider's ~28h guide depth,
-        //    so re-resolve them against the LIVE guide and move to the mapped channel that actually shows the event
-        //    (same credential only; EpgRepickService applies threshold + hysteresis + ChannelLocked + kill-switch).
+        // 3) Arm-window EPG re-pick sweep: check ~1h before start (the provider's EPG often has no content 24h out, so
+        //    re-picking that early degenerates to rank order). Re-resolve each against the LIVE guide and move to the
+        //    mapped channel that actually shows the event (same credential only; EpgRepickService applies threshold +
+        //    hysteresis + ChannelLocked + kill-switch, and triggers a stale-EPG refresh when this source's guide is >12h old).
         var repick = scope.ServiceProvider.GetRequiredService<EpgRepickService>();
         var repickIds = await db.Recordings.AsNoTracking()
             .Where(r => r.State == RecordingState.Pending && r.EventId != null && !r.ChannelLocked
-                        && r.StartUtc > now && r.StartUtc <= now + 86400)
+                        && r.StartUtc > now && r.StartUtc <= now + 3600)
             .Select(r => r.Id).ToListAsync(ct);
         var repicked = 0;
         foreach (var rid in repickIds)
