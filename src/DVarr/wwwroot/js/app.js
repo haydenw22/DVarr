@@ -69,6 +69,7 @@ const I = {
   clock: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
   check: '<svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>',
   layers: '<svg viewBox="0 0 24 24"><path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="M2 12l10 5 10-5"/><path d="M2 17l10 5 10-5"/></svg>',
+  dots: '<svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="2" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="2" fill="currentColor" stroke="none"/></svg>',
 };
 
 const NAV = [
@@ -95,7 +96,8 @@ function toast(msg, kind = '') {
 function modal(html, width) {
   const bg = document.createElement('div');
   bg.className = 'modal-bg';
-  bg.innerHTML = `<div class="modal"${width ? ` style="width:${width}"` : ''}>${html}</div>`;
+  // .modal-x: close button for the phone full-screen sheet (display:none on desktop, so wide layouts are untouched).
+  bg.innerHTML = `<div class="modal"${width ? ` style="width:${width}"` : ''}>${html}<button type="button" class="modal-x" aria-label="Close" onclick="closeModals()"><svg viewBox="0 0 24 24" style="width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>`;
   bg.addEventListener('click', e => { if (e.target === bg) closeModals(); });
   $('#modalRoot').appendChild(bg);
   return bg;
@@ -103,8 +105,47 @@ function modal(html, width) {
 function closeModals() { stopPreview(); $('#modalRoot').replaceChildren(); }
 
 // ---- mobile drawer nav (sidebar slides in over a scrim below ~820px) ----
-function closeDrawer() { const a = $('.app'); if (a) a.classList.remove('drawer-open'); const h = $('#hamburger'); if (h) h.setAttribute('aria-expanded', 'false'); }
-function toggleDrawer() { const a = $('.app'); if (!a) return; const open = a.classList.toggle('drawer-open'); const h = $('#hamburger'); if (h) h.setAttribute('aria-expanded', open ? 'true' : 'false'); }
+// body.drawer-locked freezes page scroll behind the open drawer (class is only ever set on small screens).
+function closeDrawer() { const a = $('.app'); if (a) a.classList.remove('drawer-open'); document.body.classList.remove('drawer-locked'); const h = $('#hamburger'); if (h) h.setAttribute('aria-expanded', 'false'); }
+function toggleDrawer() { const a = $('.app'); if (!a) return; const open = a.classList.toggle('drawer-open'); document.body.classList.toggle('drawer-locked', open); const h = $('#hamburger'); if (h) h.setAttribute('aria-expanded', open ? 'true' : 'false'); }
+
+// ---- kebab "⋯" action menu (phone) ----
+// One reusable dropdown per row: items = [{ label, fn, danger?, title? }] where `fn` is an inline-JS string that
+// mirrors the row's desktop button (callers jsq()-escape embedded values exactly as they do for those buttons).
+// The whole component is display:none on desktop (CSS), so wide layouts keep their inline buttons unchanged.
+function kebab(items) {
+  const its = items.filter(Boolean).map(i =>
+    `<button type="button" class="kebab-item${i.danger ? ' danger' : ''}" role="menuitem"${i.title ? ` title="${esc(i.title)}"` : ''} onclick="${i.fn}">${i.label}</button>`).join('');
+  return `<span class="kebab-wrap"><button type="button" class="kebab-btn" aria-haspopup="true" aria-expanded="false" aria-label="More actions" onclick="toggleKebab(this)">${I.dots}</button><div class="kebab-menu" role="menu">${its}</div></span>`;
+}
+let _kebabOpen = false; // cheap guard so the capture-phase scroll listener doesn't touch the DOM when nothing is open
+function closeKebabs() {
+  if (!_kebabOpen) return;
+  _kebabOpen = false;
+  document.querySelectorAll('.kebab-menu.open').forEach(m => { m.classList.remove('open'); m.style.left = m.style.top = ''; });
+  document.querySelectorAll('.kebab-btn[aria-expanded="true"]').forEach(b => b.setAttribute('aria-expanded', 'false'));
+}
+function toggleKebab(btn) {
+  const menu = btn.nextElementSibling; if (!menu) return;
+  const wasOpen = menu.classList.contains('open');
+  closeKebabs(); // only one open at a time
+  if (wasOpen) return;
+  menu.classList.add('open');
+  btn.setAttribute('aria-expanded', 'true');
+  _kebabOpen = true;
+  // Fixed-position the dropdown inside the viewport: right-align to the button; flip above it when there's no room below.
+  const r = btn.getBoundingClientRect();
+  const mw = menu.offsetWidth, mh = menu.offsetHeight;
+  const left = Math.max(8, Math.min(r.right - mw, window.innerWidth - mw - 8));
+  let top = r.bottom + 6;
+  if (top + mh > window.innerHeight - 8) top = Math.max(8, r.top - mh - 6);
+  menu.style.left = left + 'px'; menu.style.top = top + 'px';
+}
+// Outside tap or choosing an item closes the menu (an item's own inline onclick has already run by the time this
+// bubbles to the document). Any scroll or resize also closes it, since the menu is fixed-positioned.
+document.addEventListener('click', e => { if (!e.target.closest('.kebab-btn')) closeKebabs(); });
+window.addEventListener('scroll', closeKebabs, true);
+window.addEventListener('resize', closeKebabs);
 
 // ---- live refresh wiring ----
 let liveRefresh = null, liveTimer = null;
@@ -157,6 +198,7 @@ const PAGES = {};
 PAGES.dashboard = {
   title: 'Dashboard',
   actions: () => `<button onclick="openScheduleModal()">${I.plus} Schedule</button><button class="ghost" onclick="openTestModal()">${I.play} Test</button>`,
+  menuActions: [{ label: 'Test recording', fn: 'openTestModal()' }], // phone topbar ⋯ (mirrors the ghost button above)
   async render(el) {
     const draw = async () => {
       const now = Math.floor(Date.now() / 1000);
@@ -248,9 +290,13 @@ function sourcesPanel(sources) {
   return `<div class="dash-rec">${sources.map(x => `
     <div class="prow">
       <div class="prow-main"><b>${esc(x.label)}</b><div class="prow-sub">${x.channels} ch · ${x.programmes || 0} epg · <span style="color:${x.slotFree ? 'var(--ok)' : 'var(--warn)'}">${x.slotFree ? 'slot free' : 'slot busy'}</span></div></div>
-      <div class="prow-side">
+      <div class="prow-side acts-row">
         <button class="ghost sm" onclick="syncEpg(${x.id},'${jsq(x.label)}')" title="Refresh this source's EPG">${I.refresh} EPG</button>
         <button class="ghost sm" onclick="ingest(${x.id},'${jsq(x.label)}')" title="Re-ingest this source's channels">Ingest</button>
+        ${kebab([
+          { label: 'Refresh EPG', fn: `syncEpg(${x.id},'${jsq(x.label)}')` },
+          { label: 'Ingest channels', fn: `ingest(${x.id},'${jsq(x.label)}')` },
+        ])}
       </div>
     </div>`).join('')}</div>`;
 }
@@ -259,6 +305,7 @@ function sourcesPanel(sources) {
 PAGES.recordings = {
   title: 'Recordings',
   actions: () => `<button onclick="openScheduleModal()">${I.plus} Schedule</button><button class="ghost" onclick="openTestModal()">${I.play} Test</button>`,
+  menuActions: [{ label: 'Test recording', fn: 'openTestModal()' }], // phone topbar ⋯ (mirrors the ghost button above)
   async render(el) {
     el.innerHTML = `<div class="toolbar">
         <select id="recFilter"><option value="">All states</option><option>Recording</option><option>Pending</option><option>Done</option><option>NeedsAttention</option><option>Missed</option></select>
@@ -295,21 +342,33 @@ PAGES.recordings = {
 };
 
 function recTable(rows, withActions) {
-  return `<table class="rtable"><thead><tr><th>Title</th><th>State</th><th>Channel</th><th>Source</th><th>Size</th><th>Window (Brisbane)</th>${withActions ? '<th></th>' : ''}</tr></thead><tbody>${rows.map(r => `
-    <tr><td data-label="Title">${esc(r.title)}</td>
+  return `<table class="rtable"><thead><tr><th>Title</th><th>State</th><th>Channel</th><th>Source</th><th>Size</th><th>Window (Brisbane)</th>${withActions ? '<th></th>' : ''}</tr></thead><tbody>${rows.map(r => {
+    // Same conditions as the inline desktop buttons — the phone kebab mirrors them 1:1 so no action is lost.
+    const pendingish = r.state === 'Pending' || r.state === 'Conflict';
+    const stoppable = ACTIVE.includes(r.state) || pendingish;
+    const importable = r.state === 'Done' && (r.outputPath || '').includes('.unsorted');
+    return `
+    <tr><td data-label="">${esc(r.title)}</td>
       <td data-label="State"><span class="pill ${sc(r.state)}">${r.state}</span>${r.attemptCount ? ` <span class="muted" title="relaunch/failover attempts">↻${r.attemptCount}</span>` : ''}</td>
       <td data-label="Channel">${esc(r.channel)}</td><td data-label="Source" class="muted">${esc(r.source)}</td>
       <td data-label="Size" class="mono">${mb(r.bytesWritten)}</td>
       <td data-label="Window" class="mono muted">${brisbane(r.startUtc)} – ${brisbane(r.endUtc)}</td>
-      ${withActions ? `<td data-label="" class="row acts" style="gap:6px">${r.state === 'Pending' || r.state === 'Conflict' ? `<button class="sm" onclick="startRec(${r.id})" title="Start this recording now (early/manual)">start</button><button class="ghost sm" onclick="reresolveRec(${r.id})" title="Re-resolve the channel from the league's current mapping">re-resolve</button>` : ''}${ACTIVE.includes(r.state) || r.state === 'Pending' || r.state === 'Conflict' ? `<button class="ghost sm" onclick="stopRec(${r.id})">stop</button>` : ''}${r.state === 'Done' && (r.outputPath || '').includes('.unsorted') ? `<button class="sm" onclick="openImportModal(${r.id}, ${r.startUtc}, '${jsq(r.title || '')}')" title="Sort this manual recording into the library">import</button>` : ''}<button class="danger sm" onclick="delRec(${r.id})">delete</button></td>` : ''}
-    </tr>`).join('')}</tbody></table>`;
+      ${withActions ? `<td data-label="" class="row acts" style="gap:6px">${pendingish ? `<button class="sm" onclick="startRec(${r.id})" title="Start this recording now (early/manual)">start</button><button class="ghost sm" onclick="reresolveRec(${r.id})" title="Re-resolve the channel from the league's current mapping">re-resolve</button>` : ''}${stoppable ? `<button class="ghost sm" onclick="stopRec(${r.id})">stop</button>` : ''}${importable ? `<button class="sm" onclick="openImportModal(${r.id}, ${r.startUtc}, '${jsq(r.title || '')}')" title="Sort this manual recording into the library">import</button>` : ''}<button class="danger sm" onclick="delRec(${r.id})">delete</button>${kebab([
+        pendingish && { label: 'Start now', fn: `startRec(${r.id})` },
+        pendingish && { label: 'Re-resolve channel', fn: `reresolveRec(${r.id})` },
+        stoppable && { label: 'Stop', fn: `stopRec(${r.id})` },
+        importable && { label: 'Import into library', fn: `openImportModal(${r.id}, ${r.startUtc}, '${jsq(r.title || '')}')` },
+        { label: 'Delete', fn: `delRec(${r.id})`, danger: true },
+      ])}</td>` : ''}
+    </tr>`;
+  }).join('')}</tbody></table>`;
 }
 function notesList(notes) {
   const col = s => s === 'Critical' ? 'var(--crit)' : s === 'Warn' ? 'var(--warn)' : 'var(--dim)';
-  return `<table><tbody>${notes.map(n => `<tr>
-    <td class="mono muted" style="width:120px">${brisbane(n.tsUtc)}</td>
-    <td style="width:120px"><span class="tag" style="color:${col(n.severity)}">${esc(n.kind)}</span></td>
-    <td>${esc(n.message || (n.fromState ? n.fromState + ' → ' + n.toState : ''))}${n.recordingId ? ` <span class="muted">#${n.recordingId}</span>` : ''}</td></tr>`).join('')}</tbody></table>`;
+  return `<table class="rtable"><tbody>${notes.map(n => `<tr>
+    <td data-label="" class="mono muted" style="width:120px">${brisbane(n.tsUtc)}</td>
+    <td data-label="" style="width:120px"><span class="tag" style="color:${col(n.severity)}">${esc(n.kind)}</span></td>
+    <td data-label="">${esc(n.message || (n.fromState ? n.fromState + ' → ' + n.toState : ''))}${n.recordingId ? ` <span class="muted">#${n.recordingId}</span>` : ''}</td></tr>`).join('')}</tbody></table>`;
 }
 function upcomingEvents(events, leagues) {
   return `<div class="dash-rec">${events.map(e => {
@@ -351,11 +410,15 @@ PAGES.channels = {
     const draw = async () => {
       const rows = await api.get(`/api/channels?source=${$('#chSrc').value}&group=${encodeURIComponent($('#chGrp').value)}&q=${encodeURIComponent($('#chQ').value)}&take=500`);
       window._chanRows = {}; rows.forEach(c => window._chanRows[c.id] = c);
-      $('#chWrap').innerHTML = rows.length ? `<table><thead><tr><th>Name</th><th>Group</th><th>Source</th><th>Quality</th><th></th></tr></thead><tbody>${rows.map(c => `
-        <tr><td>${esc(c.name)}</td><td class="muted">${esc(c.group || '')}</td><td class="muted">${esc(c.sourceLabel)}</td><td class="mono muted">${esc(c.quality || '')}</td>
-        <td class="row" style="gap:6px;flex-wrap:nowrap">
+      $('#chWrap').innerHTML = rows.length ? `<table class="rtable"><thead><tr><th>Name</th><th>Group</th><th>Source</th><th>Quality</th><th></th></tr></thead><tbody>${rows.map(c => `
+        <tr><td data-label="">${esc(c.name)}</td><td data-label="Group" class="muted">${esc(c.group || '')}</td><td data-label="Source" class="muted">${esc(c.sourceLabel)}</td><td data-label="Quality" class="mono muted">${esc(c.quality || '')}</td>
+        <td data-label="" class="row acts" style="gap:6px;flex-wrap:nowrap">
           <button class="play-btn sm" title="Watch live preview" onclick="openPreview(${c.id},'${jsq(c.name)}')">${I.play} Watch</button>
           <button class="ghost sm" onclick="scheduleFor(${c.id})">${I.plus} Schedule</button>
+          ${kebab([
+            { label: `${I.play} Watch live preview`, fn: `openPreview(${c.id},'${jsq(c.name)}')` },
+            { label: 'Schedule recording', fn: `scheduleFor(${c.id})` },
+          ])}
         </td></tr>`).join('')}</tbody></table>`
         : emptyBox('No channels for this view. Run an ingest on the Sources page.');
     };
@@ -475,12 +538,13 @@ function scheduleFromGuide(channelId, start, stop, title) {
 PAGES.sources = {
   title: 'Sources',
   actions: () => `<button onclick="openSourceModal(null)">${I.plus} Add source</button><button class="ghost" onclick="render()">${I.refresh} Refresh</button>`,
+  menuActions: [{ label: 'Refresh', fn: 'render()' }],
   async render(el) {
     const s = await api.get('/api/sources');
     window._sources = s;
     el.innerHTML = `<div class="note warn">⚠ Your provider allows <b>one stream per login</b>. <b>Ingest</b>, <b>Sync EPG</b> and <b>Live preview</b> use that login's single slot — don't run them while recording on the same source.</div>
       <div class="section">${s.length ? `<table class="rtable"><thead><tr><th>Label</th><th>Type</th><th>Host</th><th>User</th><th>Slot</th><th>Channels</th><th>EPG</th><th></th></tr></thead><tbody>${s.map(x => `
-        <tr><td data-label="Label"><b>${esc(x.label)}</b></td><td data-label="Type" class="muted">${esc(x.type)}</td><td data-label="Host" class="mono muted">${esc(x.host)}${x.port ? ':' + x.port : ''}</td><td data-label="User" class="mono">${esc(x.username)}</td>
+        <tr><td data-label=""><b>${esc(x.label)}</b></td><td data-label="Type" class="muted">${esc(x.type)}</td><td data-label="Host" class="mono muted">${esc(x.host)}${x.port ? ':' + x.port : ''}</td><td data-label="User" class="mono">${esc(x.username)}</td>
         <td data-label="Slot"><span class="tag ${x.slotFree ? 'ok' : 'busy'}">${x.slotFree ? 'free' : 'busy'}</span></td>
         <td data-label="Channels" class="mono">${x.channels}</td>
         <td data-label="EPG" class="mono muted">${x.programmes || 0}${x.epgOverride ? ' <span class="tag" title="external EPG override active">ext</span>' : ''}</td>
@@ -489,6 +553,12 @@ PAGES.sources = {
           <button class="ghost sm" onclick="syncEpg(${x.id},'${jsq(x.label)}')">EPG</button>
           <button class="ghost sm" onclick="openSourceModal(${x.id})">Edit</button>
           <button class="danger sm" onclick="deleteSource(${x.id},'${jsq(x.label)}')">Del</button>
+          ${kebab([
+            { label: 'Ingest channels', fn: `ingest(${x.id},'${jsq(x.label)}')` },
+            { label: 'Sync EPG', fn: `syncEpg(${x.id},'${jsq(x.label)}')` },
+            { label: 'Edit source', fn: `openSourceModal(${x.id})` },
+            { label: 'Delete source', fn: `deleteSource(${x.id},'${jsq(x.label)}')`, danger: true },
+          ])}
         </td></tr>`).join('')}</tbody></table>`
         : emptyBox('No sources configured. Click “Add source” to set one up.')}</div>`;
   },
@@ -498,22 +568,31 @@ PAGES.sources = {
 PAGES.leagues = {
   title: 'Leagues',
   actions: () => `<button onclick="openLeagueModal(null)">${I.plus} Add league</button><button class="ghost" onclick="render()">${I.refresh} Refresh</button>`,
+  menuActions: [{ label: 'Refresh', fn: 'render()' }],
   async render(el) {
     const ls = await api.get('/api/leagues');
     window._leagues = ls;
     el.innerHTML = `<div class="page-wide"><div class="note">A <b>monitored</b> league auto-records its events on its mapped channel(s). Leagues come from <b>TheSportsDB</b> — pick a sport then search the league; posters &amp; events sync automatically.</div>
-      <div class="section"><h2>Leagues ${ls.length ? `<span class="count-pill">${ls.length}</span>` : ''}</h2>${ls.length ? `<table><thead><tr><th></th><th>League</th><th>Sport</th><th>Events</th><th>Maps</th><th>Monitored</th><th></th></tr></thead><tbody>${ls.map(l => `
-        <tr><td>${l.poster ? `<img class="lg-poster" src="${esc(l.poster)}" alt=""/>` : ''}</td>
-        <td><span class="lg-dot" style="background:${leagueColor(l)}" title="calendar colour"></span><b>${esc(l.name)}</b>${l.externalLeagueId ? ` <span class="tag" title="TheSportsDB id">#${esc(l.externalLeagueId)}</span>` : ''}${l.monitoredTeams && l.monitoredTeams.length ? `<div class="muted" style="font-size:11px">following ${l.monitoredTeams.length} team${l.monitoredTeams.length === 1 ? '' : 's'}: ${esc(l.monitoredTeams.map(t => t.name).filter(Boolean).join(', '))}</div>` : ''}${l.monitoredSessions && l.monitoredSessions.length ? `<div class="muted" style="font-size:11px">sessions: ${esc(l.monitoredSessions.join(', '))}</div>` : ''}${l.autoStopMode === 'fixed' ? `<div class="muted" style="font-size:11px">auto-stop: fixed</div>` : ''}</td><td class="muted">${esc(l.sport)}</td>
-        <td class="mono">${l.events}</td><td class="mono">${l.mappings}</td>
-        <td><span class="tag ${l.monitored ? 'ok' : ''}">${l.monitored ? 'yes' : 'no'}</span></td>
-        <td class="row" style="gap:6px;flex-wrap:nowrap">
+      <div class="section"><h2>Leagues ${ls.length ? `<span class="count-pill">${ls.length}</span>` : ''}</h2>${ls.length ? `<table class="rtable"><thead><tr><th></th><th>League</th><th>Sport</th><th>Events</th><th>Maps</th><th>Monitored</th><th></th></tr></thead><tbody>${ls.map(l => `
+        <tr><td class="hide-sm">${l.poster ? `<img class="lg-poster" src="${esc(l.poster)}" alt=""/>` : ''}</td>
+        <td data-label=""><span class="lg-dot" style="background:${leagueColor(l)}" title="calendar colour"></span><b>${esc(l.name)}</b>${l.externalLeagueId ? ` <span class="tag" title="TheSportsDB id">#${esc(l.externalLeagueId)}</span>` : ''}${l.monitoredTeams && l.monitoredTeams.length ? `<div class="muted" style="font-size:11px">following ${l.monitoredTeams.length} team${l.monitoredTeams.length === 1 ? '' : 's'}: ${esc(l.monitoredTeams.map(t => t.name).filter(Boolean).join(', '))}</div>` : ''}${l.monitoredSessions && l.monitoredSessions.length ? `<div class="muted" style="font-size:11px">sessions: ${esc(l.monitoredSessions.join(', '))}</div>` : ''}${l.autoStopMode === 'fixed' ? `<div class="muted" style="font-size:11px">auto-stop: fixed</div>` : ''}</td><td data-label="Sport" class="muted">${esc(l.sport)}</td>
+        <td data-label="Events" class="mono">${l.events}</td><td data-label="Maps" class="mono">${l.mappings}</td>
+        <td data-label="Monitored"><span class="tag ${l.monitored ? 'ok' : ''}">${l.monitored ? 'yes' : 'no'}</span></td>
+        <td data-label="" class="row acts" style="gap:6px;flex-wrap:nowrap">
           <button class="ghost sm" onclick="openMapModal(${l.id},'${jsq(l.name)}')">Map</button>
           <button class="ghost sm" onclick="syncLeague(${l.id})">Sync</button>
           <button class="ghost sm" onclick="reresolveLeague(${l.id})" title="Update this league's scheduled recordings to its current channel mapping">Re-resolve</button>
           <button class="ghost sm" onclick="location.hash='#/calendar?league=${l.id}'">Events</button>
           <button class="ghost sm" onclick="openLeagueModal(${l.id})">Edit</button>
           <button class="danger sm" onclick="deleteLeague(${l.id},'${jsq(l.name)}')">Del</button>
+          ${kebab([
+            { label: 'Map channel', fn: `openMapModal(${l.id},'${jsq(l.name)}')` },
+            { label: 'Sync events', fn: `syncLeague(${l.id})` },
+            { label: 'Re-resolve recordings', fn: `reresolveLeague(${l.id})`, title: "Update this league's scheduled recordings to its current channel mapping" },
+            { label: 'View events', fn: `location.hash='#/calendar?league=${l.id}'` },
+            { label: 'Edit league', fn: `openLeagueModal(${l.id})` },
+            { label: 'Delete league', fn: `deleteLeague(${l.id},'${jsq(l.name)}')`, danger: true },
+          ])}
         </td></tr>`).join('')}</tbody></table>` : emptyBox('No leagues yet. Add one and pin a channel to start auto-recording.')}</div>
       <div class="section"><h2>Channel mappings</h2>
         <div class="note">
@@ -532,9 +611,9 @@ PAGES.leagues = {
       const lf = $('#mapLeagueFilter').value;
       const rows = lf ? maps.filter(m => String(m.leagueId) === lf) : maps;
       $('#mapCount').textContent = maps.length ? (lf ? `${rows.length} of ${maps.length} mapping${maps.length === 1 ? '' : 's'}` : `${maps.length} mapping${maps.length === 1 ? '' : 's'}`) : '';
-      $('#mapsWrap').innerHTML = rows.length ? `<table><thead><tr><th>League</th><th>Channel</th><th>Source</th><th>Rank</th><th>Pinned</th><th></th></tr></thead><tbody>${rows.map(m => {
+      $('#mapsWrap').innerHTML = rows.length ? `<table class="rtable"><thead><tr><th>League</th><th>Channel</th><th>Source</th><th>Rank</th><th>Pinned</th><th></th></tr></thead><tbody>${rows.map(m => {
         const lg = ls.find(x => x.id === m.leagueId);
-        return `<tr><td>${esc(lg ? lg.name : '#' + m.leagueId)}</td><td>${esc(m.channel)}</td><td class="muted">${esc(m.source)}</td><td class="mono">${m.rank}</td><td>${m.pinned ? '★' : ''}</td><td><button class="danger sm" onclick="deleteMapping(${m.id})">Del</button></td></tr>`;
+        return `<tr><td data-label="">${esc(lg ? lg.name : '#' + m.leagueId)}</td><td data-label="Channel">${esc(m.channel)}</td><td data-label="Source" class="muted">${esc(m.source)}</td><td data-label="Rank" class="mono">${m.rank}</td><td data-label="Pinned">${m.pinned ? '★' : ''}</td><td data-label="" class="acts"><button class="danger sm" onclick="deleteMapping(${m.id})">Del</button>${kebab([{ label: 'Remove mapping', fn: `deleteMapping(${m.id})`, danger: true }])}</td></tr>`;
       }).join('')}</tbody></table>` : emptyBox(lf ? 'No mappings for this league yet — use “Map” on it above.' : 'No mappings. Use “Map” on a league to pin a channel.');
     };
     $('#mapLeagueFilter').addEventListener('change', drawMaps);
@@ -548,13 +627,16 @@ const DOW = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 PAGES.calendar = {
   title: 'Calendar',
   actions: () => `<button onclick="openEventModal()">${I.plus} Add event</button><button class="ghost" onclick="render()">${I.refresh} Refresh</button>`,
+  menuActions: [{ label: 'Refresh', fn: 'render()' }],
   async render(el) {
     const params = new URLSearchParams((location.hash.split('?')[1]) || '');
     const leagueFilter = params.get('league') || '';
     const ls = await api.get('/api/leagues'); window._leagues = ls;
     window._calEvents = {};
     const today = bneParts(Math.floor(Date.now() / 1000));
-    const state = { y: today.y, m: today.m, league: leagueFilter };
+    // selDay drives the phone-only "selected day" list under the mini-grid (default = today); harmless on desktop.
+    const state = { y: today.y, m: today.m, league: leagueFilter, selDay: bneCellKey(today.y, today.m, today.d) };
+    let byDay = {}; // events bucketed by Brisbane day — shared by the grid and the phone day list
 
     el.innerHTML = `
       <div class="toolbar cal-toolbar">
@@ -565,7 +647,31 @@ PAGES.calendar = {
         <span class="grow"></span>
         <select id="calLeague"><option value="">All leagues</option>${ls.map(l => `<option value="${l.id}" ${String(l.id) === leagueFilter ? 'selected' : ''}>${esc(l.name)}</option>`).join('')}</select>
       </div>
-      <div id="calGrid" class="loading">…</div>`;
+      <div id="calGrid" class="loading">…</div>
+      <div id="calDayList" class="cal-daylist"></div>`;
+
+    // Phone (≤640): the month grid shows colour DOTS; tapping a day lists its events as cards below the grid.
+    // Desktop keeps the full event cards and this list stays empty + display:none.
+    const phoneCal = () => window.matchMedia('(max-width:640px)').matches;
+    const renderDayList = () => {
+      const host = $('#calDayList'); if (!host) return;
+      if (!phoneCal()) { host.innerHTML = ''; return; }
+      const evs = byDay[state.selDay] || [];
+      const label = new Date((state.selDay * 86400 - BNE_OFFSET) * 1000).toLocaleDateString('en-AU', { timeZone: 'Australia/Brisbane', weekday: 'long', day: 'numeric', month: 'long' });
+      host.innerHTML = `<div class="section"><h2>${esc(label)}</h2>${evs.length ? `<div class="panel"><div class="panel-body">${evs.map(e => {
+        const c = leagueColor(ls.find(l => l.id === e.leagueId) || e);
+        return `<div class="prow clickrow" onclick="openCalEvent(${e.id})"><span class="lg-dot" style="background:${c}"></span><div class="prow-main"><b>${esc(e.title)}</b><div class="prow-sub">${hhmm(e.start)} · ${esc(e.league)}</div></div><div class="prow-side">${e.monitored ? '<span class="tag ok">monitored</span>' : ''}</div></div>`;
+      }).join('')}</div></div>` : `<div class="empty" style="padding:22px">No events this day.</div>`}</div>`;
+    };
+    $('#calGrid').addEventListener('click', e => {
+      if (!phoneCal()) return; // desktop: event cards keep their own click handlers
+      const cell = e.target.closest('.cal-cell');
+      if (!cell || !cell.dataset.day) return;
+      state.selDay = parseInt(cell.dataset.day);
+      $('#calGrid').querySelectorAll('.cal-cell.sel').forEach(x => x.classList.remove('sel'));
+      cell.classList.add('sel');
+      renderDayList();
+    });
 
     const draw = async () => {
       $('#calTitle').textContent = `${MONTHS[state.m]} ${state.y}`;
@@ -575,7 +681,7 @@ PAGES.calendar = {
       window._calEvents = {}; events.forEach(e => { window._calEvents[e.id] = e; });
 
       // bucket events by Brisbane day
-      const byDay = {};
+      byDay = {};
       events.forEach(e => { (byDay[bneDayKey(e.start)] ||= []).push(e); });
       Object.values(byDay).forEach(list => list.sort((a, b) => a.start - b.start));
 
@@ -583,6 +689,10 @@ PAGES.calendar = {
       const firstDow = (new Date(Date.UTC(state.y, state.m, 1)).getUTCDay() + 6) % 7; // 0=Mon
       const daysInMonth = new Date(Date.UTC(state.y, state.m + 1, 0)).getUTCDate();
       const todayKey = bneCellKey(today.y, today.m, today.d);
+      // Keep the phone day-list selection inside the displayed month (today when visible, else the 1st).
+      const monthFirstKey = bneCellKey(state.y, state.m, 1), monthLastKey = bneCellKey(state.y, state.m, daysInMonth);
+      if (state.selDay < monthFirstKey || state.selDay > monthLastKey)
+        state.selDay = (todayKey >= monthFirstKey && todayKey <= monthLastKey) ? todayKey : monthFirstKey;
 
       let cells = '';
       for (let i = 0; i < firstDow; i++) cells += `<div class="cal-cell empty-cell"></div>`;
@@ -590,7 +700,7 @@ PAGES.calendar = {
         const key = bneCellKey(state.y, state.m, d);
         const evs = byDay[key] || [];
         const isToday = key === todayKey;
-        cells += `<div class="cal-cell${isToday ? ' today' : ''}">
+        cells += `<div class="cal-cell${isToday ? ' today' : ''}${key === state.selDay ? ' sel' : ''}" data-day="${key}">
           <div class="cal-daynum">${d}</div>
           <div class="cal-events">${evs.map(e => {
           const bg = leagueColor(ls.find(l => l.id === e.leagueId) || e);
@@ -598,6 +708,7 @@ PAGES.calendar = {
         }).join('')}</div></div>`;
       }
       $('#calGrid').innerHTML = `<div class="cal-grid"><div class="cal-head">${DOW.map(d => `<div>${d}</div>`).join('')}</div><div class="cal-body">${cells}</div></div>`;
+      renderDayList();
     };
 
     $('#calPrev').addEventListener('click', () => { if (state.m === 0) { state.m = 11; state.y--; } else state.m--; draw(); });
@@ -626,12 +737,13 @@ function openCalEvent(id) {
 PAGES.activity = {
   title: 'Activity',
   actions: () => `<button class="ghost" onclick="render()">${I.refresh} Refresh</button>`,
+  menuActions: [{ label: 'Refresh', fn: 'render()' }], // phone topbar ⋯ (mirrors the ghost button above)
   async render(el) {
     const [notes, ticks] = await Promise.all([api.get('/api/notifications?take=60'), api.get('/api/ticks?take=15')]);
     el.innerHTML = `
       <div class="section"><h2>Notifications</h2>${notes.length ? notesList(notes) : emptyBox('No notifications yet.')}</div>
-      <div class="section"><h2>Scheduler ticks</h2>${ticks.length ? `<table><thead><tr><th>Time</th><th>Examined</th><th>Started</th><th>Missed</th><th>Conflicts</th><th>ms</th></tr></thead><tbody>${ticks.map(t => `
-        <tr><td class="mono muted">${brisbane(t.tickUtc)}</td><td class="mono">${t.recordingsExamined}</td><td class="mono">${t.started}</td><td class="mono">${t.missed}</td><td class="mono">${t.conflicts}</td><td class="mono muted">${t.durationMs}</td></tr>`).join('')}</tbody></table>`
+      <div class="section"><h2>Scheduler ticks</h2>${ticks.length ? `<table class="rtable"><thead><tr><th>Time</th><th>Examined</th><th>Started</th><th>Missed</th><th>Conflicts</th><th>ms</th></tr></thead><tbody>${ticks.map(t => `
+        <tr><td data-label="" class="mono muted">${brisbane(t.tickUtc)}</td><td data-label="Examined" class="mono">${t.recordingsExamined}</td><td data-label="Started" class="mono">${t.started}</td><td data-label="Missed" class="mono">${t.missed}</td><td data-label="Conflicts" class="mono">${t.conflicts}</td><td data-label="Duration (ms)" class="mono muted">${t.durationMs}</td></tr>`).join('')}</tbody></table>`
         : emptyBox('Scheduler has not ticked yet.')}</div>`;
   },
 };
@@ -640,6 +752,7 @@ PAGES.activity = {
 PAGES.conflicts = {
   title: 'Conflicts',
   actions: () => `<button class="ghost" onclick="render()">${I.refresh} Refresh</button>`,
+  menuActions: [{ label: 'Refresh', fn: 'render()' }], // phone topbar ⋯ (mirrors the ghost button above)
   async render(el) {
     const [data, sources] = await Promise.all([api.get('/api/conflicts'), api.get('/api/sources')]);
     const creds = data.credentials || [], conflicts = data.conflicts || [];
@@ -649,9 +762,13 @@ PAGES.conflicts = {
       <div class="card" style="border-color:var(--warn);margin-bottom:12px">
         <div style="min-width:0"><b>${esc(r.title || ('Recording #' + r.id))}</b>
           <div class="muted" style="font-size:12px">${brisbane(r.startUtc)} – ${hhmm(r.endUtc)} · ${esc(r.reason || 'conflict')}</div></div>
-        <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
+        <div class="row acts-row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
           ${enabled.map(s => `<button class="sm ghost" onclick="reassignRec(${r.id},${s.id})">Record on ${esc(s.label)}</button>`).join('')}
           <button class="sm" onclick="bumpRec(${r.id})">Bump to Can't-Miss</button>
+          ${kebab([
+            ...enabled.map(s => ({ label: `Record on ${esc(s.label)}`, fn: `reassignRec(${r.id},${s.id})` })),
+            { label: "Bump to Can't-Miss", fn: `bumpRec(${r.id})` },
+          ])}
         </div>
       </div>`).join('') : emptyBox('No conflicts — every monitored event has a free login.');
 
@@ -1290,7 +1407,9 @@ async function render() {
   const page = PAGES[id] || PAGES.dashboard;
   document.querySelectorAll('.nav-item').forEach(a => a.classList.toggle('active', a.dataset.route === id));
   $('#pageTitle').textContent = page.title;
-  $('#pageActions').innerHTML = page.actions ? page.actions() : '';
+  // Desktop shows the page's inline action buttons unchanged; on phones the secondary (ghost) buttons hide and the
+  // same actions reappear inside a topbar ⋯ menu (page.menuActions) so nothing is lost — just tidied away.
+  $('#pageActions').innerHTML = (page.actions ? page.actions() : '') + (page.menuActions && page.menuActions.length ? kebab(page.menuActions) : '');
   setLive(null);
   const view = $('#view');
   view.innerHTML = '<div class="loading">Loading…</div>';
@@ -1299,12 +1418,21 @@ async function render() {
 }
 
 window.addEventListener('hashchange', render);
-window.addEventListener('keydown', e => { if (e.key === 'Escape') closeModals(); }); // Esc closes modals + stops preview
+// Esc closes (in order): an open ⋯ menu, then the nav drawer, then modals (which also stops any preview).
+// On desktop neither a kebab nor the drawer can be open, so behaviour there is exactly "Esc closes modals" as before.
+window.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  if (document.querySelector('.kebab-menu.open')) { closeKebabs(); return; }
+  const app = $('.app');
+  if (app && app.classList.contains('drawer-open')) { closeDrawer(); return; }
+  closeModals();
+});
 window.render = render; window.openTestModal = openTestModal; window.submitTest = submitTest;
 window.openScheduleModal = openScheduleModal; window.submitSchedule = submitSchedule; window.scheduleFor = scheduleFor; window.scheduleFromGuide = scheduleFromGuide;
 window.openPreview = openPreview; window.stopRec = stopRec; window.startRec = startRec; window.delRec = delRec; window.reresolveRec = reresolveRec; window.reresolveLeague = reresolveLeague;
 window.openImportModal = openImportModal; window.submitImport = submitImport;
 window.ingest = ingest; window.doIngest = doIngest; window.saveSettings = saveSettings; window.closeModals = closeModals;
+window.toggleKebab = toggleKebab; window.closeKebabs = closeKebabs;
 window.syncEpg = syncEpg; window.doSyncEpg = doSyncEpg; window.openSourceModal = openSourceModal; window.submitSource = submitSource; window.deleteSource = deleteSource;
 window.openLeagueModal = openLeagueModal; window.submitLeague = submitLeague; window.deleteLeague = deleteLeague; window.syncLeague = syncLeague;
 window.openMapModal = openMapModal; window.submitMap = submitMap; window.deleteMapping = deleteMapping;

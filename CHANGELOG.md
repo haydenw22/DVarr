@@ -12,6 +12,16 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.24.0] — 2026-07-04
+Mobile-first overhaul — the phone UI is now genuinely app-like.
+
+### Changed
+- **Phones (≤640 px) get a purpose-built layout with zero sideways scrolling on every page.** All wide tables (Leagues, Channel mappings, Recordings, Channels, Sources, Conflicts, Activity) reflow into stacked cards with labeled fields, and every row's action buttons tuck behind a **⋯ menu** (same actions, tidier). Secondary topbar actions collapse into a topbar ⋯; the primary button stays visible.
+- **Drawer navigation** polished: scrim, slide animation, Escape/scrim/nav-tap close, body scroll-lock, 44 px touch targets, iOS safe-area padding — works installed as a PWA.
+- **Modals become full-screen sheets** on phones (own scroll region, sticky title + action footer, ≥16 px inputs so iOS doesn't zoom, 2-column touch team/session pickers).
+- **Calendar on phones** is a tappable mini-grid (colour dots per day) with the selected day's events listed below; the guide pans inside its own timeline only. Dashboard panels stack in priority order with the KPI row 2×2.
+- **Desktop is pixel-identical to v1.23.0** — every change is scoped behind mobile media queries.
+
 ## [1.23.0] — 2026-07-04
 Smart auto-stop (no more missed extra time) · full UI redesign · league filters.
 

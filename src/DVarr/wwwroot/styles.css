@@ -367,7 +367,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, .clickrow:foc
   .nav-item { padding:13px 15px; }
   button, .btn { min-height:40px; }
   button.sm, .btn.sm { min-height:34px; }
-  .topbar .status { display:none; }              /* slots/clock live on the dashboard + footer */
+  /* status chips shrink to bare dots (text stays in the title tooltip) — rules live in the phone section at the end of this file */
   .toolbar { gap:8px; }
   .toolbar select, .toolbar input { flex:1 1 140px; min-width:0; }
   .kpi { padding:13px; gap:11px; }
@@ -404,4 +404,102 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, .clickrow:foc
 @media (hover:none) and (pointer:coarse){
   .nav-item { min-height:44px; }
   .g-ch { min-height:44px; }
+}
+
+/* =========================================================================
+   Mobile-first layer. Everything below only applies at ≤820px / ≤640px (plus
+   a few base rules for elements that are display:none on desktop), so the
+   desktop (>900px) layout is pixel-identical to the redesign above.
+   ========================================================================= */
+
+/* ---- kebab "⋯" action menu (rendered everywhere, visible only on phones) ---- */
+.kebab-wrap { display:none; }
+.kebab-btn { width:40px; height:40px; min-height:0; padding:0; align-items:center; justify-content:center; background:transparent; border:1px solid var(--line2); color:var(--dim); border-radius:10px; }
+.kebab-btn:hover { background:rgba(59,130,246,.08); color:var(--txt); box-shadow:none; }
+.kebab-btn svg { width:18px; height:18px; }
+.kebab-menu { display:none; position:fixed; z-index:70; min-width:190px; max-width:calc(100vw - 16px); background:var(--panel2); border:1px solid var(--line2); border-radius:12px; padding:6px; box-shadow:0 12px 32px rgba(0,0,0,.5); }
+.kebab-menu.open { display:flex; flex-direction:column; }
+.kebab-item { display:flex; align-items:center; gap:9px; width:100%; min-height:44px; padding:10px 13px; background:transparent; border:0; border-radius:8px; color:var(--txt); font-weight:500; font-size:14px; text-align:left; justify-content:flex-start; }
+.kebab-item:hover { background:var(--hover); box-shadow:none; }
+.kebab-item.danger { color:#fca5a5; background:transparent; border:0; }
+.kebab-item.danger:hover { background:rgba(239,68,68,.12); }
+.kebab-item svg { width:15px; height:15px; }
+
+/* ---- phone-only helpers (inert on desktop) ---- */
+.modal-x { display:none; }        /* full-screen-sheet close button */
+.cal-daylist { display:none; }    /* calendar "selected day" event list */
+body.drawer-locked { overflow:hidden; }  /* page scroll locked while the drawer is open (class only set ≤820) */
+
+/* ---- drawer polish (≤820 = where the off-canvas drawer exists) ---- */
+@media (max-width:820px){
+  .hamburger { min-width:44px; min-height:44px; }
+  .nav-item { min-height:44px; }
+  .sidebar { width:min(280px,82vw); padding-left:env(safe-area-inset-left,0px); }
+  .sidebar-foot { padding-bottom:calc(12px + env(safe-area-inset-bottom,0px)); }
+}
+
+/* ---- phone layout (≤640) ---- */
+@media (max-width:640px){
+  .hide-sm { display:none !important; }
+
+  /* Topbar: hamburger + title + ONE primary action; secondary actions live in the ⋯ menu; status chips = bare dots. */
+  .topbar { gap:10px; }
+  .topbar .actions { margin-left:auto; gap:6px; }
+  .topbar .actions > button.ghost { display:none; }   /* mirrored inside the topbar ⋯ menu */
+  .topbar .actions .kebab-btn { width:38px; height:38px; }
+  .topbar .status { margin-left:0; gap:6px; }
+  .topbar .status .chip { padding:5px; }
+  .topbar .status .chip > span:not(.dot) { display:none; }
+
+  /* Row action clusters collapse into one kebab. */
+  .kebab-wrap { display:inline-flex; }
+  .acts-row > button { display:none; }
+  .rtable td.acts > button { display:none; }
+  .rtable td.acts { justify-content:flex-end; padding-top:2px; padding-bottom:10px; }
+
+  /* Stacked-card table extras. */
+  .rtable td { width:100% !important; }               /* beats inline width:…px (activity rows) */
+  .rtable td:empty { display:none; }                  /* no "label:" lines with a blank value */
+  .rtable td[data-label=""] > div { flex:1 1 100%; min-width:0; }
+
+  /* Filter rows: compact two-up wrap, no overflow. */
+  .toolbar { margin-bottom:12px; }
+  .toolbar select { flex:1 1 40%; }
+
+  /* Dashboard: panel order (Recording now → Scheduled → Completed → Next 24h → Leagues → Sources) + 2-up league tiles. */
+  .dash-grid > .dash-cell:nth-child(1) { order:1; }
+  .dash-grid > .dash-cell:nth-child(2) { order:2; }
+  .dash-grid > .dash-cell:nth-child(3) { order:3; }
+  .dash-grid > .dash-cell:nth-child(4) { order:6; }   /* Sources → last */
+  .dash-grid > .dash-cell:nth-child(5) { order:4; }   /* Next 24 hours */
+  .dash-grid > .dash-cell:nth-child(6) { order:5; }   /* Leagues */
+  .league-chips { grid-template-columns:repeat(2,minmax(0,1fr)); }
+
+  /* Settings: the tab strip scrolls horizontally inside its own container; fields single-column. */
+  .tab-nav { flex-wrap:nowrap; overflow-x:auto; -webkit-overflow-scrolling:touch; scrollbar-width:none; margin-left:-16px; margin-right:-16px; padding-left:16px; padding-right:16px; }
+  .tab-nav::-webkit-scrollbar { display:none; }
+  .tab-nav .tab-btn { flex:0 0 auto; white-space:nowrap; }
+  .set-grid { grid-template-columns:minmax(0,1fr); }
+
+  /* Modals become full-screen sheets: own scroll region, sticky title + sticky action footer, safe-area padding. */
+  .modal-bg { align-items:stretch; justify-content:stretch; }
+  .modal { width:100% !important; max-width:100%; height:100vh; height:100dvh; max-height:100dvh; border:0; border-radius:0; background:var(--panel); display:flex; flex-direction:column; padding:0 16px; overflow-y:auto; overscroll-behavior:contain; }
+  .modal > h2 { position:sticky; top:0; z-index:5; background:var(--panel); margin:0 -16px 14px; padding:calc(14px + env(safe-area-inset-top,0px)) 60px 12px 16px; border-bottom:1px solid var(--line); }
+  .modal .foot { position:sticky; bottom:0; z-index:5; background:var(--panel); margin:auto -16px 0; padding:12px 16px calc(12px + env(safe-area-inset-bottom,0px)); border-top:1px solid var(--line); }
+  .modal .fields { grid-template-columns:minmax(0,1fr) !important; }  /* kills the source modal's inline 2-col grid */
+  .modal .fields > * { grid-column:auto !important; }
+  .modal-x { display:flex; position:fixed; top:calc(10px + env(safe-area-inset-top,0px)); right:10px; z-index:6; width:40px; height:40px; min-height:0; padding:0; align-items:center; justify-content:center; border-radius:50%; background:var(--chip-bg); border:1px solid var(--line2); color:var(--dim); }
+  .modal-x:hover { background:var(--hover); box-shadow:none; }
+  .team-grid { grid-template-columns:repeat(2,minmax(0,1fr)); max-height:none; }  /* the sheet scrolls — no nested scroll */
+  .team-pick { min-height:44px; }
+
+  /* Calendar: the month grid becomes a compact tappable mini-grid (colour DOTS per event); the selected day's
+     events render as cards below (default = today). Placed after the ≤700/≤480 rules above so it wins on phones. */
+  .cal-cell { min-height:48px; padding:3px; cursor:pointer; }
+  .cal-daynum { font-size:10px; }
+  .cal-events { flex-direction:row; flex-wrap:wrap; gap:3px; align-content:flex-start; }
+  .cal-ev { width:8px; height:8px; flex:0 0 auto; padding:0; border-radius:50%; font-size:0; line-height:0; overflow:hidden; pointer-events:none; }
+  .cal-ev-t { display:none; }
+  .cal-cell.sel { outline:2px solid var(--acc); outline-offset:-2px; }
+  .cal-daylist { display:block; margin-top:14px; }
 }
