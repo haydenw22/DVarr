@@ -3,7 +3,7 @@ namespace DVarr.Infrastructure;
 /// <summary>
 /// The single serialized writer (docs/05 §4.1). All DB writes route through this gate so
 /// there is never more than one concurrent write transaction — the structural fix for
-/// Sportarr's "database is locked" storms. Reads never take the gate (WAL lets readers
+/// the legacy recorder's "database is locked" storms. Reads never take the gate (WAL lets readers
 /// proceed during a write). Registered as a singleton.
 /// </summary>
 public sealed class DbWriteGate

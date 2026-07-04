@@ -9,7 +9,7 @@ using RecordingEntity = DVarr.Data.Entities.Recording;
 namespace DVarr.Services.Events;
 
 /// <summary>
-/// The P1 layer that makes DVarr "Sportarr-like": periodically (a) refreshes events for monitored leagues
+/// The P1 league/event auto-record layer: periodically (a) refreshes events for monitored leagues
 /// whose data is stale, and (b) creates Pending recordings for monitored events inside their league's
 /// horizon via the resolver (pinned channel + same-credential fallbacks). The existing SchedulerService
 /// then arms those recordings at pre-roll and the recorder captures them.

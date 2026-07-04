@@ -30,8 +30,11 @@ public sealed class SettingsService
         ["default_post_pad_s"] = "1800",
         // TheSportsDB never gives an end time, so DVarr assumes one. default_event_duration_s is the base (2h —
         // a soccer match + stoppage fits in 2h core + the 30-min post-pad). event_duration_overrides_json maps a
-        // lowercased sport name to its own seconds so motorsport keeps a long window ("keep full race endings"
-        // rule) instead of being cut at 2h. Edit the JSON to add sports (e.g. add "american football": 12600).
+        // lowercased sport name to its own seconds (e.g. "motorsport":10800 keeps a long window instead of being cut
+        // at 2h). NOTE: for MOTORSPORT this per-sport value is only a FALLBACK — GetEventDurationSecondsAsync resolves
+        // an earlier BUILT-IN per-session default first (MotorsportSession.DefaultDurationS: a Sprint/Quali/Practice ~1h,
+        // Race/Testing 3h), so this "motorsport" entry applies only to a session kind the built-ins don't cover.
+        // Edit the JSON to add sports (e.g. add "american football": 12600).
         ["default_event_duration_s"] = "7200",
         // Sport-audit defaults (2026-07-04): sports whose events routinely exceed the 2h base get their own assumed
         // length — golf rounds ~6h, fight cards (UFC etc.) ~5h, tennis/cricket ~4h (T20-ish; long formats use the
@@ -129,22 +132,33 @@ public sealed class SettingsService
         => int.TryParse(await GetAsync(key), out var n) ? n : 0;
 
     /// <summary>
-    /// Seconds to assume an event runs when the provider gives no end time. Resolution order:
-    /// (1) the per-LEAGUE override <paramref name="leagueOverrideS"/> if &gt; 0, then (2) the per-SPORT override
-    /// (event_duration_overrides_json, keyed by lowercased sport), then (3) default_event_duration_s (2h fallback).
-    /// Soccer → 2h core (+post-pad); motorsport → 3h so race endings aren't clipped.
+    /// Seconds to assume an event runs when the provider gives no end time. Resolution order (most specific first):
+    /// (0) the league's USER-set per-SESSION map <paramref name="sessionDurationsJson"/> for this event's session kind;
+    /// (1) the per-LEAGUE override <paramref name="leagueOverrideS"/> if &gt; 0; (2) the BUILT-IN motorsport per-session
+    /// default (MotorsportSession.DefaultDurationS — motorsport leagues only) so an F1 Sprint/Quali/Practice assumes ~1h
+    /// instead of inheriting the 3h motorsport sport default; (3) the per-SPORT override (event_duration_overrides_json,
+    /// keyed by lowercased sport); (4) default_event_duration_s (2h fallback). The built-in sits BELOW the league-wide
+    /// override (an explicit user override always wins, for predictability) but ABOVE the generic sport default.
+    /// Soccer → 2h core (+post-pad); a motorsport race → 3h so race endings aren't clipped, a support session → ~1h.
     /// </summary>
     public async Task<int> GetEventDurationSecondsAsync(string? sport, int? leagueOverrideS = null, string? sessionDurationsJson = null, string? eventTitle = null)
     {
-        // Tier 0 (most specific): a motorsport per-SESSION override for this event's session kind (e.g. a 3h race vs a 1h
-        // practice). Classified from the title via MotorsportSession; only applies when the league set session durations,
-        // and ONLY for motorsport — any other sport's titles all classify as "Race", which would misapply one length everywhere.
-        if (Events.MotorsportSession.IsMotorsport(sport) && !string.IsNullOrWhiteSpace(sessionDurationsJson) && !string.IsNullOrWhiteSpace(eventTitle))
+        // A motorsport session kind, classified once from the title (null for non-motorsport / empty title) — reused by
+        // tiers 0 and 2 below so both consult the same classification.
+        var kind = Events.MotorsportSession.IsMotorsport(sport) && !string.IsNullOrWhiteSpace(eventTitle)
+            ? Events.MotorsportSession.Classify(eventTitle) : null;
+        // Tier 0 (most specific): the league's USER-set per-SESSION map for this event's session kind (e.g. a 3h race vs
+        // a 1h practice). Only applies when the league set session durations, and ONLY for motorsport — any other sport's
+        // titles all classify as "Race", which would misapply one length everywhere.
+        if (kind != null && !string.IsNullOrWhiteSpace(sessionDurationsJson))
         {
             var map = ParseSessionDurations(sessionDurationsJson);
-            if (map.Count > 0 && Events.MotorsportSession.Classify(eventTitle) is { } kind && map.TryGetValue(kind, out var ss)) return ss;
+            if (map.Count > 0 && map.TryGetValue(kind, out var ss)) return ss;
         }
         if (leagueOverrideS is > 0) return leagueOverrideS.Value; // tier 1: explicit per-league override wins
+        // Tier 2: built-in motorsport per-session default (Sprint/Quali/Practice ~1h, Race/Testing 3h). Sits below the
+        // league override but above the generic sport default so a support session stops booking a full 3h window.
+        if (kind != null && Events.MotorsportSession.DefaultDurationS(kind) is { } builtin) return builtin;
         var def = await GetIntAsync("default_event_duration_s"); if (def <= 0) def = 7200;
         if (string.IsNullOrWhiteSpace(sport)) return def;
         var json = await GetAsync("event_duration_overrides_json");

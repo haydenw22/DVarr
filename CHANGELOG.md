@@ -12,6 +12,17 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.28.0] — 2026-07-04
+Session-smart recording lengths · repo cleanup + new README.
+
+### Changed
+- **Built-in motorsport session lengths.** A support session — Practice 1/2/3, Sprint, Sprint Qualifying/Shootout, or Qualifying — now books **1 hour** by default instead of the sport-wide 3 hours; the **Race** (and Testing days) keep the full **3-hour** window. This sits as a new tier in the duration resolution order: your per-session map → per-league override → **built-in session default** → per-sport default → global default. An explicit user setting always beats the built-in. Two safety nets make the tighter windows safe: post-padding still applies, and smart auto-stop keeps extending any live recording the guide says is still running. Practically: an F1 weekend no longer blocks a provider slot for 3 hours per practice session.
+- The per-session duration fields in the League modal now show the real defaults as placeholders (60 for support sessions, 180 for the race).
+
+### Docs
+- **README rebuilt** with screenshot demos (desktop + mobile PWA), the feature tour, the duration-resolution table, a generic docker-compose quick start, and the architecture map.
+- **Legacy name purged.** Every reference to the predecessor DVR's name is gone from tracked files (comments, docs, deploy template, one internal class rename — no runtime behaviour or API surface touched).
+
 ## [1.27.0] — 2026-07-04
 Trusted devices — sign in once per device, not every launch.
 
@@ -254,7 +265,7 @@ Conflict-planning + stop bug fixes, plus a manual "Start now" control.
 ### Added
 - **Conflict planning across the two provider logins.** New `CreditAwarePlanner` spreads overlapping events onto the second login instead of wasting it; when both logins are full an event is parked in a new **Conflict** state (re-promoted automatically when a slot frees). New **Conflicts** page (per-credential load + reasons, reassign / bump-priority actions) and a live "where will this land?" badge in the Schedule modal. New `League.Priority` tie-breaker. Endpoints: `/api/conflicts`, `/api/recordings/plan-preview`, `/api/recordings/{id}/reassign`.
 - **Per-sport recording durations** for events with no provider end-time: `default_event_duration_s` = 2h, `event_duration_overrides_json` = `{"motorsport":10800}` (race endings stay long). World Cup matches now block ~2h + post-pad instead of 3h.
-- **Sportarr-style finished-game filing**: per-game folder `<Title> (yyyy-MM-dd) E<NN>/` plus an `HDTV-<height>p` resolution tag, e.g. `FIFA World Cup/Season 2026/USA vs Paraguay (2026-06-12) E04/FIFA World Cup - S2026E04 - USA vs Paraguay - HDTV-2160p.mkv`.
+- **Sonarr/Plex-style finished-game filing**: per-game folder `<Title> (yyyy-MM-dd) E<NN>/` plus an `HDTV-<height>p` resolution tag, e.g. `FIFA World Cup/Season 2026/USA vs Paraguay (2026-06-12) E04/FIFA World Cup - S2026E04 - USA vs Paraguay - HDTV-2160p.mkv`.
 - **App version** is now surfaced on `/api/health` (SemVer from the csproj).
 
 ### Changed
@@ -276,7 +287,7 @@ Conflict-planning + stop bug fixes, plus a manual "Start now" control.
 - **Fixed event sync only returning ~5 events.** TheSportsDB tightened their free-tier `eventsseason.php` to a season's first few matches. `EventFetcher` now also fetches `eventsday.php` per day across each league's horizon (uncapped on the free key), merged by stable event id. World Cup re-sync went 5 → 49 events. (Not a DVarr bug — a provider change — but DVarr now works around it.)
 
 ## [1.9.0] — 2026-06-16
-- **Deployed to Unraid as a Docker container**, replacing Sportarr — `dvarr:latest` at `192.168.4.63:1867`, volumes mapped (`/config`→appdata, `/media`→Media/Sports, `/segments`→array scratch), Unraid dashboard logo + WebUI link.
+- **Deployed to Unraid as a Docker container**, replacing the previous DVR — `dvarr:latest` at `192.168.4.63:1867`, volumes mapped (`/config`→appdata, `/media`→Media/Sports, `/segments`→array scratch), Unraid dashboard logo + WebUI link.
 - **Auto-cleanup of recording segment scratch** after a recording finishes (the 6 GB+/recording temp files were never being removed).
 - Fixed the container health-check (the base image shipped no wget/curl).
 
@@ -313,7 +324,7 @@ Conflict-planning + stop bug fixes, plus a manual "Start now" control.
 - **Plex Custom Metadata Provider** at `/plex` (league = show, year = season, event = episode, with artwork).
 
 ## [1.3.0] — 2026-06-15
-- **Event data + anti-hijack resolver** ("Sportarr-like" layer): leagues, churn-proof event upsert by natural key, pinned league→channel mapping with same-credential fallbacks, and a background auto-scheduler that creates Pending recordings within each league's horizon.
+- **Event data + anti-hijack resolver** (league/event auto-record layer): leagues, churn-proof event upsert by natural key, pinned league→channel mapping with same-credential fallbacks, and a background auto-scheduler that creates Pending recordings within each league's horizon.
 - **Parity surfaces**: credential-free `filtered.m3u`/`.xml` exports (login never in the file), a minimal Sonarr-v3 API for Prowlarr, and Home Assistant status + webhook.
 - **Media import** into a Plex/Jellyfin-clean library (`.nfo` sidecars + thumbnails), with path-traversal containment.
 

@@ -39,15 +39,28 @@ public sealed class EventIngestService
         var now = EpochTime.Now();
         var isTsdb = l.EventProvider == "thesportsdb";
         // Assumed duration for events whose provider gives no end time (every TheSportsDB event). ICS events that DO
-        // carry a real DTEND keep it (the ?? only fills when EndUtc is null). Resolve the league base ONCE (async), then
-        // per-event apply a motorsport per-session override (Race vs Practice length) synchronously — no async-in-loop.
-        var baseDurationS = await _settings.GetEventDurationSecondsAsync(l.Sport, l.EventDurationOverrideS);
-        // Per-session lengths are motorsport-only (any other sport's titles all classify as "Race", which would apply
-        // one session's length to every match) — same guard as the scheduler/API.
-        var sessionDurations = MotorsportSession.IsMotorsport(l.Sport)
+        // carry a real DTEND keep it (the ?? only fills when EndUtc is null). To stay per-event async-free we resolve the
+        // building blocks ONCE up front and mirror SettingsService.GetEventDurationSecondsAsync's tier order exactly (a
+        // mismatch would retime-churn between ingest and the scheduler): (0) league user per-session map → (1) league
+        // EventDurationOverrideS → (2) built-in motorsport per-session default → (3/4) per-sport JSON / global default.
+        var leagueOverrideS = l.EventDurationOverrideS is > 0 ? l.EventDurationOverrideS.Value : (int?)null;
+        // Sport/global base ONLY (tiers 3/4): pass no override/session/title so the resolver skips tiers 0/1/2. This is
+        // the fallback for a non-motorsport league, and for a motorsport session kind the built-ins don't cover.
+        var sportBaseS = await _settings.GetEventDurationSecondsAsync(l.Sport);
+        var isMotorsport = MotorsportSession.IsMotorsport(l.Sport);
+        // Per-session lengths (tier 0) are motorsport-only (any other sport's titles all classify as "Race", which would
+        // apply one session's length to every match) — same guard as the scheduler/API.
+        var sessionDurations = isMotorsport
             ? SettingsService.ParseSessionDurations(l.SessionDurationsJson) : new Dictionary<string, int>();
         long DurationFor(IngestedEvent ie)
-            => sessionDurations.Count > 0 && MotorsportSession.Classify(ie.Title) is { } k && sessionDurations.TryGetValue(k, out var s) ? s : baseDurationS;
+        {
+            // Classify once; only motorsport titles yield a usable kind for tiers 0 and 2.
+            var kind = isMotorsport ? MotorsportSession.Classify(ie.Title) : null;
+            if (kind != null && sessionDurations.TryGetValue(kind, out var s)) return s;      // (0) user per-session map
+            if (leagueOverrideS is { } ov) return ov;                                          // (1) league-wide override
+            if (kind != null && MotorsportSession.DefaultDurationS(kind) is { } builtin) return builtin; // (2) built-in default
+            return sportBaseS;                                                                  // (3/4) sport JSON / global default
+        }
         long? EndFor(IngestedEvent ie) => ie.EndUtc ?? ie.StartUtc + DurationFor(ie);
 
         // Refresh league artwork (poster/badge) from TheSportsDB so the Plex provider + media import have it.

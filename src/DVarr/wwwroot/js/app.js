@@ -1305,9 +1305,13 @@ async function openLeagueModal(id) {
         const checked = edit ? savedSessions.has(k) : (k === 'Race' || k === 'Qualifying'); // new league → Race + Qualifying
         return `<label class="team-pick" title="${esc(k)}"><input type="checkbox" data-kind="${esc(k)}" ${checked ? 'checked' : ''}/><span class="team-pick-dot"></span><span>${esc(k)}</span></label>`;
       }).join('');
+      // Built-in per-session default minutes (mirrors MotorsportSession.DefaultDurationS): support sessions ~1h, Race
+      // and Testing 3h. The placeholder shows the effective default so the UI reflects what actually gets recorded.
+      const sessDefaultMin = { 'Practice 1': 60, 'Practice 2': 60, 'Practice 3': 60, 'Sprint Qualifying': 60, 'Sprint': 60, 'Qualifying': 60, 'Race': 180, 'Testing': 180 };
       $('#lSessDur').innerHTML = d.sessionTypes.map(k => {
         const mins = savedSessionDur[k] ? Math.round(savedSessionDur[k] / 60) : '';
-        return `<label class="field" style="font-size:12px"><span>${esc(k)} <span class="muted">(min)</span></span><input type="number" min="1" data-kind="${esc(k)}" value="${mins}" placeholder="default"/></label>`;
+        const ph = sessDefaultMin[k] ? `default ${sessDefaultMin[k]}` : 'default';
+        return `<label class="field" style="font-size:12px"><span>${esc(k)} <span class="muted">(min)</span></span><input type="number" min="1" data-kind="${esc(k)}" value="${mins}" placeholder="${esc(ph)}"/></label>`;
       }).join('');
     } else { $('#lSessionsWrap').style.display = 'none'; $('#lSessions').innerHTML = ''; $('#lSessDurBlock').style.display = 'none'; $('#lSessDur').innerHTML = ''; }
     // Max-extension prefill: motorsport events usually need ~120 min. Prefill 120 only when the field is empty and the

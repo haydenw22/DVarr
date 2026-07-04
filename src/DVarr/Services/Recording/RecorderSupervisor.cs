@@ -14,7 +14,7 @@ namespace DVarr.Services.Recording;
 /// <summary>
 /// The reliability engine (docs/04). One supervisor drives one recording through the
 /// canonical state machine. It captures short MPEG-TS segments and — the core fix for
-/// Sportarr bug #1 — RELAUNCHES ffmpeg on any exit/stall, holding the tuner lease across
+/// legacy-DVR bug #1 (a source-forced ffmpeg exit ended the capture) — RELAUNCHES ffmpeg on any exit/stall, holding the tuner lease across
 /// the relaunch, and NEVER enters a terminal failure state before post-roll. At the window
 /// end it concatenates the closed segments losslessly into the final file.
 /// </summary>

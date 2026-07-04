@@ -10,7 +10,7 @@
   <Privileged>false</Privileged>
   <Support/>
   <Project/>
-  <Overview>DVarr — reliability-first, self-hosted IPTV sports DVR. Records directly from the provider through its own per-credential tuner pool (one stream per login), with a supervised segmented recorder that relaunches on stall and never misses a can't-miss event. Replaces Sportarr.</Overview>
+  <Overview>DVarr — reliability-first, self-hosted IPTV sports DVR. Records directly from the provider through its own per-credential tuner pool (one stream per login), with a supervised segmented recorder that relaunches on stall and never misses a can't-miss event. Replaces the previous DVR.</Overview>
   <Category>MediaApp:Video</Category>
   <WebUI>http://[IP]:[PORT:1867]/</WebUI>
   <TemplateURL/>

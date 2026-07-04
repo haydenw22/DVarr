@@ -8,8 +8,8 @@ using System.Text.Json.Serialization;
 namespace DVarr.Api;
 
 /// <summary>
-/// A Plex Custom Metadata Provider (PMS 1.43.0+), the modern replacement for legacy .bundle agents — same shape
-/// Sportarr exposes at sportarr.net/plex. The user adds DVarr's URL in Plex (Settings → Metadata Agents), then sets
+/// A Plex Custom Metadata Provider (PMS 1.43.0+), the modern replacement for legacy .bundle agents — the same
+/// URL-based provider shape a legacy sports-metadata agent exposes. The user adds DVarr's URL in Plex (Settings → Metadata Agents), then sets
 /// a TV-Shows library to the DVarr agent: league = show, year = season, event = episode, with TheSportsDB artwork.
 /// Contract (reverse-engineered from the reference): GET /plex 302→manifest; manifest declares types 2/3/4 + the
 /// match + metadata feature URLs; POST .../matches; GET .../metadata/{ratingKey}; GET .../metadata/{ratingKey}/children.

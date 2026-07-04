@@ -4,7 +4,7 @@ namespace DVarr.Infrastructure;
 /// One global rule (docs/05): every stored/wire time is a UTC epoch (integer seconds).
 /// Brisbane is a FIXED UTC+10 (no DST), applied only at display — so we never depend on
 /// OS timezone data and InvariantGlobalization stays safe. This is the structural fix
-/// for the Sportarr +10h double-conversion bug (#5): there is no naive datetime anywhere.
+/// for the legacy-DVR +10h double-conversion bug (#5): there is no naive datetime anywhere.
 /// </summary>
 public static class EpochTime
 {

@@ -163,7 +163,7 @@ public sealed class MediaImportService
 
         var showName = Sanitize(f.ShowName);
         var epTag = $"E{f.Episode:D2}";
-        // Sportarr-style per-game folder: "<Title> (yyyy-MM-dd) E<NN>", with the video + sidecars inside it.
+        // Sonarr/Plex-style per-game folder: "<Title> (yyyy-MM-dd) E<NN>", with the video + sidecars inside it.
         var gameFolderName = Sanitize($"{f.Title} ({f.AiredDate}) {epTag}");
         var baseName = Sanitize($"{showName} - S{f.Year}{epTag} - {f.Title}" + (resTag is null ? "" : $" - {resTag}"));
         var showFolder = Path.Combine(_paths.MediaDir, showName);
@@ -378,7 +378,7 @@ public sealed class MediaImportService
         catch (Exception ex) { _log.LogWarning(ex, "[Media] thumbnail generation failed for {Mkv}", mkv); }
     }
 
-    /// <summary>ffprobe the video height of the finished file → a Sportarr-style "HDTV-&lt;height&gt;p" tag
+    /// <summary>ffprobe the video height of the finished file → a Sonarr/Plex-style "HDTV-&lt;height&gt;p" tag
     /// (e.g. HDTV-2160p, HDTV-1080p). Returns null if it can't be read (the file is still filed, just without a tag).</summary>
     private async Task<string?> ProbeResolutionTagAsync(string path, CancellationToken ct)
     {

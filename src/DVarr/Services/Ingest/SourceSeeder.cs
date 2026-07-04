@@ -9,7 +9,7 @@ namespace DVarr.Services.Ingest;
 
 /// <summary>
 /// One-time seed of ProviderSource rows from a local <c>sources.import.json</c> (the
-/// gitignored export of Sportarr's IptvSources). Creates the credential rows ONLY — it
+/// gitignored export of the legacy recorder's IptvSources). Creates the credential rows ONLY — it
 /// never contacts the provider. Runs on startup if no sources exist yet.
 /// </summary>
 public sealed class SourceSeeder
@@ -36,11 +36,11 @@ public sealed class SourceSeeder
             return;
         }
 
-        List<SportarrSourceImport>? rows;
+        List<LegacySourceImport>? rows;
         try
         {
             await using var fs = File.OpenRead(path);
-            rows = await JsonSerializer.DeserializeAsync<List<SportarrSourceImport>>(fs,
+            rows = await JsonSerializer.DeserializeAsync<List<LegacySourceImport>>(fs,
                 new JsonSerializerOptions { PropertyNameCaseInsensitive = true }, ct);
         }
         catch (Exception ex)
@@ -69,7 +69,7 @@ public sealed class SourceSeeder
                     Port = port,
                     Username = r.Username ?? "",
                     Password = r.Password ?? "",
-                    UserAgent = string.IsNullOrWhiteSpace(r.UserAgent) ? null : r.UserAgent!.Trim(), // preserve Sportarr UA
+                    UserAgent = string.IsNullOrWhiteSpace(r.UserAgent) ? null : r.UserAgent!.Trim(), // preserve legacy source UA
                     MaxStreams = 1,                       // provider-fixed (D6) regardless of source value
                     Enabled = r.IsActive != 0,
                     Healthy = false,                       // unknown until first auth (deferred until safe)
@@ -99,7 +99,7 @@ public sealed class SourceSeeder
     }
 }
 
-public sealed class SportarrSourceImport
+public sealed class LegacySourceImport
 {
     public int Id { get; set; }
     public string? Name { get; set; }

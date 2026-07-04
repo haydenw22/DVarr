@@ -60,13 +60,13 @@ I ran a 5-agent review (reliability core, the new features, security/API, UI, + 
 
 With the three features + reliability core done, I built out the remaining planned phases. Everything below is in the running app (clean Debug build, `dotnet run` on **:1867**).
 
-**Phase 2 — Event data + resolver (the "Sportarr-like" layer).** This is the part the earlier DECISIONS said wasn't built yet — it now is.
+**Phase 2 — Event data + resolver (the league/event auto-record layer).** This is the part the earlier DECISIONS said wasn't built yet — it now is.
 - **Leagues** page: add a league, pick an **event provider** (TheSportsDB free tier / ICS calendar URL / manual), set a **schedule horizon** (days), and **monitor** it.
 - **Events** are fetched + upserted by a **churn-proof natural key** (`{leagueId}:{provider}:{externalId}`) — a re-sync never deletes or re-keys, so it can't orphan a scheduled recording. Date-only events anchor to **Brisbane midnight** (never silent-arm at UTC midnight).
 - **Anti-hijack resolver:** a **pinned** league→channel mapping carries a dominant floor that EPG data can never outrank; EPG is only a small bounded bonus on an already-mapped channel. **Fallbacks are restricted to the same credential** as the winner, so a fallback can never steal another login's only stream slot.
 - **Auto-scheduler** (background): refreshes stale monitored leagues, then creates `Pending` recordings for monitored events inside each league's horizon via the resolver. The existing scheduler arms them at pre-roll.
 
-**Phase 3 — Parity surfaces (so it slots into your stack like Sonarr/Sportarr).**
+**Phase 3 — Parity surfaces (so it slots into your stack like Sonarr).**
 - **Credential-free exports:** `GET /api/iptv/filtered.m3u` and `/filtered.xml` for your mapped channels. The M3U points at a **stream proxy** (`/api/stream/{id}.ts`) that 302-redirects to the real provider URL at play time — **the exported playlist never contains your login**.
 - **Minimal Sonarr-v3 surface** (`/api/v3/...`, `X-Api-Key`) so **Prowlarr** can talk to it.
 - **Home Assistant:** `GET /api/ha/status` (poll from a REST sensor) + a webhook push (`ha_webhook_url` setting) that forwards live recording state changes.
@@ -111,7 +111,7 @@ Built every item from your feedback, ran a 6-dimension adversarial review, fixed
 8. **Plex Custom Metadata Provider** (the modern, supported approach — see below).
 
 ## Two decisions you should know about
-- **Plex: I built a Custom Metadata Provider, like Sportarr's.** You were right — Plex 1.43.0+ supports URL-based providers (legacy `.bundle` agents are being removed). DVarr now serves one at **`http://<dvarr-host>:1867/plex`** (302 → manifest at `/api/plex/provider/sports`), backed by your leagues/events with TheSportsDB artwork. **Setup in Plex:** Settings → Metadata Agents → + Add Provider → paste `http://192.168.4.63:1867/plex` → Add → restart Plex → create/point a **TV Shows** library at the DVarr agent.
+- **Plex: I built a Custom Metadata Provider, like the legacy provider's.** You were right — Plex 1.43.0+ supports URL-based providers (legacy `.bundle` agents are being removed). DVarr now serves one at **`http://<dvarr-host>:1867/plex`** (302 → manifest at `/api/plex/provider/sports`), backed by your leagues/events with TheSportsDB artwork. **Setup in Plex:** Settings → Metadata Agents → + Add Provider → paste `http://192.168.4.63:1867/plex` → Add → restart Plex → create/point a **TV Shows** library at the DVarr agent.
 - **TheSportsDB key:** the built-in public test key `3` only returns a **2-sport sample (Soccer + Motorsport, 5 leagues each)** — it has V8 Supercars but **not AFL or full F1**. I made the key a **Setting** (`thesportsdb_api_key`). Paste your own TheSportsDB key there to unlock the full catalogue (AFL, all motorsport, etc.).
 
 ## Adversarial review — fixes applied
@@ -225,7 +225,7 @@ ffmpeg-level comma-escaping (`\,`; C# literal `\\,`) confirmed to survive .NET `
 
 # Phase 12 — deployed to Unraid as a Docker container (2026-06-16)
 
-DVarr moved off the Windows dev box to its permanent home: a container on the Unraid server (192.168.4.63:1867), **replacing Sportarr**. Deployed as a **completely fresh, zero-data first-run install** — no sources, EPG, leagues, mappings, or DB carried over.
+DVarr moved off the Windows dev box to its permanent home: a container on the Unraid server (192.168.4.63:1867), **replacing the previous DVR**. Deployed as a **completely fresh, zero-data first-run install** — no sources, EPG, leagues, mappings, or DB carried over.
 
 ## Volume mapping (the heart of the task — all verified against the live server)
 | Container | Host | Backing | Why |
@@ -235,7 +235,7 @@ DVarr moved off the Windows dev box to its permanent home: a container on the Un
 | `/segments` | `/mnt/user/Media/.dvarr-segments` | same array-only Media share | 6 GB+/recording scratch kept off the 85%-full (39 GB) cache; dot-prefixed so Plex ignores it; same volume as `/media` |
 
 ## What was done
-- **Retired Sportarr:** stopped, `restart=no`, removed from `/var/lib/docker/unraid-autostart` (freed port 1867; its data left intact).
+- **Retired the previous DVR:** stopped, `restart=no`, removed from `/var/lib/docker/unraid-autostart` (freed port 1867; its data left intact).
 - **`docker-compose.yml`** (new, repo root): `image: dvarr:latest`, `user: "99:100"` (nobody:users — DVarr has no PUID/PGID), `restart: unless-stopped`, `TZ`/`HOME=/config`, the three volumes, and Unraid labels `net.unraid.docker.webui` + `net.unraid.docker.icon` (→ `/dvarr-logo.png`, served by the app) so the Docker dashboard shows the DVarr logo with a working **WebUI** menu item.
 - **Build on the server** (no Docker on the dev box, no registry): clean source `tar | ssh` to `/mnt/user/appdata/dvarr-build`, then `docker compose up -d --build`.
 - **Two fixes found during deploy:** (1) `Dockerfile` now installs **wget** — the aspnet:8.0 base ships neither wget nor curl, so the `/api/health` HEALTHCHECK was failing (container showed "unhealthy" though the app was fine). (2) **Post-finalize segment cleanup** in `RecorderSupervisor.FinalizeToTerminalAsync`: on `Done`, best-effort delete the whole `/segments/{id}` dir (nothing cleaned recording segments before → they'd accumulate 6 GB+ each forever).
@@ -272,7 +272,7 @@ Previewing an HEVC/AC-3 channel (which falls back to the HLS transcode) pegged t
 
 ---
 
-## Phase 15 — reliability de-overlap, ffmpeg 8.x, conflict planning, per-sport durations, Sportarr media (2026-06-16, clean-redeployed)
+## Phase 15 — reliability de-overlap, ffmpeg 8.x, conflict planning, per-sport durations, Sonarr/Plex media (2026-06-16, clean-redeployed)
 
 **Stream reliability ("going back in time" fix).** Capture: removed `-reset_timestamps 1`, added `-copyts` — segments now share the source's continuous absolute PTS, so a reconnect's re-served seconds appear as a *backward* PTS instead of being silently re-zeroed. `FinalizeAsync` runs a **de-overlap pass** (`BuildConcatListAsync` + `ProbePtsRangeAsync`): ffprobe each segment's min/max video PTS; **drop a fully-duplicate segment**, emit an **`inpoint`** for a partial overlap (lossless `-c copy`; inter-frame seek leaves ≤1 GOP residual — strictly better than replaying the whole overlap). **Clean-EOF handling:** `CaptureUntilStopOrStallAsync` returns a typed `CaptureExit`; a clean rc=0 EOF relaunches instantly and stays `Recording` (no Recovering churn; flap-throttled at >8/30s), while rc≠0/stall/dead-picture keep the back-off + failover ladder. Finalize audio: `-af aresample=async=1:min_hard_comp=0.1` + `-avoid_negative_ts make_zero`. Gated by `finalize_deoverlap_enabled` + `clean_eof_instant_relaunch` (both default true).
 
@@ -282,7 +282,7 @@ Previewing an HEVC/AC-3 channel (which falls back to the HLS transcode) pegged t
 
 **Conflict planning across the two logins.** New `CreditAwarePlanner` — `OptionsForEventAsync` = primary credential + same logical channel on the other login (`ResolverService.EquivalentChannelsAsync`: StreamId → LogicalKey → NameNorm); `Decide` = first free credential wins, else preempt a strictly-lower-ranked **Pending** incumbent, else Conflict. `AutoScheduleService` rebuilt around per-credential occupancy + conflict re-evaluation each tick. New `RecordingState.Conflict` (holds no slot) + `League.Priority` (migration `Phase15ConflictPlanning`, one additive int column). Endpoints: `/api/conflicts`, `/api/recordings/plan-preview`, `/api/recordings/{id}/reassign`. New **Conflicts** UI page + a live plan-preview badge in the Schedule modal. Ladder: RecordingPriority → League.Priority → earliest → id; default Refuse, preempt only a still-Pending lower one.
 
-**Sportarr-style finished-game files.** `MediaImportService` now files into a per-game folder `<Title> (yyyy-MM-dd) E<NN>/` with a `HDTV-<height>p` tag (ffprobe), e.g. `FIFA World Cup/Season 2026/USA vs Paraguay (2026-06-12) E04/FIFA World Cup - S2026E04 - USA vs Paraguay - HDTV-2160p.mkv`. **Episode collision fixed:** the manual-match path used `best.Round` (every WC matchday-1 game is intRound=1 → all E01) → now day-of-year (unique per day). Event-linked path keeps the chronological per-season ordinal (consistent with `PlexEndpoints`); `SeasonOrdinalAsync` no longer silently falls back to E01. Monitor an event (event-linked) for clean tournament E-numbers.
+**Sonarr/Plex-style finished-game files.** `MediaImportService` now files into a per-game folder `<Title> (yyyy-MM-dd) E<NN>/` with a `HDTV-<height>p` tag (ffprobe), e.g. `FIFA World Cup/Season 2026/USA vs Paraguay (2026-06-12) E04/FIFA World Cup - S2026E04 - USA vs Paraguay - HDTV-2160p.mkv`. **Episode collision fixed:** the manual-match path used `best.Round` (every WC matchday-1 game is intRound=1 → all E01) → now day-of-year (unique per day). Event-linked path keeps the chronological per-season ordinal (consistent with `PlexEndpoints`); `SeasonOrdinalAsync` no longer silently falls back to E01. Monitor an event (event-linked) for clean tournament E-numbers.
 
 **Schedule modal overflow.** CSS `min-width:0` on `.modal .fields`/`label.field` + `width/max-width:100%/box-sizing` on controls; channel results are now a custom ellipsis listbox (`.picklist`/`.pickrow`, hover = full name) writing into a hidden `#cascCh` input.
 
