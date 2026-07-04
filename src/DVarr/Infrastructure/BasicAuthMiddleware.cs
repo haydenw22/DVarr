@@ -1,76 +1,110 @@
 using System.Security.Cryptography;
 using System.Text;
+using DVarr.Api;
+using DVarr.Data;
 
 namespace DVarr.Infrastructure;
 
 /// <summary>
-/// Gates the entire site behind HTTP Basic auth (DVarr is now publicly exposed at
-/// dvarr.whittledigitalsolutions.com behind an nginx TLS-terminating reverse proxy).
+/// Gates the entire site (DVarr is publicly exposed at dvarr.whittledigitalsolutions.com behind an nginx
+/// TLS-terminating reverse proxy). Two ways in:
+///   1. a valid <c>dvarr_session</c> cookie — the "trusted device" login-page path (see <see cref="AuthEndpoints"/>);
+///   2. a valid HTTP <c>Basic</c> header — kept so curl/scripts and the M2M callers that already send it are unchanged.
 ///
-/// Registered BEFORE UseDefaultFiles/UseStaticFiles in Program.cs so the SPA shell, every static
-/// asset, and all /api/* routes are protected by a single prompt — browsers cache the credentials for
-/// the session, so fetch/XHR/SSE/preview streams and the PWA/service worker all inherit them afterwards.
+/// Registered BEFORE UseDefaultFiles/UseStaticFiles in Program.cs so the SPA shell, every static asset, and all
+/// /api/* routes are protected. Unlike the old behaviour, a missing/invalid credential no longer emits a
+/// WWW-Authenticate challenge (which made the browser pop its native prompt on every launch). Instead:
+///   * a browser navigation for HTML (GET + Accept: text/html) is 302-redirected to /login.html;
+///   * everything else gets a plain 401 JSON body and NO WWW-Authenticate (so the SPA's fetch layer can catch it).
 ///
 /// Credentials come from configuration (env vars flow into IConfiguration automatically):
 ///   DVARR_AUTH_USER / DVARR_AUTH_PASS   (primary; set these in the compose .env)
 ///   DVarr:AuthUser  / DVarr:AuthPass    (config-key aliases)
 /// defaulting to user / password.
 ///
-/// A curated exempt list keeps machine-to-machine surfaces working WITHOUT basic auth — each entry
-/// carries a credential of its own or is a credential-free LAN-only surface (see comments below).
+/// A curated exempt list keeps machine-to-machine surfaces working WITHOUT auth — each entry carries a credential
+/// of its own or is a credential-free LAN-only surface (see comments below). /login.html and /api/auth/ are exempt
+/// too so the login page can load and post while logged out.
 /// </summary>
 public sealed class BasicAuthMiddleware
 {
     private readonly RequestDelegate _next;
+    private readonly string _user;
     private readonly byte[] _userBytes;
     private readonly byte[] _passBytes;
+
+    // Session signing key, resolved lazily from the Secrets table on the first request and cached for the process
+    // lifetime. Program.cs ensures the row exists at startup, so this read normally hits an existing secret.
+    private byte[]? _signingKey;
 
     public BasicAuthMiddleware(RequestDelegate next, IConfiguration config)
     {
         _next = next;
 
         // Primary env-var names first; the DVarr: config-section keys are trivial aliases.
-        var user = config["DVARR_AUTH_USER"] ?? config["DVarr:AuthUser"] ?? "user";
+        _user = config["DVARR_AUTH_USER"] ?? config["DVarr:AuthUser"] ?? "user";
         var pass = config["DVARR_AUTH_PASS"] ?? config["DVarr:AuthPass"] ?? "password";
 
-        _userBytes = Encoding.UTF8.GetBytes(user);
+        _userBytes = Encoding.UTF8.GetBytes(_user);
         _passBytes = Encoding.UTF8.GetBytes(pass);
     }
 
     public async Task InvokeAsync(HttpContext context)
     {
-        if (IsExempt(context.Request.Path) || IsAuthorized(context.Request))
+        var request = context.Request;
+
+        // Decision order (documented in the PR): exempt surface -> valid session cookie -> valid Basic header.
+        if (IsExempt(request.Path) || await HasValidSessionAsync(context) || IsAuthorizedBasic(request))
         {
             await _next(context);
             return;
         }
 
-        // Missing/wrong credentials → challenge. charset="UTF-8" tells the browser to send UTF-8 bytes.
+        // Not authenticated. A browser navigating to a page should land on the login screen; anything else
+        // (fetch/XHR/SSE/M2M) gets a clean 401 with no WWW-Authenticate — the SPA's api helper redirects on it.
+        if (IsHtmlNavigation(request))
+        {
+            context.Response.Redirect("/login.html");  // 302
+            return;
+        }
+
         context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-        context.Response.Headers.WWWAuthenticate = "Basic realm=\"DVarr\", charset=\"UTF-8\"";
+        await context.Response.WriteAsJsonAsync(new { error = "authentication required" });
     }
 
+    // GET whose Accept advertises HTML => a top-level browser navigation (address bar / link / PWA launch).
+    private static bool IsHtmlNavigation(HttpRequest request) =>
+        HttpMethods.IsGet(request.Method)
+        && (request.Headers.Accept.FirstOrDefault()?.Contains("text/html", StringComparison.OrdinalIgnoreCase) ?? false);
+
     /// <summary>
-    /// Machine-to-machine surfaces that must keep working without the new basic auth. Matched against the
-    /// canonical <see cref="PathString"/> value (already URL-decoded and collapsed of empty segments by the
-    /// ASP.NET pipeline), so case tricks (Basic auth realm is case-sensitive but paths here are compared
-    /// OrdinalIgnoreCase) and "//" double-slash tricks can't smuggle a protected path past the check.
+    /// Machine-to-machine surfaces (plus the login page/endpoints) that must work without the session/basic auth.
+    /// Matched against the canonical <see cref="PathString"/> value (already URL-decoded and collapsed of empty
+    /// segments by the ASP.NET pipeline), compared OrdinalIgnoreCase, so "//" double-slash and case tricks can't
+    /// smuggle a protected path past the check.
     /// </summary>
     private static bool IsExempt(PathString path)
     {
         // PathString.Value is the canonical, decoded path. Guard against a null value (e.g. request to "*").
         var p = path.Value ?? string.Empty;
 
+        // The login page itself must render while logged out. It inlines ALL its css/js so this single exact path is
+        // the only static asset that needs exempting (no /js/*, /css/*, or logo request travels before login).
+        if (string.Equals(p, "/login.html", StringComparison.OrdinalIgnoreCase)) return true;
+
+        // Login/logout endpoints: login is obviously pre-auth; logout is harmless.
+        if (p.StartsWith("/api/auth/", StringComparison.OrdinalIgnoreCase)) return true;
+
         // The Docker HEALTHCHECK runs `wget http://localhost:1867/api/health` inside the container with no
         // credentials; gating it would flip the container to "unhealthy". Exact-ish prefix is fine.
         if (p.StartsWith("/api/health", StringComparison.OrdinalIgnoreCase)) return true;
 
-        // Google Calendar fetches the .ics server-side and cannot present basic auth; the endpoint carries
-        // its OWN capability token (401s without it), so basic auth here would double-lock a working feed.
+        // Google Calendar fetches the .ics server-side and cannot present auth; the endpoint carries its OWN
+        // capability token (401s without it), so gating here would double-lock a working feed.
         if (p.StartsWith("/api/calendar.ics", StringComparison.OrdinalIgnoreCase)) return true;
 
         // Plex Custom Metadata Provider: the LAN Plex server calls /plex (302) and /api/plex/* and can't send
-        // basic auth. Public sports metadata only — never the IPTV provider — so no secret is exposed.
+        // auth. Public sports metadata only — never the IPTV provider — so no secret is exposed.
         if (p.StartsWith("/plex", StringComparison.OrdinalIgnoreCase)) return true;
         if (p.StartsWith("/api/plex/", StringComparison.OrdinalIgnoreCase)) return true;
 
@@ -85,8 +119,7 @@ public sealed class BasicAuthMiddleware
 
         // EXACT /api/stream/{digits}.ts only: LAN IPTV players pull the stream proxy with no headers (already
         // 403-blocked externally at nginx). Deliberately NOT a prefix — /api/stream/recordings (the UI's SSE)
-        // must stay gated so it prompts once; the browser then attaches cached basic creds to the same-origin
-        // EventSource automatically and it keeps working for the logged-in user.
+        // must stay gated so the logged-in browser attaches its session cookie / cached basic creds automatically.
         if (StreamTsRegex.IsMatch(p)) return true;
 
         return false;
@@ -97,7 +130,36 @@ public sealed class BasicAuthMiddleware
         new(@"^/api/stream/[0-9]+\.ts$",
             System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
-    private bool IsAuthorized(HttpRequest request)
+    /// <summary>
+    /// True when the request carries a valid <c>dvarr_session</c> cookie. Resolves the signing key lazily (once) from
+    /// the Secrets table via the request scope. Any failure to obtain the key or any malformed cookie is treated as
+    /// "no session" — never an exception that would 500 the request.
+    /// </summary>
+    private async Task<bool> HasValidSessionAsync(HttpContext context)
+    {
+        var cookie = context.Request.Cookies[AuthEndpoints.CookieName];
+        if (string.IsNullOrEmpty(cookie)) return false;
+
+        var key = _signingKey;
+        if (key is null)
+        {
+            try
+            {
+                var db = context.RequestServices.GetRequiredService<DVarrDbContext>();
+                var gate = context.RequestServices.GetRequiredService<DbWriteGate>();
+                key = await AuthEndpoints.EnsureSessionSigningKeyAsync(db, gate);
+                _signingKey = key;  // cache for the rest of the process
+            }
+            catch
+            {
+                return false;  // couldn't load the key — fail closed (redirect to login), don't 500
+            }
+        }
+
+        return AuthEndpoints.ValidateToken(key, cookie, _user);
+    }
+
+    private bool IsAuthorizedBasic(HttpRequest request)
     {
         string? header = request.Headers.Authorization;
         if (string.IsNullOrEmpty(header)) return false;
@@ -109,7 +171,7 @@ public sealed class BasicAuthMiddleware
         var encoded = header.Substring(prefix.Length).Trim();
         if (encoded.Length == 0) return false;
 
-        // Parse defensively: malformed base64 must yield 401, never a 500.
+        // Parse defensively: malformed base64 must yield "unauthorized", never a 500.
         byte[] decoded;
         try { decoded = Convert.FromBase64String(encoded); }
         catch (FormatException) { return false; }
@@ -125,8 +187,7 @@ public sealed class BasicAuthMiddleware
         var providedUser = Encoding.UTF8.GetBytes(credentials.Substring(0, sep));
         var providedPass = Encoding.UTF8.GetBytes(credentials.Substring(sep + 1));
 
-        // Both compared in constant time (house pattern from ParityEndpoints' API-key check). See ConstantTimeEquals
-        // for how length differences are handled without leaking length via an early return or an exception.
+        // Both compared in constant time (house pattern from ParityEndpoints' API-key check).
         return ConstantTimeEquals(providedUser, _userBytes) & ConstantTimeEquals(providedPass, _passBytes);
     }
 
@@ -134,7 +195,7 @@ public sealed class BasicAuthMiddleware
     /// Constant-time byte compare that also tolerates length differences. CryptographicOperations.FixedTimeEquals
     /// throws / short-circuits when the two spans differ in length, which would both risk a 500 and leak the
     /// expected length via timing. To avoid that we FixedTimeEquals each candidate against a fixed-length HMAC of
-    /// itself keyed by the expected value: equal inputs (same length AND same bytes) produce equal MACs; any
+    /// itself keyed by a random per-call key: equal inputs (same length AND same bytes) produce equal MACs; any
     /// difference — including a length mismatch — produces unequal MACs, and every comparison runs over the same
     /// 32-byte digest regardless of input length. No branch on length, no exception path.
     /// </summary>

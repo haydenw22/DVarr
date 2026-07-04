@@ -12,6 +12,14 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.27.0] — 2026-07-04
+Trusted devices — sign in once per device, not every launch.
+
+### Changed
+- **The browser's Basic-auth popup is gone.** Unauthenticated visits now land on a proper DVarr login page; signing in with "Remember this device" (default on) sets a **180-day session cookie**, so each phone/laptop logs in once. This specifically fixes the iOS home-screen app prompting on every launch (standalone PWAs don't persist Basic credentials; they persist cookies). Sessions are signed with a server-side key in the Secrets store — rotating it signs every device out at once. `POST /api/auth/logout` ends a device's session.
+- **Scripts/automation unchanged**: `user:pass` Basic auth is still accepted on every gated endpoint; the machine-to-machine exempt list (health, calendar token feed, Plex, Prowlarr, LAN playlists/streams, Home Assistant) is untouched.
+- The login endpoint is rate-limited (8 failures / 10 min per IP → 429) since it's internet-facing.
+
 ## [1.26.1] — 2026-07-04
 iPhone fixes: schedule-modal overlap + guide defaults.
 

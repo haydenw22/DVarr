@@ -4,6 +4,13 @@
 const $ = (s, r = document) => r.querySelector(s);
 // Tolerant of empty / non-JSON bodies (e.g. a 404 NotFound has no body) so handlers never throw on .json().
 async function _json(res) {
+  // Session/basic auth gone (e.g. PWA launched from the cached shell, cookie expired): the first API call 401s.
+  // Bounce to the login page so the user can re-establish a trusted-device session. Guard against a redirect loop
+  // if we're somehow already on login.html.
+  if (res.status === 401 && !location.pathname.endsWith('/login.html')) {
+    location.replace('/login.html');
+    return {};
+  }
   const t = await res.text();
   let body; try { body = t ? JSON.parse(t) : {}; } catch { body = { _raw: t }; }
   // Surface non-2xx responses as an .error even when the body is empty/has no error field, so callers that check

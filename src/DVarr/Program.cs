@@ -107,6 +107,10 @@ using (var scope = app.Services.CreateScope())
     // Only note the token was created (the copy-me URL is available at /api/calendar/url); don't re-log it every boot.
     if (calTokenCreated) app.Logger.LogInformation("Calendar feed token generated (subscribe URL at /api/calendar/url).");
 
+    // Session-cookie signing key (32 random bytes, persisted in Secrets). Created on first boot; rotating that row
+    // logs every trusted device out. Never logged — it's an HMAC key, not a user-facing token.
+    await DVarr.Api.AuthEndpoints.EnsureSessionSigningKeyAsync(db, gate);
+
     var ff = scope.ServiceProvider.GetRequiredService<FfmpegLocator>();
     ff.CachedVersion = await ff.VersionAsync();
     app.Logger.LogInformation("ffmpeg check: {Ver}", ff.CachedVersion ?? "NOT FOUND (recording will fail until ffmpeg is on PATH)");
@@ -133,6 +137,7 @@ contentTypes.Mappings[".webmanifest"] = "application/manifest+json";
 app.UseStaticFiles(new StaticFileOptions { ContentTypeProvider = contentTypes });
 
 app.MapHealthEndpoints();
+app.MapAuthApi();
 app.MapDVarrApi();
 app.MapLeagueApi();
 app.MapParityApi();
