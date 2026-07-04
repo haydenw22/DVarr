@@ -100,6 +100,10 @@ public sealed class SettingsService
         ["default_channel_source_filter"] = "all",
         ["timezone_display"] = "Australia/Brisbane",
         ["ha_webhook_url"] = "",
+        // Public base URL of this DVarr instance (e.g. https://dvr.example.com), used to build the externally-reachable
+        // calendar-feed link shown in the "Subscribe" modal. Empty by default — the UI prompts for it there. A text
+        // setting whose default must NOT look numeric, or the /api/settings int-guard would reject a real URL.
+        ["public_base_url"] = "",
         ["litestream_target"] = "",
     };
 

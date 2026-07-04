@@ -12,6 +12,16 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.29.0] — 2026-07-05
+Plex made discoverable · calendar feed made copyable · calendar layout fix.
+
+### Added
+- **Settings → Plex tab.** A dedicated tab explains the Plex Custom Metadata Provider end-to-end: the provider URL with a Copy button (plus the LAN-address note for public-domain visitors), how the matching works (DVarr files recordings Sonarr/Plex-style and answers Plex's metadata requests with real event data from TheSportsDB), the three set-up steps, and the provider identifier for reference.
+- **Calendar → Subscribe button.** The token ICS feed is now self-serve: a modal shows the feed address for this device with a Copy button, and a **public address** built from the new `public_base_url` setting (settable right in the modal) for subscribing from Google/Apple Calendar outside the LAN.
+
+### Fixed
+- **Calendar month grid overflow**: the 7 day columns used `1fr` tracks, which can't shrink below the widest event pill — long titles pushed the Sunday column past the card edge. Columns are now `minmax(0,1fr)` and event titles ellipsize inside their day cell, so the grid always aligns with the toolbar.
+
 ## [1.28.0] — 2026-07-04
 Session-smart recording lengths · repo cleanup + new README.
 

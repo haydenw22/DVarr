@@ -43,9 +43,13 @@ DVarr watches the leagues you follow on [TheSportsDB](https://www.thesportsdb.co
 
 ![Guide](.github/media/guide.png)
 
-### Calendar — every followed event at a glance (plus an ICS feed for Google Calendar)
+### Calendar — every followed event at a glance (one-click ICS subscribe for Google/Apple Calendar)
 
 ![Calendar](.github/media/calendar.png)
+
+### Plex — a built-in metadata provider, explained right in Settings
+
+![Plex settings](.github/media/settings-plex.png)
 
 ### Recordings & Settings
 

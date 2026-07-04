@@ -111,6 +111,23 @@ function modal(html, width) {
 }
 function closeModals() { stopPreview(); $('#modalRoot').replaceChildren(); }
 
+// Copy text to the clipboard, toasting success/failure. Prefers the async Clipboard API; falls back to selecting a
+// (possibly off-screen) input + execCommand('copy') for older WebViews / non-secure contexts where clipboard is absent.
+// `srcSel` is an optional CSS selector of an existing <input> to select() for the fallback (avoids a flash).
+function copyText(text, srcSel) {
+  const done = () => toast('Copied to clipboard', 'ok');
+  const fallback = () => {
+    let el = srcSel && $(srcSel), temp = null;
+    if (!el) { temp = document.createElement('input'); temp.value = text; temp.style.position = 'fixed'; temp.style.opacity = '0'; document.body.appendChild(temp); el = temp; }
+    el.focus(); el.select();
+    let ok = false; try { ok = document.execCommand('copy'); } catch { ok = false; }
+    if (temp) temp.remove();
+    ok ? done() : toast("Couldn't copy — select the text and copy it manually", 'err');
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, fallback);
+  else fallback();
+}
+
 // ---- mobile drawer nav (sidebar slides in over a scrim below ~820px) ----
 // body.drawer-locked freezes page scroll behind the open drawer (class is only ever set on small screens).
 function closeDrawer() { const a = $('.app'); if (a) a.classList.remove('drawer-open'); document.body.classList.remove('drawer-locked'); const h = $('#hamburger'); if (h) h.setAttribute('aria-expanded', 'false'); }
@@ -654,6 +671,7 @@ PAGES.calendar = {
         <div id="calTitle" class="cal-title"></div>
         <button class="ghost sm" id="calNext">›</button>
         <button class="ghost sm" id="calToday">Today</button>
+        <button class="ghost sm" id="calSubscribe" title="Subscribe to this calendar in Google/Apple Calendar">${I.calendar} Subscribe</button>
         <span class="grow"></span>
         <select id="calLeague"><option value="">All leagues</option>${ls.map(l => `<option value="${l.id}" ${String(l.id) === leagueFilter ? 'selected' : ''}>${esc(l.name)}</option>`).join('')}</select>
       </div>
@@ -724,6 +742,7 @@ PAGES.calendar = {
     $('#calPrev').addEventListener('click', () => { if (state.m === 0) { state.m = 11; state.y--; } else state.m--; draw(); });
     $('#calNext').addEventListener('click', () => { if (state.m === 11) { state.m = 0; state.y++; } else state.m++; draw(); });
     $('#calToday').addEventListener('click', () => { const t = bneParts(Math.floor(Date.now() / 1000)); state.y = t.y; state.m = t.m; draw(); });
+    $('#calSubscribe').addEventListener('click', openCalendarFeedModal);
     $('#calLeague').addEventListener('change', () => { state.league = $('#calLeague').value; draw(); });
     await draw();
   },
@@ -741,6 +760,53 @@ function openCalEvent(id) {
       <button class="ghost" onclick="resolvePreview(${e.id})">Resolve</button>
       <button onclick="monitorEvent(${e.id},${!e.monitored})">${e.monitored ? 'Unmonitor' : 'Monitor (auto-record)'}</button>
     </div>`, 'min(480px,94vw)');
+}
+
+// Subscribe (ICS feed): copy-me local + public URLs for Google/Apple Calendar. The feed path (with its private token)
+// comes from GET /api/calendar/url; the public URL prepends the `public_base_url` setting (prompted for if unset).
+async function openCalendarFeedModal() {
+  const [feed, settings] = await Promise.all([api.get('/api/calendar/url'), api.get('/api/settings')]);
+  const path = (feed && feed.url) || '';
+  const publicBase = ((settings && settings.public_base_url) || '').replace(/\/+$/, '');
+  if (!path) { toast('Could not load the calendar link', 'err'); return; }
+  modal(calendarFeedBody(path, publicBase), 'min(560px,94vw)');
+}
+// The modal's inner HTML — re-rendered in place after the public URL is saved so no reopen is needed.
+function calendarFeedBody(path, publicBase) {
+  const local = location.origin + path;
+  const pub = publicBase ? publicBase + path : '';
+  const publicRow = pub
+    ? `<label class="field">Public address <span class="muted">(from any network)</span>
+        <div class="copy-row"><input id="feedPublic" readonly value="${esc(pub)}"/><button class="ghost sm" onclick="copyText($('#feedPublic').value,'#feedPublic')">Copy</button></div>
+        <button class="ghost sm" style="align-self:flex-start;margin-top:6px" onclick="editCalendarPublicBase('${jsq(path)}')">change public address</button></label>`
+    : `<label class="field">Public address <span class="muted">(optional — for subscribing away from home)</span>
+        <div class="muted" style="font-size:12px;margin-bottom:4px">Set your DVarr public URL to build a link that works off your home network.</div>
+        <div class="copy-row"><input id="feedBase" placeholder="https://dvr.example.com"/><button class="ghost sm" onclick="saveCalendarPublicBase('${jsq(path)}')">Save</button></div></label>`;
+  return `<h2>Calendar feed (ICS)</h2>
+    <div class="fields">
+      <div class="muted" style="font-size:12.5px;line-height:1.6">Subscribe to this feed in <b>Google Calendar</b> (Other calendars → From URL) or <b>Apple Calendar</b> to keep every followed event on your phone/PC calendar, refreshed automatically. The link contains a private token — treat it like a password.</div>
+      <label class="field">This address <span class="muted">(on this network)</span>
+        <div class="copy-row"><input id="feedLocal" readonly value="${esc(local)}"/><button class="ghost sm" onclick="copyText($('#feedLocal').value,'#feedLocal')">Copy</button></div></label>
+      ${publicRow}
+    </div>
+    <div class="foot"><button class="ghost" onclick="closeModals()">Close</button></div>`;
+}
+// Validate + persist public_base_url (empty or http(s)://…, trailing slash stripped), then re-render the modal body.
+async function saveCalendarPublicBase(path) {
+  const raw = ($('#feedBase')?.value || '').trim().replace(/\/+$/, '');
+  if (raw && !/^https?:\/\//i.test(raw)) return toast('Public address must start with http:// or https://', 'err');
+  const r = await api.put('/api/settings', { public_base_url: raw });
+  if (r.error) return toast(r.error, 'err');
+  toast('Public address saved', 'ok');
+  const bg = $('.modal-bg'); const box = bg && bg.querySelector('.modal');
+  if (box) box.innerHTML = calendarFeedBody(path, raw) + (box.querySelector('.modal-x')?.outerHTML || '');
+}
+// "change" affordance: blank the setting, re-render the modal back to the input row (user can re-save a new URL).
+async function editCalendarPublicBase(path) {
+  const r = await api.put('/api/settings', { public_base_url: '' });
+  if (r.error) return toast(r.error, 'err');
+  const bg = $('.modal-bg'); const box = bg && bg.querySelector('.modal');
+  if (box) box.innerHTML = calendarFeedBody(path, '') + (box.querySelector('.modal-x')?.outerHTML || '');
 }
 
 // ---- Activity ----
@@ -849,6 +915,7 @@ const SETTINGS_META = {
   ] },
   thesportsdb_api_key: { g: 'TheSportsDB', t: 'TheSportsDB API key', h: 'Your premium TheSportsDB (v2) key — required to browse leagues and sync fixtures.', ty: 'text' },
   ha_webhook_url: { g: 'Integrations', t: 'Home Assistant webhook', h: 'Webhook URL to push recording state changes to Home Assistant. Blank = off.', ty: 'url' },
+  public_base_url: { g: 'Integrations', t: 'Public base URL', h: 'Externally-reachable URL of this DVarr (e.g. https://dvr.example.com), used to build the away-from-home calendar-feed link. Blank = off.', ty: 'url' },
   default_channel_source_filter: { g: 'Display', t: 'Default channel filter', h: 'Which source’s channels to show by default (“all” or a source id).', ty: 'text' },
   timezone_display: { g: 'Display', t: 'Display timezone', h: 'IANA timezone used to show times (e.g. Australia/Brisbane).', ty: 'text' },
   litestream_target: { g: 'Backups', t: 'Litestream backup target', h: 'Continuous database backup destination (e.g. s3://bucket/path). Blank = off.', ty: 'url' },
@@ -877,9 +944,12 @@ PAGES.settings = {
     const buckets = {}; SETTINGS_TABS.forEach(t => buckets[t] = []);
     Object.keys(SETTINGS_META).filter(k => k in s).forEach(k => buckets[GROUP_TAB[SETTINGS_META[k].g] || 'Advanced'].push(k));
     Object.keys(s).filter(k => !SETTINGS_META[k] && !HIDDEN.includes(k)).forEach(k => buckets['Advanced'].push(k));
-    const tabs = SETTINGS_TABS.filter(t => buckets[t].length);
+    // "Plex" is a fixed info-only tab (no settings keys) whose pane is custom HTML, not the generic set-grid — appended
+    // after the key-driven tabs so it always shows regardless of which settings exist.
+    const PLEX_TAB = 'Plex';
+    const tabs = [...SETTINGS_TABS.filter(t => buckets[t].length), PLEX_TAB];
     const nav = `<div class="tab-nav">${tabs.map((t, i) => `<button class="tab-btn${i === 0 ? ' active' : ''}" data-tab="${esc(t)}">${esc(t)}</button>`).join('')}</div>`;
-    const panes = tabs.map((t, i) => `<div class="tab-pane${i === 0 ? ' active' : ''}" data-tab="${esc(t)}"><div class="set-grid">${buckets[t].map(k => settingField(k, s[k])).join('')}</div></div>`).join('');
+    const panes = tabs.map((t, i) => `<div class="tab-pane${i === 0 ? ' active' : ''}" data-tab="${esc(t)}">${t === PLEX_TAB ? plexSettingsPane() : `<div class="set-grid">${buckets[t].map(k => settingField(k, s[k])).join('')}</div>`}</div>`).join('');
     el.innerHTML = `<div class="settings-wrap">${nav}${panes}
       <div class="row" style="margin:18px 0 28px"><button onclick="saveSettings()">Save settings</button><span id="setMsg" class="muted"></span></div></div>`;
     el.querySelectorAll('.tab-btn').forEach(b => b.addEventListener('click', () => {
@@ -888,6 +958,29 @@ PAGES.settings = {
     }));
   },
 };
+
+// Settings → Plex: info-only pane. The provider URL (location.origin + '/plex') + how the Custom Metadata Provider
+// works + set-up steps, all grounded in PlexEndpoints.cs (the /plex agent) and MediaImportService.cs (the on-disk
+// League/Season/event layout + .unsorted staging).
+function plexSettingsPane() {
+  const url = location.origin + '/plex';
+  return `<div style="max-width:720px">
+    <label class="field" style="margin-bottom:6px">Provider URL <span class="muted">(paste this into Plex)</span>
+      <div class="copy-row"><input id="plexUrl" readonly value="${esc(url)}"/><button class="ghost sm" onclick="copyText($('#plexUrl').value,'#plexUrl')">Copy</button></div></label>
+    <div class="muted" style="font-size:12px;margin-bottom:16px">Give Plex an address it can reach on the LAN — if you're viewing DVarr through the public domain, swap in the server's LAN IP (e.g. <span class="mono">http://192.168.x.x:1867/plex</span>).</div>
+
+    <div class="note" style="margin-bottom:14px"><b>How it works.</b> DVarr files finished recordings into the media folder as <span class="mono">League / Season &lt;year&gt; / &lt;event&gt; …</span> (Sonarr/Plex-style), and exposes a Plex <b>Custom Metadata Provider</b> at <span class="mono">/plex</span>. When Plex scans that library with the DVarr provider selected, it asks DVarr to match each folder/file and DVarr answers with real event metadata — league poster/artwork, event title, date, and season/episode numbering — sourced from TheSportsDB. The <span class="mono">/plex</span> surface is deliberately login-exempt so a LAN Plex server can reach it without credentials (it serves public sports metadata only).</div>
+
+    <b style="font-size:13px">Set-up</b>
+    <ol class="plex-steps">
+      <li>In Plex, create or edit a <b>TV Shows</b> library pointing at DVarr's media folder (where recordings are filed).</li>
+      <li>Add the Provider URL above as a <b>custom metadata provider</b> for that library, then select the DVarr provider as the library's <b>agent</b>.</li>
+      <li><b>Scan</b> the library — Plex matches each <span class="mono">League/Season &lt;year&gt;/&lt;event&gt;</span> folder against DVarr and pulls in the artwork, titles, dates and season/episode numbers.</li>
+    </ol>
+    <div class="note" style="margin-top:14px">Only <b>event-linked</b> recordings are filed and matchable — schedule them from a monitored league/event, or attach one to a game via <b>Import</b>. A manual recording with no event sits in a <span class="mono">.unsorted</span> folder that Plex ignores until you Import it.</div>
+    <div class="muted" style="font-size:11px;margin-top:10px">Provider identifier: <span class="mono">tv.plex.agents.custom.dvarr.sports</span></div>
+  </div>`;
+}
 
 function emptyBox(msg) { return `<div class="empty">${I.recordings}<div>${esc(msg)}</div></div>`; }
 
@@ -1467,6 +1560,7 @@ window.syncEpg = syncEpg; window.doSyncEpg = doSyncEpg; window.openSourceModal =
 window.openLeagueModal = openLeagueModal; window.submitLeague = submitLeague; window.deleteLeague = deleteLeague; window.syncLeague = syncLeague;
 window.openMapModal = openMapModal; window.submitMap = submitMap; window.deleteMapping = deleteMapping;
 window.openEventModal = openEventModal; window.submitEvent = submitEvent; window.monitorEvent = monitorEvent; window.resolvePreview = resolvePreview; window.openCalEvent = openCalEvent;
+window.copyText = copyText; window.openCalendarFeedModal = openCalendarFeedModal; window.saveCalendarPublicBase = saveCalendarPublicBase; window.editCalendarPublicBase = editCalendarPublicBase;
 
 buildNav();
 // Mobile drawer wiring (hamburger toggles, scrim or a nav choice closes it).

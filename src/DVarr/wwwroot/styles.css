@@ -233,6 +233,14 @@ label.field { display:flex; flex-direction:column; gap:5px; font-size:12px; colo
 .set-row { display:flex; flex-direction:column; gap:3px; }
 .set-row > input, .set-row > select, .set-row > textarea { width:100%; }
 
+/* Copy-row: a readonly URL input + a Copy button on one line (ICS-feed modal + Plex settings pane). The input
+   flexes to fill and truncates; the button never shrinks. min-width:0 lets the input shrink instead of overflowing. */
+.copy-row { display:flex; gap:8px; align-items:center; }
+.copy-row input { flex:1 1 auto; min-width:0; }
+.copy-row button { flex:0 0 auto; }
+.plex-steps { margin:8px 0 0; padding-left:22px; font-size:12.5px; line-height:1.6; }
+.plex-steps li { margin-bottom:6px; }
+
 /* ---- guide timeline ---- */
 .guide-legend { display:flex; align-items:center; gap:14px; margin:12px 0 10px; font-size:12px; color:var(--dim); flex-wrap:wrap; }
 .guide-legend .lg { display:inline-flex; align-items:center; gap:6px; }
@@ -269,18 +277,22 @@ label.field { display:flex; flex-direction:column; gap:5px; font-size:12px; colo
 .cal-toolbar { align-items:center; }
 .cal-title { font-weight:700; font-size:15px; min-width:160px; text-align:center; }
 .cal-grid { border:1px solid var(--line); border-radius:14px; overflow:hidden; background:var(--panel); }
-.cal-head { display:grid; grid-template-columns:repeat(7,1fr); background:var(--head-bg); }
+/* minmax(0,1fr) on BOTH tracks: a plain 1fr can't shrink below its content min-width, so a long event pill
+   (nowrap) forces the column wider and the SUN column spills past the card's right edge. minmax(0,…) lets each
+   day track shrink to 0 and the pill ellipsizes inside it (see .cal-cell/.cal-ev min-width:0 below). */
+.cal-head { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); background:var(--head-bg); }
 .cal-head > div { padding:8px; text-align:center; font-size:11px; text-transform:uppercase; color:var(--dim); border-right:1px solid var(--line); }
 .cal-head > div:last-child { border-right:none; }
-.cal-body { display:grid; grid-template-columns:repeat(7,1fr); }
-.cal-cell { min-height:108px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); padding:4px; display:flex; flex-direction:column; gap:3px; }
+.cal-body { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); }
+.cal-cell { min-width:0; min-height:108px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); padding:4px; display:flex; flex-direction:column; gap:3px; }
 .cal-cell:nth-child(7n) { border-right:none; }
 .cal-cell.empty-cell { background:var(--bg); }
 .cal-cell.today { background:rgba(59,130,246,.08); }
 .cal-cell.today .cal-daynum { background:var(--acc); color:#fff; }
 .cal-daynum { font-size:11px; color:var(--dim); align-self:flex-start; min-width:20px; text-align:center; border-radius:10px; padding:1px 5px; }
-.cal-events { display:flex; flex-direction:column; gap:3px; overflow:hidden; }
-.cal-ev { font-size:11px; padding:2px 6px; border-radius:5px; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; line-height:1.5; }
+.cal-events { display:flex; flex-direction:column; gap:3px; overflow:hidden; min-width:0; }
+/* min-width:0 lets the pill ellipsize instead of establishing the column's min-width (which would widen the grid). */
+.cal-ev { min-width:0; font-size:11px; padding:2px 6px; border-radius:5px; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; line-height:1.5; }
 .cal-ev:hover { filter:brightness(1.12); }
 .cal-ev-t { font-variant-numeric:tabular-nums; opacity:.85; font-weight:600; margin-right:3px; }
 
