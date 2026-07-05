@@ -103,12 +103,27 @@ public static class PlexEndpoints
             return Container(matches);
         });
 
-        // Single item by ratingKey (no comma-batch; mirrors reference).
+        // Single item by ratingKey (no comma-batch; mirrors reference). PMS 1.43 refreshes a show/season with
+        // ?includeChildren=1 and reads seasons/episodes ONLY from the inline Children container — it never falls
+        // back to the /children route. Without the inline children, a show refresh updates the show row and stops:
+        // every episode keeps its scanner-generated "Episode N" title and Plex's own frame-grab thumb.
         app.MapGet($"{ProviderPath}/library/metadata/{{ratingKey}}", async (string ratingKey, HttpContext ctx, DVarrDbContext db) =>
         {
             var origin = Origin(ctx);
             var item = await ResolveAsync(db, ratingKey, origin);
-            return item is null ? NotFound() : Container(new[] { item });
+            if (item is null) return NotFound();
+            if (string.Equals(ctx.Request.Query["includeChildren"].FirstOrDefault(), "1", StringComparison.Ordinal))
+            {
+                var (kids, total) = await KidsAsync(db, ratingKey, origin, 0, int.MaxValue);
+                if (total > 0)
+                {
+                    // Items are anonymous objects, so graft Children on via a JsonNode rather than duplicating shapes.
+                    var node = JsonSerializer.SerializeToNode(item, PlexJson)!.AsObject();
+                    node["Children"] = JsonSerializer.SerializeToNode(new { size = kids.Count, Metadata = kids }, PlexJson);
+                    return Results.Json(new { MediaContainer = new { size = 1, totalSize = 1, offset = 0, Metadata = new object[] { node } } }, PlexJson);
+                }
+            }
+            return Container(new[] { item });
         });
 
         // Children: show → seasons; season → episodes. Paged via X-Plex-Container-Start / -Size.
@@ -116,26 +131,38 @@ public static class PlexEndpoints
         {
             var origin = Origin(ctx);
             var (start, size) = Paging(ctx);
-
-            if (TryParse(ratingKey, "dvarr-show-", out var leagueId))
-            {
-                var l = await db.Leagues.FindAsync(leagueId);
-                if (l is null) return NotFound();
-                var years = (await db.Events.Where(e => e.LeagueId == leagueId).Select(e => e.StartUtc).ToListAsync())
-                    .Select(s => EpochTime.ToBrisbane(s).Year).Distinct().OrderByDescending(y => y).ToList();
-                var page = years.Skip(start).Take(size).Select(y => Season(l, y, origin)).ToList();
-                return Container(page, years.Count, start);
-            }
-            if (TryParseSeason(ratingKey, out var lId, out var year))
-            {
-                var l = await db.Leagues.FindAsync(lId);
-                if (l is null) return NotFound();
-                var evs = await SeasonEventsAsync(db, lId, year);
-                var page = evs.Skip(start).Take(size).Select((e, i) => Episode(e, l, year, start + i + 1, origin)).ToList();
-                return Container(page, evs.Count, start);
-            }
-            return Container(Array.Empty<object>());
+            var (page, total) = await KidsAsync(db, ratingKey, origin, start, size);
+            return Container(page, total, start);
         });
+
+        // Plex also probes sub-resources we don't model (extras, similar, related, …). Answer with an empty
+        // container — otherwise the request falls through to the SPA shell and Plex gets text/html mid-refresh.
+        // The literal /children route above outranks this {sub} parameter route in ASP.NET route precedence.
+        app.MapGet($"{ProviderPath}/library/metadata/{{ratingKey}}/{{sub}}", (string ratingKey, string sub)
+            => Container(Array.Empty<object>()));
+    }
+
+    /// <summary>Children of a show (seasons, newest year first) or season (episodes in on-disk SxxExx order) for a
+    /// ratingKey; empty for an episode/unknown key or a missing league. One implementation feeds both the /children
+    /// route (paged) and the inline ?includeChildren=1 graft (full list) so the two can never disagree.</summary>
+    private static async Task<(List<object> Page, int Total)> KidsAsync(DVarrDbContext db, string ratingKey, string origin, int start, int size)
+    {
+        if (TryParse(ratingKey, "dvarr-show-", out var leagueId))
+        {
+            var l = await db.Leagues.FindAsync(leagueId);
+            if (l is null) return (new List<object>(), 0);
+            var years = (await db.Events.Where(e => e.LeagueId == leagueId).Select(e => e.StartUtc).ToListAsync())
+                .Select(s => EpochTime.ToBrisbane(s).Year).Distinct().OrderByDescending(y => y).ToList();
+            return (years.Skip(start).Take(size).Select(y => (object)Season(l, y, origin)).ToList(), years.Count);
+        }
+        if (TryParseSeason(ratingKey, out var lId, out var year))
+        {
+            var l = await db.Leagues.FindAsync(lId);
+            if (l is null) return (new List<object>(), 0);
+            var evs = await SeasonEventsAsync(db, lId, year);
+            return (evs.Skip(start).Take(size).Select((e, i) => (object)Episode(e, l, year, start + i + 1, origin)).ToList(), evs.Count);
+        }
+        return (new List<object>(), 0);
     }
 
     // ---- DVarr entity → Plex object mapping ----

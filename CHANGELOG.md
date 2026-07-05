@@ -12,6 +12,13 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.30.1] — 2026-07-05
+Plex episode metadata actually applies now.
+
+### Fixed
+- **Plex refresh stopped at the show level.** PMS 1.43 refreshes a show with `?includeChildren=1` and reads seasons/episodes ONLY from an inline `Children` container in that response — it never falls back to the separate `/children` route. DVarr returned the bare show, so Plex updated the show poster and stopped: every episode kept its scanner-generated "Episode N" title and Plex's frame-grab thumbnail instead of the real game title + TheSportsDB artwork. The single-item endpoint now embeds the full child list when asked.
+- Unmodeled provider sub-resources Plex probes (`/extras`, `/similar`, …) now return an empty MediaContainer instead of falling through to the SPA's HTML.
+
 ## [1.30.0] — 2026-07-05
 Searchable Import pickers · Plex-behind-proxy fix.
 
