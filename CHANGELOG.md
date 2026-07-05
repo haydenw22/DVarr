@@ -12,6 +12,15 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.30.0] — 2026-07-05
+Searchable Import pickers · Plex-behind-proxy fix.
+
+### Added
+- **Import modal: text search.** The League step gains a keyword filter that narrows the dropdown (same UX as the Schedule modal's group filter), and the Game step is now a search box + scrollable list (same as the channel picker) — no more scrolling a 200-option select to find one match.
+
+### Fixed
+- **Plex metadata provider behind the reverse proxy.** Every URL the provider handed Plex used the scheme DVarr itself saw — plain `http` behind the TLS-terminating proxy. When the provider is registered via the public https address, Plex's match/metadata POSTs then hit the proxy's http→https redirect and silently die (a 301 turns POST into GET), so matches returned nothing. The provider now honors `X-Forwarded-Proto`, same as the login cookie already did.
+
 ## [1.29.0] — 2026-07-05
 Plex made discoverable · calendar feed made copyable · calendar layout fix.
 

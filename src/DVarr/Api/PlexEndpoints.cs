@@ -276,7 +276,15 @@ public static class PlexEndpoints
     private static IResult NotFound()
         => Results.Json(new { error = new { code = "not_found", message = "metadata not found" } }, PlexJson, statusCode: 404);
 
-    private static string Origin(HttpContext ctx) => $"{ctx.Request.Scheme}://{ctx.Request.Host}";
+    // Behind the TLS-terminating reverse proxy Request.Scheme is "http", so every key/feature URL we hand Plex
+    // would be http:// — and Plex's POSTs die at the proxy's http→https redirect (a 301 downgrades POST to GET,
+    // so match/metadata silently return nothing). Honor X-Forwarded-Proto like AuthEndpoints.IsSecure does.
+    private static string Origin(HttpContext ctx)
+    {
+        var scheme = string.Equals(ctx.Request.Headers["X-Forwarded-Proto"].FirstOrDefault(), "https", StringComparison.OrdinalIgnoreCase)
+            ? "https" : ctx.Request.Scheme;
+        return $"{scheme}://{ctx.Request.Host}";
+    }
 
     private static (int start, int size) Paging(HttpContext ctx)
     {

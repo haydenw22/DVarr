@@ -1191,32 +1191,67 @@ async function openImportModal(id, startUtc, title) {
     <div class="muted" style="margin-bottom:10px">${esc(title || ('Recording #' + id))} · ${brisbane(startUtc)}</div>
     <div class="fields">
       <label class="field">Sport<select id="impSport"><option value="">— pick a sport —</option>${sports.map(s => `<option value="${esc(s.name)}">${esc(s.name)}</option>`).join('')}</select></label>
-      <label class="field">League<select id="impLeague" disabled><option value="">— pick a sport first —</option></select></label>
-      <label class="field">Game<select id="impGame" disabled><option value="">— pick a league first —</option></select></label>
+      <label class="field">League<input id="impLeagueQ" placeholder="filter leagues (keyword)…" disabled/><select id="impLeague" disabled><option value="">— pick a sport first —</option></select></label>
+      <label class="field">Game<input id="impGameQ" placeholder="search games (keyword)…" disabled/>
+        <div id="impGameList" class="picklist" role="listbox" tabindex="0"></div>
+        <input type="hidden" id="impGame"/></label>
     </div>
     <div id="impMsg" class="muted" style="margin-top:8px;font-size:12px"></div>
     <div class="foot"><button class="ghost" onclick="closeModals()">Cancel</button><button id="impGo" onclick="submitImport(${id})" disabled>Import</button></div>`, 'min(560px,94vw)');
   window._impDate = dateStr;
+  let leagues = [], games = [];
+  // League: a keyword filter narrows the <select> option list (mirrors the schedule Group step).
+  const renderLeagues = () => {
+    const q = $('#impLeagueQ').value;
+    const f = q ? leagues.filter(l => tokensMatch(l.name, q)) : leagues;
+    // Keep a made selection when the filter still includes it — rebuilding options silently resets the select
+    // with no change event, which would desync the already-loaded game list from the (now empty) league value.
+    const cur = $('#impLeague').value;
+    $('#impLeague').innerHTML = `<option value="">— pick a league${f.length ? ` (${f.length})` : ''} —</option>` + f.map(l => `<option value="${esc(l.id)}">${esc(l.name)}</option>`).join('');
+    if (cur && f.some(l => String(l.id) === cur)) $('#impLeague').value = cur;
+  };
+  // Game: a keyword search + custom ellipsis listbox writing the chosen id into #impGame (mirrors the schedule Channel step).
+  const renderGames = () => {
+    const q = $('#impGameQ').value;
+    const f = q ? games.filter(g => tokensMatch(g.title + ' ' + (g.date ? brisbane(g.date) : ''), q)) : games;
+    const sel = $('#impGame').value;
+    const list = $('#impGameList');
+    if (!f.length) { list.innerHTML = `<div class="muted" style="padding:8px 11px">(no games)</div>`; return; }
+    list.innerHTML = f.slice(0, 500).map(g => {
+      const label = g.title + (g.date ? ` — ${brisbane(g.date)}` : '');
+      return `<div class="pickrow${String(g.id) === String(sel) ? ' sel' : ''}" role="option" data-id="${g.id}" title="${esc(label)}">${esc(label)}</div>`;
+    }).join('');
+  };
+  const clearGames = () => { games = []; $('#impGame').value = ''; $('#impGameQ').value = ''; $('#impGameQ').disabled = true; $('#impGameList').innerHTML = `<div class="muted" style="padding:8px 11px">— pick a league first —</div>`; $('#impGo').disabled = true; };
+  clearGames();
   $('#impSport').onchange = async () => {
-    const sport = $('#impSport').value, sel = $('#impLeague');
-    $('#impGame').disabled = true; $('#impGame').innerHTML = '<option value="">— pick a league first —</option>'; $('#impGo').disabled = true; $('#impMsg').textContent = '';
-    if (!sport) { sel.disabled = true; sel.innerHTML = '<option value="">— pick a sport first —</option>'; return; }
-    sel.disabled = true; sel.innerHTML = '<option value="">loading…</option>';
-    const leagues = await api.get(`/api/tsdb/leagues?sport=${encodeURIComponent(sport)}`);
-    sel.innerHTML = `<option value="">— pick a league —</option>` + leagues.map(l => `<option value="${esc(l.id)}">${esc(l.name)}</option>`).join('');
-    sel.disabled = false;
+    const sport = $('#impSport').value;
+    leagues = []; $('#impLeagueQ').value = ''; clearGames(); $('#impMsg').textContent = '';
+    if (!sport) { $('#impLeagueQ').disabled = true; $('#impLeague').disabled = true; $('#impLeague').innerHTML = '<option value="">— pick a sport first —</option>'; return; }
+    $('#impLeagueQ').disabled = true; $('#impLeague').disabled = true; $('#impLeague').innerHTML = '<option value="">loading…</option>';
+    leagues = await api.get(`/api/tsdb/leagues?sport=${encodeURIComponent(sport)}`);
+    renderLeagues();
+    $('#impLeagueQ').disabled = false; $('#impLeague').disabled = false;
   };
   $('#impLeague').onchange = async () => {
-    const leagueId = $('#impLeague').value, sel = $('#impGame');
-    $('#impGo').disabled = true; $('#impMsg').textContent = '';
-    if (!leagueId) { sel.disabled = true; sel.innerHTML = '<option value="">— pick a league first —</option>'; return; }
-    sel.disabled = true; sel.innerHTML = '<option value="">loading…</option>';
-    const games = await api.get(`/api/import/events?leagueId=${encodeURIComponent(leagueId)}&date=${window._impDate}`);
-    if (!games.length) { sel.innerHTML = '<option value="">(no games near this date)</option>'; $('#impMsg').textContent = 'No games for that league near the recording date — try another league.'; return; }
-    sel.innerHTML = `<option value="">— pick the game —</option>` + games.map(g => `<option value="${esc(g.id)}">${esc(g.title)}${g.date ? ` — ${brisbane(g.date)}` : ''}</option>`).join('');
-    sel.disabled = false;
+    const leagueId = $('#impLeague').value;
+    clearGames(); $('#impMsg').textContent = '';
+    if (!leagueId) return;
+    $('#impGameList').innerHTML = `<div class="muted" style="padding:8px 11px">loading…</div>`;
+    games = await api.get(`/api/import/events?leagueId=${encodeURIComponent(leagueId)}&date=${window._impDate}`);
+    if (!games.length) { $('#impGameList').innerHTML = `<div class="muted" style="padding:8px 11px">(no games near this date)</div>`; $('#impMsg').textContent = 'No games for that league near the recording date — try another league.'; return; }
+    $('#impGameQ').disabled = false;
+    renderGames();
   };
-  $('#impGame').onchange = () => { $('#impGo').disabled = !$('#impGame').value; };
+  // Click a row → record its id in the hidden input, move the highlight, enable Import (single-select listbox).
+  $('#impGameList').onclick = (e) => {
+    const row = e.target.closest('.pickrow'); if (!row || !row.dataset.id) return;
+    $('#impGame').value = row.dataset.id;
+    [...$('#impGameList').children].forEach(r => r.classList.toggle('sel', r === row));
+    $('#impGo').disabled = false;
+  };
+  let lt; $('#impLeagueQ').oninput = () => { clearTimeout(lt); lt = setTimeout(renderLeagues, 150); };
+  let gt; $('#impGameQ').oninput = () => { clearTimeout(gt); gt = setTimeout(renderGames, 200); };
 }
 async function submitImport(id) {
   const leagueId = $('#impLeague').value, eventId = $('#impGame').value;
