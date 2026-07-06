@@ -69,6 +69,119 @@ DVarr watches the leagues you follow on [TheSportsDB](https://www.thesportsdb.co
 
 ---
 
+## Quick start (Docker Compose)
+
+Requirements: Docker with Compose. That's it — the multi-stage [`Dockerfile`](Dockerfile) builds the .NET app and bundles ffmpeg.
+
+```bash
+git clone https://github.com/haydenw22/DVarr.git
+cd DVarr
+# edit docker-compose.yml volume paths, then:
+docker compose up -d --build
+# UI → http://<host>:1867   ·   health → http://<host>:1867/api/health
+```
+
+The repo's [`docker-compose.yml`](docker-compose.yml) is ready to use — set your three volume paths, your timezone, and real credentials in an untracked `.env` file:
+
+```env
+DVARR_AUTH_USER=yourname
+DVARR_AUTH_PASS=a-long-random-password
+```
+
+| Mount | Purpose |
+|---|---|
+| `/config` | SQLite DB + settings — small; put it on a fast disk (SSD/NVMe) |
+| `/media` | Finished recordings, filed in Plex-scannable show/season folders |
+| `/segments` | In-flight capture scratch (several GB per recording), auto-cleaned after finalize — same filesystem as `/media` makes finalizing a cheap move |
+
+> **Provider model:** typical IPTV providers allow **one stream per login**, so DVarr's concurrency comes from multiple credentials (one tuner slot each). Fallback channels are structurally restricted to the same login — the schema itself rejects a cross-credential fallback.
+
+> **Unraid:** a Community Apps template is on the way. Until then, DVarr runs perfectly from Compose (or a manual Docker template) on Unraid — bind `/config` to appdata and `/media`/`/segments` to your array.
+
+---
+
+## Full setup guide
+
+Five steps from empty container to fully automatic sports DVR: **log in → add your IPTV source → ingest channels + EPG → add a league → map it to channels.** Everything after that — event sync, scheduling, conflict planning, recording, filing for Plex — is automatic.
+
+### 1 · First login
+
+Browse to `http://<host>:1867`. Sign in with the credentials from your `.env` (defaults are `user` / `password` — the container log warns until you change them). Tick **Trust this device** and the cookie lasts 180 days.
+
+### 2 · Get a TheSportsDB API key
+
+DVarr's league catalogue and fixture sync come from [TheSportsDB](https://www.thesportsdb.com/). The built-in free test key only exposes a small sample of leagues, so a real key is effectively required:
+
+1. Sign up at thesportsdb.com (a Patreon-supporter key unlocks the full v2 API).
+2. In DVarr: **Settings → Data Sources → TheSportsDB API key** → paste the key → **Save**.
+
+### 3 · Add your IPTV source
+
+**Sources → Add source**, then fill in the details from your IPTV provider:
+
+| Field | What to enter |
+|---|---|
+| **Label** | Any name, e.g. `My IPTV (login 1)` |
+| **Type** | `xtream` for Xtream-codes providers (the common case), or `m3u` |
+| **Protocol / Host / Port** | From your provider's URL, e.g. `http` · `provider.example.com` · `8080` |
+| **Username / Password** | Your IPTV login |
+| **Max streams** | How many concurrent streams this login allows (usually **1**) |
+| **External EPG URL** *(optional)* | A full XMLTV URL (`https://…/epg.xml.gz`) if you prefer an external guide over the provider's built-in one — tick the override checkbox to make it win |
+| **User-Agent** *(optional)* | Only if your provider requires a specific player UA |
+
+Save, then on the source's row click:
+
+- **Ingest** — pulls the full channel list (uses one stream slot briefly). Channels land on the **Channels** page, filterable by provider group.
+- **EPG** — pulls the TV guide (from the provider's XMLTV, or your external URL). The toast reports how many programmes matched how many channels.
+
+Have multiple logins with the same provider? Add each as its **own source** — each becomes a tuner slot, and DVarr spreads simultaneous recordings across them.
+
+### 4 · Keep the EPG fresh (recommended)
+
+**Settings → Scheduling & EPG**:
+
+- **Auto-sync enabled** — refreshes every source's guide once a day.
+- **EPG sync time / timezone** — pick a quiet hour in your local timezone.
+- **EPG re-pick** (on by default) — within ~1 hour of an event, DVarr re-checks each mapped channel's guide and records from the channel *actually showing the event*.
+
+### 5 · Add a league
+
+**Leagues → Add league**:
+
+1. Pick a **Sport**, then find your **League** with the search box (or paste a TheSportsDB league id for anything unlisted).
+2. Choose what to follow:
+   - **Team sports** — a *Teams to follow* list appears. Tick your team(s) to record only their fixtures; tick none (or all) to record every match.
+   - **Motorsport** — a *Sessions to record* list appears (Practice / Qualifying / Sprint / Race). Follow just Quali + Race if that's your thing, with optional per-session length overrides.
+3. Recording behaviour (the defaults are sensible):
+   - **Recording stop** — *Auto* extends the recording in 15-minute steps while TheSportsDB still shows the event live (up to **Max extension**); *Fixed window* records exactly the scheduled slot.
+   - **Auto-schedule horizon** — how many days ahead DVarr plans recordings (default 14).
+   - **Calendar colour** — the league's colour on the Calendar page.
+   - **Monitored** — leave ticked for automatic recording.
+4. Save, then hit **Sync** on the league's row to pull its fixtures immediately.
+
+### 6 · Map the league to channels
+
+Recording needs to know *where* the league airs. On the league's row click **Map**:
+
+1. Pick **Source → Group → Channel** (the channel box is a keyword search — type `bein`, `fox 503`, whatever matches).
+2. **Rank** — 1 is the first choice; add more mappings at rank 2, 3… as fallbacks. If rank 1 won't open or dies mid-event, DVarr fails over down the list automatically.
+3. **Pinned** — your pick beats EPG title-guessing. Leave it on unless you want DVarr free to reorder by guide match.
+
+All fallbacks for a league must be on the **same provider login** — one stream per login means a mid-recording failover can't jump credentials (the schema enforces this).
+
+**That's the setup done.** The dashboard shows what's planned; the Calendar shows every followed event; recordings start, survive drops, auto-extend, then get filed into `/media` with posters and `.nfo` metadata, ready for Plex.
+
+### 7 · Optional extras
+
+- **Plex** — DVarr ships a Plex Custom Metadata Provider (Plex 1.43+). In Plex: **Settings → Metadata Agents → Add Provider** → `http://<dvarr-lan-ip>:1867/plex` → restart Plex → point a **TV Shows** library at the DVarr agent. Real game titles and TheSportsDB artwork on every recording. Full instructions live in **DVarr → Settings → Plex**.
+- **Calendar subscription** — Calendar page → **Subscribe (ICS)** for a token-secured feed Google/Apple Calendar can poll. Set **Settings → Data Sources → Public base URL** if you access DVarr through a reverse proxy.
+- **Home Assistant** — set a webhook URL under **Settings → Data Sources** to push recording state changes; a status endpoint is also available for polling.
+- **IPTV players on your LAN** — credential-free M3U + XMLTV export endpoints let players tune channels without ever seeing your provider login.
+- **Live preview GPU accel** — recording never needs a GPU, but the in-browser live preview transcodes; on an NVIDIA box enable the commented `runtime: nvidia` block in the compose file and set **Settings → Reliability → content_verify_hwaccel** to `cuda` for GPU dead-feed checks too.
+- **Continuous DB backup** — point **Settings → Data Sources → litestream_target** at an S3-compatible bucket.
+
+---
+
 ## How recording lengths are resolved
 
 Every event gets its window from the first tier that answers — so a sensible default always exists, and anything you set explicitly always wins:
@@ -82,40 +195,6 @@ Every event gets its window from the first tier that answers — so a sensible d
 | 4 | **Global default** | 2 h |
 
 Two safety nets sit under all of this: every recording carries post-padding, and **smart auto-stop** keeps extending a live recording past its scheduled end while the guide still shows it in play — so a tight default can't truncate a session that runs long.
-
----
-
-## Quick start (Docker Compose)
-
-```yaml
-services:
-  dvarr:
-    build: .
-    image: dvarr:latest
-    container_name: DVarr
-    restart: unless-stopped
-    ports:
-      - "1867:1867"
-    environment:
-      - TZ=Australia/Brisbane
-      - DVARR_AUTH_USER=${DVARR_AUTH_USER:-user}      # set real creds in an untracked .env
-      - DVARR_AUTH_PASS=${DVARR_AUTH_PASS:-password}  # never commit them
-    volumes:
-      - /path/to/appdata:/config      # SQLite DB + settings (fast disk)
-      - /path/to/media:/media         # finished recordings (Plex-scannable)
-      - /path/to/segments:/segments   # in-flight capture scratch, auto-cleaned
-```
-
-```bash
-docker compose up -d --build
-# UI → http://<host>:1867   ·   health → http://<host>:1867/api/health
-```
-
-Then, in the UI: add your IPTV source (Xtream credentials) under **Sources**, ingest channels + EPG, add a league under **Leagues**, and map it to a channel. Everything else — event sync, scheduling, conflict planning, recording, filing for Plex — is automatic.
-
-An Unraid Community Apps template ships in [`deploy/dvarr.xml`](deploy/dvarr.xml). The real production compose file (GPU pinning, Unraid volume mapping) is [`docker-compose.yml`](docker-compose.yml).
-
-> **Provider model:** typical IPTV providers allow **one stream per login**, so DVarr's concurrency comes from multiple credentials (one tuner slot each). Fallback channels are structurally restricted to the same login — the schema itself rejects a cross-credential fallback.
 
 ---
 
@@ -156,7 +235,6 @@ src/DVarr/
     Media/                    # finished-file import: .nfo, artwork, Sonarr/Plex-style folders
   Api/                        # REST + SSE endpoints, calendar feed, auth, Plex/Sonarr/HA parity
   wwwroot/                    # SPA (PWA: manifest + service worker)
-deploy/dvarr.xml              # Unraid Community Apps template
 Dockerfile                    # multi-stage build + ffmpeg runtime
 ```
 

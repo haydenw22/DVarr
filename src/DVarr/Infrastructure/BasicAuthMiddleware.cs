@@ -6,7 +6,7 @@ using DVarr.Data;
 namespace DVarr.Infrastructure;
 
 /// <summary>
-/// Gates the entire site (DVarr is publicly exposed at dvarr.whittledigitalsolutions.com behind an nginx
+/// Gates the entire site (designed to be safe even when DVarr is exposed publicly behind an nginx
 /// TLS-terminating reverse proxy). Two ways in:
 ///   1. a valid <c>dvarr_session</c> cookie — the "trusted device" login-page path (see <see cref="AuthEndpoints"/>);
 ///   2. a valid HTTP <c>Basic</c> header — kept so curl/scripts and the M2M callers that already send it are unchanged.

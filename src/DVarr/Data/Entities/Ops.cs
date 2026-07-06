@@ -39,7 +39,7 @@ public class Setting
 /// <summary>
 /// Durable record of every state transition and alert; also the feed for SSE and
 /// the Home Assistant hooks (docs/05 §1.8). Reliability-critical kinds (Missed,
-/// StalledRelaunched, PlaceholderDetected) are first-class so Hayden gets an alert
+/// StalledRelaunched, PlaceholderDetected) are first-class so the user gets an alert
 /// the moment a can't-miss capture is at risk.
 /// </summary>
 public class Notification

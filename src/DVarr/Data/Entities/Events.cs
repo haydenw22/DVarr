@@ -95,7 +95,7 @@ public class Event
 
     public bool Monitored { get; set; } = true;
 
-    /// <summary>Latch — once Hayden touches it, no sync/filter overrides it (bug #4).</summary>
+    /// <summary>Latch — once the user touches it, no sync/filter overrides it (bug #4).</summary>
     public bool MonitoredLocked { get; set; }
 
     /// <summary>Latch — manual channel override; re-resolve respects it (bug #3).</summary>
@@ -156,7 +156,7 @@ public class SourceLink
 
 /// <summary>
 /// League↔channel mapping (docs/05 §1.2; docs/06 §3.4). A pinned=1, rank=1 row is
-/// Hayden's preferred channel and carries a dominant PIN_FLOOR in the resolver,
+/// the user's preferred channel and carries a dominant PIN_FLOOR in the resolver,
 /// which dirty EPG data can never outrank (bug #2).
 /// </summary>
 public class LeagueChannelMap

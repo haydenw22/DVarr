@@ -8,9 +8,17 @@ This project uses **Semantic Versioning** — `vMAJOR.MINOR.PATCH`:
 - **MINOR** — new functionality, or a major bug fix.
 - **PATCH** — general updates, minor bug fixes, polish.
 
-Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes from `<Version>` in `src/DVarr/DVarr.csproj` — bump it with every entry below. This log is backdated from the project's build history (`DECISIONS.md`) — internal same-night adversarial-review rounds are folded into the release they hardened rather than listed as separate versions.
+Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes from `<Version>` in `src/DVarr/DVarr.csproj` — bump it with every entry below. This log is backdated from the project's internal build history — internal same-night adversarial-review rounds are folded into the release they hardened rather than listed as separate versions.
 
 ---
+
+## [1.30.2] — 2026-07-06
+Public-release prep.
+
+### Changed
+- **README** — full setup guide: build & first login, TheSportsDB key, adding an IPTV source, channel + EPG ingest, adding a league (team & motorsport follow modes), channel mapping with ranked fallbacks, and the optional Plex / calendar / Home Assistant extras.
+- **docker-compose.yml** is now the generic public compose file (optional NVIDIA block commented out). Deployment-specific files (production compose, Unraid CA template, internal build diary) moved out of the repo to local-only.
+- Scrubbed personal deployment details (domains, LAN IPs, provider names) from tracked files ahead of the repo going public.
 
 ## [1.30.1] — 2026-07-05
 Plex episode metadata actually applies now.
@@ -69,7 +77,7 @@ Login protection · every sport type audited · guide QoL.
 
 ### Added
 - **Login (HTTP Basic).** The UI and API now require a username/password, configurable via docker-compose environment variables `DVARR_AUTH_USER` / `DVARR_AUTH_PASS` (defaults `user`/`password`; put real values in an untracked `.env` — never committed). Machine surfaces keep working without it: container health check, the token-guarded calendar feed (Google), the Plex agent, Prowlarr's keyed API, LAN playlists/streams, and Home Assistant. Constant-time credential comparison; a warning is logged when the defaults are in use.
-- The public URL moved to **dvarr.whittledigitalsolutions.com** (matches the app name; old `dvr` record removed). *(Server-side DNS/nginx, not in this repo.)*
+- The public URL moved to a `dvarr.` subdomain (matches the app name; old `dvr` record removed). *(Server-side DNS/nginx, not in this repo.)*
 
 ### Changed
 - **Sport-type audit (all 37 TheSportsDB sports).** Follow-up to the UFC fix: verified every TeamvsTeam sport gets the team picker and ONLY Motorsport gets the session picker. Duration defaults now match reality for long sports — golf 6 h, fight cards 5 h, tennis & cricket 4 h (motorsport stays 3 h); auto-stop still covers genuine overruns.
@@ -80,7 +88,7 @@ Sport-aware league modal · smarter guide-match timing · subscribable calendar 
 
 ### Added
 - **Subscribable calendar feed** — `GET /api/calendar.ics?token=…` (token auto-generated, kept in the Secrets store; `GET /api/calendar/url` returns your URL). One entry per upcoming monitored event honoring your team/session follow filters, with a 30-minute reminder alarm. Built for Google Calendar's URL subscription via the new public domain.
-- **Public access** — DVarr is reachable at `dvr.whittledigitalsolutions.com` (SWAG + Cloudflare, same pattern as n8n). The credential-leaking stream-proxy redirect and the slot-burning live preview are blocked from outside (403); LAN unaffected. *(Server-side config, not in this repo.)*
+- **Public access** — DVarr is reachable from outside the LAN via a reverse proxy (SWAG + Cloudflare). The credential-leaking stream-proxy redirect and the slot-burning live preview are blocked from outside (403); LAN unaffected. *(Server-side config, not in this repo.)*
 
 ### Changed
 - **League modal is sport-aware** — the session picker + per-session lengths now appear ONLY for motorsport (UFC/boxing/etc. no longer get a bogus "Race" session picker); "Recording stop" reads *"Auto — extend while the event is still live (via TheSportsDB)"*; max-extension shows a plain `60` placeholder and pre-fills `120` when you pick a motorsport league (never clobbering a saved or typed value).
@@ -109,7 +117,7 @@ Smart auto-stop (no more missed extra time) · full UI redesign · league filter
 - **Complete UI redesign** — new deep-navy design language across every page: KPI stat cards, icon-chip panel cards with count pills and "View all" links, pill status badges, gradient primary buttons, redesigned sidebar (active-state accent bar, version chip) and topbar (slots + Database status chips), rebuilt dashboard (Recording Now / Scheduled 24h / Recently Completed / Sources / Next 24 Hours / Leagues panels), restyled tables, modals, tabs, guide and calendar.
 
 ### Docs
-- `docs/12-remote-access-and-calendar.md` — full design (nothing built yet) for the subscribable calendar feed, external access at dvr.whittledigitalsolutions.com via SWAG/Cloudflare, and built-in accounts/roles with a simplified member UI. Includes a security finding: the IPTV stream-proxy redirect embeds provider credentials — external exposure stays blocked until auth ships.
+- `docs/12-remote-access-and-calendar.md` — full design (nothing built yet) for the subscribable calendar feed, external access via SWAG/Cloudflare, and built-in accounts/roles with a simplified member UI. Includes a security finding: the IPTV stream-proxy redirect embeds provider credentials — external exposure stays blocked until auth ships.
 
 ## [1.22.0] — 2026-07-03
 Guide-match channel picking, and no more silent "couldn't schedule" skips.
@@ -313,7 +321,7 @@ Conflict-planning + stop bug fixes, plus a manual "Start now" control.
 - **Fixed event sync only returning ~5 events.** TheSportsDB tightened their free-tier `eventsseason.php` to a season's first few matches. `EventFetcher` now also fetches `eventsday.php` per day across each league's horizon (uncapped on the free key), merged by stable event id. World Cup re-sync went 5 → 49 events. (Not a DVarr bug — a provider change — but DVarr now works around it.)
 
 ## [1.9.0] — 2026-06-16
-- **Deployed to Unraid as a Docker container**, replacing the previous DVR — `dvarr:latest` at `192.168.4.63:1867`, volumes mapped (`/config`→appdata, `/media`→Media/Sports, `/segments`→array scratch), Unraid dashboard logo + WebUI link.
+- **Deployed to Unraid as a Docker container**, replacing the previous DVR — `dvarr:latest` on port `1867`, volumes mapped (`/config`→appdata, `/media`→Media/Sports, `/segments`→array scratch), Unraid dashboard logo + WebUI link.
 - **Auto-cleanup of recording segment scratch** after a recording finishes (the 6 GB+/recording temp files were never being removed).
 - Fixed the container health-check (the base image shipped no wget/curl).
 

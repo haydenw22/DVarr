@@ -29,6 +29,16 @@ publish/
 appsettings.*.local.json
 secrets.json
 
+# Local deployment files (production compose, Unraid CA template) — kept out of the public repo
+/deploy/
+
+# Internal build diary (contains deployment specifics) — local only
+DECISIONS.md
+
+# Local tooling config
+.claude/
+**/.claude/
+
 # OS
 .DS_Store
 Thumbs.db
