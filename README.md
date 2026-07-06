@@ -11,6 +11,7 @@
   <img alt="SQLite" src="https://img.shields.io/badge/SQLite-WAL-003B57" />
   <img alt="Docker" src="https://img.shields.io/badge/Docker-single%20container-2496ED" />
   <img alt="PWA" src="https://img.shields.io/badge/PWA-mobile%20ready-5A0FC8" />
+  <img alt="License: GPL-3.0" src="https://img.shields.io/badge/License-GPL--3.0-blue" />
 </p>
 
 ![Dashboard](.github/media/dashboard.png)
@@ -246,3 +247,9 @@ Dockerfile                    # multi-stage build + ffmpeg runtime
 - Recordings are **never orphaned by a re-sync** — events upsert by a stable natural key; nothing is deleted or re-keyed.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the full per-version history.
+
+---
+
+## License
+
+DVarr is free software, released under the [GNU GPL v3.0](LICENSE) — the same license family as Sonarr and Radarr. Use it, modify it, share it; derivatives stay open.
