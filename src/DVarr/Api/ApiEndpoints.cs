@@ -608,8 +608,15 @@ public static class ApiEndpoints
             {
                 if (!SettingsService.Defaults.TryGetValue(kv.Key, out var def))
                     return Results.Json(new { error = $"unknown setting key: {kv.Key}" }, statusCode: 400);
-                if (int.TryParse(def, out _) && !int.TryParse(kv.Value, out _))
-                    return Results.Json(new { error = $"setting '{kv.Key}' must be an integer" }, statusCode: 400);
+                if (int.TryParse(def, out _))
+                {
+                    // Int-typed keys are all counts/seconds/intervals/caps/thresholds — a negative would be stored and
+                    // used raw (e.g. pre<0 makes winStart = start - pre run FORWARD), so require >= 0. The ONE signed key
+                    // is epg_auto_sync_offset_minutes (a UTC offset; the Americas need it negative, range-checked at use).
+                    var signed = kv.Key == "epg_auto_sync_offset_minutes";
+                    if (!int.TryParse(kv.Value, out var iv) || (!signed && iv < 0))
+                        return Results.Json(new { error = signed ? $"setting '{kv.Key}' must be an integer" : $"setting '{kv.Key}' must be a non-negative integer" }, statusCode: 400);
+                }
                 // Time-of-day settings must be HH:MM (a junk value would otherwise be accepted, shown in the UI, and
                 // silently fall back to the default at runtime).
                 if (kv.Key == "epg_auto_sync_time" && !System.Text.RegularExpressions.Regex.IsMatch(kv.Value.Trim(), "^([01]?[0-9]|2[0-3]):[0-5][0-9]$"))

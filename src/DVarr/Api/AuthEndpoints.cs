@@ -162,13 +162,23 @@ public static class AuthEndpoints
     // ---- rate limiter --------------------------------------------------------------------------
 
     /// <summary>
-    /// Best-effort client IP for the limiter. Prefer the first X-Forwarded-For hop only when the DIRECT peer is a
-    /// private/loopback address (i.e. our own nginx) — otherwise a public direct caller could spoof XFF to dodge the
-    /// limiter or frame another IP. Not bulletproof (a compromised proxy chain can still lie), but adequate for a
-    /// single-tenant home app behind one trusted proxy.
+    /// Best-effort client IP for the limiter. The public path is Cloudflare → SWAG/nginx → here, and Cloudflare sets
+    /// <c>CF-Connecting-IP</c> to the real client on every proxied request, OVERWRITING any client-supplied value — so
+    /// it's the one hop an external attacker can't forge. Prefer it. (The X-Forwarded-For chain is unusable here: nginx
+    /// has no Cloudflare real-IP restoration, so XFF's first hop is the raw client-controlled value — rotating it gave
+    /// every brute-force attempt its own limiter bucket and defeated the 8/10-min cap; XFF's last hop / X-Real-IP is the
+    /// shared CF edge IP, which would instead collapse all external users into one bucket.) Fall back to the
+    /// appended-XFF-first-hop only for a direct private/LAN peer (no Cloudflare in that path), then the raw peer. Not
+    /// bulletproof against a caller reaching the origin directly, bypassing Cloudflare — that's a separate
+    /// origin-exposure concern — but for normal public traffic this rate-limits per real client.
     /// </summary>
     private static string ClientIp(HttpContext ctx)
     {
+        // Cloudflare-authoritative real client IP: present on every CF-proxied request, and CF replaces any value a
+        // client tries to send, so it can't be spoofed from the outside to dodge or frame a bucket.
+        var cf = ctx.Request.Headers["CF-Connecting-IP"].FirstOrDefault();
+        if (!string.IsNullOrWhiteSpace(cf)) return cf.Trim();
+
         var peer = ctx.Connection.RemoteIpAddress;
         var peerStr = peer?.ToString() ?? "unknown";
         if (peer is not null && IsPrivate(peer))

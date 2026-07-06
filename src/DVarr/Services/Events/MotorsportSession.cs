@@ -28,9 +28,11 @@ public static class MotorsportSession
         if (string.IsNullOrWhiteSpace(title)) return null;
         var t = title.ToLowerInvariant();
         if (t.Contains("testing")) return "Testing";
-        if (t.Contains("practice 1") || t.Contains("fp1")) return "Practice 1";
-        if (t.Contains("practice 2") || t.Contains("fp2")) return "Practice 2";
-        if (t.Contains("practice 3") || t.Contains("fp3")) return "Practice 3";
+        // Whole-token match: "practice 1"/"fp1" must NOT also swallow "practice 10"/"fp10" — a trailing digit means a
+        // different session, so require the number to end on a word boundary (\b fails digit-to-digit).
+        if (System.Text.RegularExpressions.Regex.IsMatch(t, @"\bpractice 1\b|\bfp1\b")) return "Practice 1";
+        if (System.Text.RegularExpressions.Regex.IsMatch(t, @"\bpractice 2\b|\bfp2\b")) return "Practice 2";
+        if (System.Text.RegularExpressions.Regex.IsMatch(t, @"\bpractice 3\b|\bfp3\b")) return "Practice 3";
         // "Sprint Qualifying" / "Sprint Shootout" must beat plain "Sprint" and "Qualifying".
         if (t.Contains("sprint qualifying") || t.Contains("sprint shootout")) return "Sprint Qualifying";
         // A "race"/"Race N" token wins over a "Sprint" that's part of the MEETING name (V8 "… SuperSprint Race 4" is a

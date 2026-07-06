@@ -339,21 +339,83 @@ public sealed class AutoScheduleService : BackgroundService
                         var newEnd = e.EndUtc ?? e.StartUtc + await settings.GetEventDurationSecondsAsync(l.Sport, l.EventDurationOverrideS, l.SessionDurationsJson, e.Title);
                         if (pend.StartUtc != e.StartUtc || pend.EndUtc != newEnd || pend.Title != e.Title)
                         {
-                            await _gate.WriteAsync(async () =>
-                            {
-                                var rec = await db.Recordings.FindAsync(pend.Id);
-                                if (rec is not null && rec.State == RecordingState.Pending)
-                                {
-                                    rec.StartUtc = e.StartUtc; rec.EndUtc = newEnd; rec.Title = e.Title; rec.UpdatedUtc = now;
-                                    await db.SaveChangesAsync(ct);
-                                }
-                            }, ct);
-                            _log.LogInformation("[AutoSchedule] reconciled recording {Id} to moved event {Eid} '{Title}'", pend.Id, e.Id, e.Title);
-                            // Keep the in-memory planner slot in sync so a later candidate THIS tick is planned against
-                            // the new window — otherwise it compares against the stale slot and can double-book the login.
-                            pend.StartUtc = e.StartUtc; pend.EndUtc = newEnd; pend.Title = e.Title;
+                            var newWinStart = e.StartUtc - pend.PrePadS; var newWinEnd = newEnd + pend.PostPadS;
+                            // Drop pend's OWN (stale) slot before testing overlap, so it can't self-collide, then check
+                            // whether the NEW padded window now clashes with another slot-holding recording on the SAME
+                            // credential. A blind retime-in-place would double-book that credential's single stream — at
+                            // arm time only one could lease it, marking the other Missed. Reuse the SAME placement path as
+                            // 2b (OptionsForEventAsync + Decide) so a clash re-homes to a free equivalent login or parks
+                            // as Conflict for a later tick, never a silent same-credential double-book.
                             slots.RemoveAll(s => s.RecordingId == pend.Id);
-                            slots.Add(new CreditAwarePlanner.Slot(pend.SourceId, e.StartUtc - pend.PrePadS, newEnd + pend.PostPadS, pend.Id, RecordingState.Pending, RankOf(pend)));
+                            var sameCredClash = slots.Any(s => s.SourceId == pend.SourceId && CreditAwarePlanner.Overlaps(newWinStart, newWinEnd, s.StartUtc, s.EndUtc));
+
+                            if (!sameCredClash)
+                            {
+                                // No overlap → retime in place (unchanged behavior).
+                                await _gate.WriteAsync(async () =>
+                                {
+                                    var rec = await db.Recordings.FindAsync(pend.Id);
+                                    if (rec is not null && rec.State == RecordingState.Pending)
+                                    {
+                                        rec.StartUtc = e.StartUtc; rec.EndUtc = newEnd; rec.Title = e.Title; rec.UpdatedUtc = now;
+                                        await db.SaveChangesAsync(ct);
+                                    }
+                                }, ct);
+                                _log.LogInformation("[AutoSchedule] reconciled recording {Id} to moved event {Eid} '{Title}'", pend.Id, e.Id, e.Title);
+                                // Keep the in-memory planner slot in sync so a later candidate THIS tick is planned against
+                                // the new window — otherwise it compares against the stale slot and can double-book the login.
+                                pend.StartUtc = e.StartUtc; pend.EndUtc = newEnd; pend.Title = e.Title;
+                                slots.Add(new CreditAwarePlanner.Slot(pend.SourceId, newWinStart, newWinEnd, pend.Id, RecordingState.Pending, RankOf(pend)));
+                            }
+                            else
+                            {
+                                // The moved window collides with another committed recording on this credential → re-plan
+                                // it exactly like a new placement. Apply the new times in-memory FIRST so RankOf/Decide use
+                                // the real (moved) window; if placement fails the row stays Pending on disk until we park it.
+                                pend.StartUtc = e.StartUtc; pend.EndUtc = newEnd; pend.Title = e.Title;
+                                var moveOpts = await planner.OptionsForEventAsync(e.Id, ct);
+                                var moveRank = RankOf(pend);
+                                var moveDecision = moveOpts.Count == 0
+                                    ? new CreditAwarePlanner.Decision(false, null, null, true, "no resolvable channel for moved event")
+                                    : planner.Decide(moveOpts, newWinStart, newWinEnd, moveRank, slots);
+                                if (moveDecision.Placed && moveDecision.Option is { } opt)
+                                {
+                                    await _gate.WriteAsync(async () =>
+                                    {
+                                        if (moveDecision.PreemptRecordingId is { } vid) await PreemptAsync(vid, $"preempted by moved recording #{pend.Id}");
+                                        var rec = await db.Recordings.FindAsync(pend.Id);
+                                        if (rec is null || rec.State != RecordingState.Pending) return;
+                                        // SourceId is part of the (Id, SourceId) alternate key — re-point via RecordingRepoint
+                                        // (delete fallbacks + tracker-bypassing UPDATE) BEFORE mutating non-key fields, then
+                                        // rebuild the same-credential ladder (WriteFallbacksAsync). Same as the 2a promotion.
+                                        await RecordingRepoint.ApplyAsync(db, pend.Id, opt.SourceId, opt.ChannelId, opt.StreamId, now);
+                                        rec.StartUtc = e.StartUtc; rec.EndUtc = newEnd; rec.Title = e.Title; rec.UpdatedUtc = now;
+                                        await WriteFallbacksAsync(pend.Id, opt.SourceId, opt.Fallbacks);
+                                        db.Notifications.Add(new Notification { RecordingId = pend.Id, TsUtc = now, Kind = NotificationKind.Conflict, Severity = Severity.Info, ToState = "Pending", Message = $"moved event overlapped its credential → rescheduled on '{opt.ChannelName}'" });
+                                        await db.SaveChangesAsync(ct);
+                                    }, ct);
+                                    _log.LogInformation("[AutoSchedule] reconciled recording {Id} to moved event {Eid} '{Title}' and re-homed it (moved window overlapped its credential)", pend.Id, e.Id, e.Title);
+                                    pend.SourceId = opt.SourceId;
+                                    slots.Add(new CreditAwarePlanner.Slot(opt.SourceId, newWinStart, newWinEnd, pend.Id, RecordingState.Pending, moveRank));
+                                }
+                                else
+                                {
+                                    // Nowhere free this tick → retime AND park in Conflict (releasing the slot). The row now
+                                    // carries the correct moved window, so 2a's conflict-promotion path re-homes it next tick
+                                    // (it re-reads Conflicts fresh, reconciles to the live event time, and re-runs Decide).
+                                    await _gate.WriteAsync(async () =>
+                                    {
+                                        var rec = await db.Recordings.FindAsync(pend.Id);
+                                        if (rec is null || rec.State != RecordingState.Pending) return;
+                                        rec.StartUtc = e.StartUtc; rec.EndUtc = newEnd; rec.Title = e.Title;
+                                        rec.State = RecordingState.Conflict; rec.FailureReason = moveDecision.Reason; rec.UpdatedUtc = now;
+                                        db.Notifications.Add(new Notification { RecordingId = pend.Id, TsUtc = now, Kind = NotificationKind.Conflict, Severity = Severity.Warn, ToState = "Conflict", Message = $"moved event overlapped its credential — {moveDecision.Reason}" });
+                                        await db.SaveChangesAsync(ct);
+                                    }, ct);
+                                    _log.LogWarning("[AutoSchedule] moved recording {Id} (event {Eid} '{Title}') overlapped its credential and no login was free → parked Conflict", pend.Id, e.Id, e.Title);
+                                    // Slot already removed above; leaving it out releases the credential for this tick.
+                                }
+                            }
                         }
                     }
                     continue;

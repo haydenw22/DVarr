@@ -12,6 +12,19 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.31.0] — 2026-07-06
+Bug-hunt hardening: brute-force limiter, resync double-book, and four smaller fixes.
+
+### Security
+- **Login rate-limiter can no longer be bypassed.** It keyed on the first `X-Forwarded-For` hop, which a client controls — so an internet-facing attacker could rotate that header to get a fresh bucket per attempt and defeat the 8-fails/10-min cap entirely, brute-forcing the password at full speed. It now keys on the reverse proxy's real-client header (`CF-Connecting-IP`), which the proxy sets authoritatively and overwrites on every request, so external requests are rate-limited per real client. Falls back to the previous behaviour for direct-LAN requests.
+
+### Fixed
+- **A re-synced event that moves could silently double-book a provider login → missed recording.** When an event's time shifted on re-sync, its pending recording was retimed onto the new window with no check that the new window now collided with another recording on the same one-stream login; at record time only one could run and the other was marked Missed. The retime now detects a same-login clash and re-homes the moved recording to a free login (or parks it as a conflict for the next planning pass) instead of blindly overlapping.
+- **Negative values in numeric settings are rejected.** A negative pad/interval (e.g. a fat-fingered `-30`) previously saved and silently mistimed every recording; the settings API now requires non-negative integers (the one legitimately-signed setting, the EPG-sync UTC offset, is exempted).
+- **Motorsport session classifier** no longer folds a double-digit practice ("Practice 10", "FP12") into "Practice 1" — numbered sessions match as whole tokens.
+- **Leagues page** loads with two grouped count queries instead of two per league (N+1 removed).
+- A league name containing an apostrophe no longer shows a stray backslash in its dashboard tooltip (wrong escaper).
+
 ## [1.30.2] — 2026-07-06
 Public-release prep.
 

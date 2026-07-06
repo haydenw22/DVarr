@@ -406,7 +406,7 @@ function upcomingEvents(events, leagues) {
 }
 function leagueChips(leagues) {
   return `<div class="league-chips">${leagues.map(l => `
-    <div class="lchip" onclick="location.hash='#/calendar?league=${l.id}'" title="${jsq(l.name)}">
+    <div class="lchip" onclick="location.hash='#/calendar?league=${l.id}'" title="${esc(l.name)}">
       ${l.poster ? `<img src="${esc(l.poster)}" alt="" loading="lazy"/>` : `<span class="lchip-dot" style="background:${leagueColor(l)}"></span>`}
       <div class="lchip-meta"><b>${esc(l.name)}</b><small>${esc(l.sport)} · ${l.events} event${l.events === 1 ? '' : 's'}</small></div>
     </div>`).join('')}</div>`;

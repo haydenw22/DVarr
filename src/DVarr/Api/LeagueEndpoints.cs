@@ -15,11 +15,15 @@ public static class LeagueEndpoints
         app.MapGet("/api/leagues", async (DVarrDbContext db) =>
         {
             var rows = await db.Leagues.OrderBy(l => l.Sport).ThenBy(l => l.Name).ToListAsync();
+            // Pre-compute per-league counts with two awaited grouped queries, rather than 2 CountAsync per league
+            // (an N+1 that fired 2×league DB round-trips before serializing).
+            var evCounts = await db.Events.GroupBy(e => e.LeagueId).Select(g => new { g.Key, C = g.Count() }).ToDictionaryAsync(g => g.Key, g => g.C);
+            var mapCounts = await db.LeagueChannelMaps.GroupBy(m => m.LeagueId).Select(g => new { g.Key, C = g.Count() }).ToDictionaryAsync(g => g.Key, g => g.C);
             var result = new List<object>();
             foreach (var l in rows)
             {
-                var events = await db.Events.CountAsync(e => e.LeagueId == l.Id);
-                var maps = await db.LeagueChannelMaps.CountAsync(m => m.LeagueId == l.Id);
+                var events = evCounts.GetValueOrDefault(l.Id);
+                var maps = mapCounts.GetValueOrDefault(l.Id);
                 result.Add(new
                 {
                     l.Id, l.Sport, l.Name, l.Monitored, provider = l.EventProvider, l.ExternalLeagueId, l.IcsUrl,
