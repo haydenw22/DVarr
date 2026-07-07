@@ -250,6 +250,12 @@ See [`CHANGELOG.md`](CHANGELOG.md) for the full per-version history.
 
 ---
 
+## Support the project
+
+DVarr is free and always will be. If it's recording your games reliably and you want to say thanks, you can [buy me a beer for the next game on Ko-fi](https://ko-fi.com/haydenw22) 🍺 — there's also a link at the bottom of the app's sidebar.
+
+---
+
 ## License
 
 DVarr is free software, released under the [GNU GPL v3.0](LICENSE) — the same license family as Sonarr and Radarr. Use it, modify it, share it; derivatives stay open.

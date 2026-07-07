@@ -12,6 +12,12 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.31.1] — 2026-07-07
+Support-the-creator link.
+
+### Added
+- **"🍺 Buy me a beer for the next game"** at the bottom of the sidebar — opens the creator's Ko-fi donation panel in an in-app popup (with a plain link fallback to ko-fi.com if the embed can't load or JS is disabled).
+
 ## [1.31.0] — 2026-07-06
 Bug-hunt hardening: brute-force limiter, resync double-book, and four smaller fixes.
 

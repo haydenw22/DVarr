@@ -111,6 +111,16 @@ function modal(html, width) {
 }
 function closeModals() { stopPreview(); $('#modalRoot').replaceChildren(); }
 
+// Ko-fi donation panel in a modal (official embed URL). The iframe only loads when opened, and the
+// sidebar link's href stays a plain Ko-fi URL so it still works if JS is broken. Returns false to
+// swallow the anchor's default navigation.
+function donate() {
+  modal(`<h2>🍺 Buy me a beer for the next game</h2>
+    <iframe class="kofi-frame" src="https://ko-fi.com/haydenw22/?hidefeeditems=true&widget=true&embed=true" title="Support DVarr on Ko-fi" loading="lazy"></iframe>
+    <div class="note" style="margin-top:12px">Panel not loading? <a href="https://ko-fi.com/haydenw22" target="_blank" rel="noopener">Open Ko-fi in a new tab ↗</a></div>`, 'min(420px,94vw)');
+  return false;
+}
+
 // Copy text to the clipboard, toasting success/failure. Prefers the async Clipboard API; falls back to selecting a
 // (possibly off-screen) input + execCommand('copy') for older WebViews / non-secure contexts where clipboard is absent.
 // `srcSel` is an optional CSS selector of an existing <input> to select() for the fallback (avoids a flash).
@@ -1596,6 +1606,7 @@ window.openLeagueModal = openLeagueModal; window.submitLeague = submitLeague; wi
 window.openMapModal = openMapModal; window.submitMap = submitMap; window.deleteMapping = deleteMapping;
 window.openEventModal = openEventModal; window.submitEvent = submitEvent; window.monitorEvent = monitorEvent; window.resolvePreview = resolvePreview; window.openCalEvent = openCalEvent;
 window.copyText = copyText; window.openCalendarFeedModal = openCalendarFeedModal; window.saveCalendarPublicBase = saveCalendarPublicBase; window.editCalendarPublicBase = editCalendarPublicBase;
+window.donate = donate;
 
 buildNav();
 // Mobile drawer wiring (hamburger toggles, scrim or a nav choice closes it).
