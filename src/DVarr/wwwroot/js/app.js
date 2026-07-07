@@ -116,7 +116,7 @@ function closeModals() { stopPreview(); $('#modalRoot').replaceChildren(); }
 // swallow the anchor's default navigation.
 function donate() {
   modal(`<h2>🍺 Buy me a beer for the next game</h2>
-    <iframe class="kofi-frame" src="https://ko-fi.com/haydenw22/?hidefeeditems=true&widget=true&embed=true" title="Support DVarr on Ko-fi" loading="lazy"></iframe>
+    <iframe class="kofi-frame" src="https://ko-fi.com/haydenw22/?hidefeed=true&widget=true&embed=true&preview=true" title="Support DVarr on Ko-fi" loading="lazy"></iframe>
     <div class="note" style="margin-top:12px">Panel not loading? <a href="https://ko-fi.com/haydenw22" target="_blank" rel="noopener">Open Ko-fi in a new tab ↗</a></div>`, 'min(420px,94vw)');
   return false;
 }

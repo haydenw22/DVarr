@@ -12,6 +12,12 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.31.2] — 2026-07-07
+Donation panel polish.
+
+### Changed
+- The in-app Ko-fi panel now hides the supporter feed (`hidefeed=true` — the previous `hidefeeditems` param only trimmed it), so the popup is just the donation form.
+
 ## [1.31.1] — 2026-07-07
 Support-the-creator link.
 
