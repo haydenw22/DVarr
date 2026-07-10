@@ -12,6 +12,12 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.32.0] — 2026-07-09
+Self-healing EPG channel matching — guide data for mis-tagged channels.
+
+### Fixed
+- **Channels whose provider gives a wrong or missing EPG id now get their guide back automatically.** Some IPTV providers hand a channel an `epg_channel_id` that doesn't exist in their own EPG (e.g. "AU: FOX SPORTS 503" tagged `FoxSports3.au` while the guide keys programmes under `foxsports503.au`), or no id at all — and the EPG itself may ship no channel definitions to name-match against, so the guide came up empty even though the programmes were present. On each EPG sync DVarr now, for any channel whose current id resolves to **zero** programmes, bridges its name to a live programme id by a collapsed-core match (`"AU: FOX SPORTS 503 HD"` ≈ `foxsports503.au`), records that as the matched id, and clears the dead provider id so the guide resolves. It's conservative — ambiguous or too-generic names are left alone — and only ever touches channels that had no working guide, so channels that already resolve are never changed. Verified on live data: healed the Fox Sports AU channels plus ~490 other mis-tagged AU/NZ/SG sports channels, with no effect on working channels.
+
 ## [1.31.2] — 2026-07-07
 Donation panel polish.
 

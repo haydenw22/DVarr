@@ -206,6 +206,12 @@ public sealed class EpgIngestService
     private static readonly HashSet<string> QualityTokens = new(StringComparer.Ordinal)
     { "hd", "fhd", "uhd", "sd", "fullhd", "4k", "8k", "raw", "hevc", "h265", "h264", "fps", "hq", "lq", "vip" };
 
+    // Region/country tokens dropped when collapsing a name to its "core" (see Core). Kept TIGHT — only unambiguous
+    // country/region codes, never a token that could be real content (e.g. NOT "tv"). Compared against MatchNorm's
+    // already-lowercased tokens; OrdinalIgnoreCase is belt-and-suspenders.
+    private static readonly HashSet<string> RegionTokens = new(StringComparer.OrdinalIgnoreCase)
+    { "au", "aus", "us", "usa", "uk", "gb", "nz", "ca", "ie", "za", "in", "sg", "ph", "my" };
+
     /// <summary>Normalise a channel name for matching: lowercase, strip to ASCII alphanumerics (drops the ## / superscript
     /// decorations IPTV names love), and remove quality tokens (HD/4K/RAW/…) so "AU: FOX SPORTS 503 HD" ≈ the EPG's name.</summary>
     private static string MatchNorm(string? s)
@@ -215,43 +221,118 @@ public sealed class EpgIngestService
         return string.Join(' ', new string(chars).Split(' ', StringSplitOptions.RemoveEmptyEntries).Where(t => !QualityTokens.Contains(t)));
     }
 
-    /// <summary>For channels with no provider epg_channel_id, set MatchedEpgId by normalised-name lookup into the EPG's
-    /// channel list. Only writes the rows whose match actually changed, in small batches off the write gate.</summary>
+    /// <summary>Collapsed-core id bridge: MatchNorm the string, DROP region/country tokens, then CONCATENATE the
+    /// remaining tokens with no spaces — bridging a provider's concatenated programme id to a spaced channel name.
+    /// Core("AU: FOX SPORTS 503 HD") == Core("foxsports503.au") == "foxsports503"; Core("US: FOX SPORTS 1 RAW") ==
+    /// Core("foxsports1.us") == "foxsports1". Heals channels whose provider tvg-id is wrong/empty but whose EPG keys
+    /// programmes under a concatenated id that ships no matching &lt;channel&gt; definition.</summary>
+    private static string Core(string? s)
+    {
+        var norm = MatchNorm(s);
+        if (norm.Length == 0) return "";
+        return string.Concat(norm.Split(' ', StringSplitOptions.RemoveEmptyEntries).Where(t => !RegionTokens.Contains(t)));
+    }
+
+    /// <summary>Self-heals the channel↔guide join for a source. For channels whose CURRENT EFFECTIVE id
+    /// (EpgChannelId ?? MatchedEpgId) has no guide, sets MatchedEpgId by (1) normalised-name lookup into the EPG's
+    /// &lt;channel&gt; list, then (2) a collapsed-core bridge against the ids that actually carry programmes. Both indexes
+    /// only hold ids that have programmes, so a match is always live. ADDITIONALLY clears a non-empty-but-DEAD provider
+    /// EpgChannelId (only once a live replacement match exists) so the unchanged Eff = EpgChannelId ?? MatchedEpgId at
+    /// every read site falls through to the new MatchedEpgId. Writes only the rows that change, in small batches off the
+    /// gate. Idempotent: a healed channel resolves live next run and is skipped, so working channels never change.</summary>
     private async Task BackfillMatchedEpgIdsAsync(int sourceId, Dictionary<string, string> nameIndex, HashSet<string> ambiguousNames, CancellationToken ct)
     {
-        if (nameIndex.Count == 0) return;
-        // Loads the source's untagged channels (tens of thousands of tiny {Id,Name} rows — a few MB, one-shot;
-        // the only non-batched read here, bounded by channel count). Writes only the rows whose match changed.
-        var chans = await _db.Channels
-            .Where(c => c.SourceId == sourceId && (c.EpgChannelId == null || c.EpgChannelId == ""))
-            .Select(c => new { c.Id, c.Name, c.MatchedEpgId }).ToListAsync(ct);
+        // The ids that ACTUALLY carry programmes for this source (a few thousand distinct rows — one query). A cheap EPG
+        // may key programmes under ids it never <channel>-defines (e.g. "foxsports503.au"), and the provider's
+        // get_live_streams may hand a channel a WRONG or empty tvg-id — so this, not the <channel> name list, is the
+        // source of truth for "does this id resolve to real guide rows".
+        var progIds = await _db.Programmes
+            .Where(p => p.SourceId == sourceId && p.EpgChannelId != null && p.EpgChannelId != "")
+            .Select(p => p.EpgChannelId!).Distinct().ToListAsync(ct);
 
-        var changed = new List<(int Id, string? Matched)>();
+        // Every id that has a guide (case-insensitive — Programme.EpgChannelId is COLLATE NOCASE, as the read sites join).
+        var hasProg = new HashSet<string>(progIds, StringComparer.OrdinalIgnoreCase);
+
+        // coreIndex: Core(id) → id over the ids that have programmes, so a channel whose provider id is wrong/dead can be
+        // bridged to a LIVE programme id by its collapsed core ("foxsports503"). Same ambiguity discipline as nameIndex:
+        // if two DIFFERENT ids collapse to one core, poison that core and never match it. Cores under MinCoreLen are too
+        // generic to trust. By construction every value here is in hasProg → a core match is ALWAYS live.
+        const int MinCoreLen = 5;
+        var coreIndex = new Dictionary<string, string>(StringComparer.Ordinal);
+        var coreAmbiguous = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var id in progIds)
+        {
+            var core = Core(id);
+            if (core.Length < MinCoreLen || coreAmbiguous.Contains(core)) continue;
+            if (coreIndex.TryGetValue(core, out var existing))
+            {
+                if (!string.Equals(existing, id, StringComparison.OrdinalIgnoreCase)) { coreAmbiguous.Add(core); coreIndex.Remove(core); }
+            }
+            else coreIndex[core] = id;
+        }
+
+        // Nothing to match against at all (no <channel> names AND no programme ids) → nothing to do.
+        if (nameIndex.Count == 0 && coreIndex.Count == 0) return;
+
+        // Load every channel of the source (tens of thousands of tiny rows — the method's accepted one-shot cost) and
+        // filter to CANDIDATES in memory (EF-translating a big NOT IN is bad). A candidate is a channel whose current
+        // effective id has NO guide; a channel already resolving to a live id is skipped — which is exactly why a channel
+        // with a LIVE provider EpgChannelId is never touched, and why the run is idempotent (a healed channel resolves
+        // live and is skipped next time).
+        var chans = await _db.Channels
+            .Where(c => c.SourceId == sourceId)
+            .Select(c => new { c.Id, c.Name, c.EpgChannelId, c.MatchedEpgId }).ToListAsync(ct);
+
+        // (Id, value to write to MatchedEpgId or null to leave it, whether to clear the dead provider EpgChannelId).
+        var changed = new List<(int Id, string? SetMatched, bool ClearProviderId)>();
         foreach (var c in chans)
         {
+            // Effective id today = EpgChannelId if non-empty, else MatchedEpgId — the exact rule the 4 read sites apply.
+            var effectiveId = !string.IsNullOrEmpty(c.EpgChannelId) ? c.EpgChannelId : c.MatchedEpgId;
+            // Already resolves to a live guide → leave it COMPLETELY alone. This single guard is what makes any working
+            // channel (live provider id OR already-name-matched) a non-candidate: zero writes, MatchedEpgId untouched.
+            if (!string.IsNullOrEmpty(effectiveId) && hasProg.Contains(effectiveId!)) continue;
+
+            // Match: display-name path FIRST (unchanged behaviour) so nothing about current successful matching changes;
+            // only if that misses do we try the collapsed-core bridge.
             var norm = MatchNorm(c.Name);
-            // Skip ambiguous norms (a name shared by >1 EPG channel) — better no guide than the wrong one.
             string? matched = norm.Length > 0 && !ambiguousNames.Contains(norm) && nameIndex.TryGetValue(norm, out var tv) ? tv : null;
-            // Only ADD/CHANGE a positive match; never downgrade an existing match to null on this run. A degraded or
-            // partial EPG (e.g. a stripped <channel> section) would otherwise wipe every previously-matched channel's
-            // guide with no last-known-good protection. A genuinely-gone match is left stale until a healthy resync.
-            if (matched != null && !string.Equals(matched, c.MatchedEpgId, StringComparison.OrdinalIgnoreCase)) changed.Add((c.Id, matched));
+            if (matched is null)
+            {
+                var core = Core(c.Name);
+                if (core.Length >= MinCoreLen && !coreAmbiguous.Contains(core) && coreIndex.TryGetValue(core, out var cv)) matched = cv;
+            }
+            if (matched is null) continue; // no match → never downgrade an existing MatchedEpgId to null
+
+            // A non-empty provider id that is confirmed DEAD is cleared so Eff falls through to MatchedEpgId — but ONLY
+            // when the replacement is confirmed LIVE (always true for a core match; also guards a degenerate empty-guide
+            // sync). Never clears a live provider id.
+            var clearProviderId = !string.IsNullOrEmpty(c.EpgChannelId) && !hasProg.Contains(c.EpgChannelId!) && hasProg.Contains(matched);
+            // Only a positive, CHANGED match writes MatchedEpgId; never null out an existing one (LKG protection).
+            var matchChanged = !string.Equals(matched, c.MatchedEpgId, StringComparison.OrdinalIgnoreCase);
+            if (matchChanged || clearProviderId) changed.Add((c.Id, matchChanged ? matched : null, clearProviderId));
         }
 
         for (var i = 0; i < changed.Count; i += 2000)
         {
             var slice = changed.GetRange(i, Math.Min(2000, changed.Count - i));
-            var map = slice.ToDictionary(x => x.Id, x => x.Matched);
+            var map = slice.ToDictionary(x => x.Id, x => (x.SetMatched, x.ClearProviderId));
             var ids = slice.Select(x => x.Id).ToList();
             await _gate.WriteAsync(async () =>
             {
                 var entities = await _db.Channels.Where(c => ids.Contains(c.Id)).ToListAsync(ct);
-                foreach (var e in entities) e.MatchedEpgId = map[e.Id];
+                foreach (var e in entities)
+                {
+                    var (setMatched, clear) = map[e.Id];
+                    if (setMatched != null) e.MatchedEpgId = setMatched; // only positive matches; never null out an existing match
+                    if (clear) e.EpgChannelId = null;                    // drop the confirmed-dead provider id (live replacement in hand)
+                }
                 await _db.SaveChangesAsync(ct);
                 _db.ChangeTracker.Clear();
             }, ct);
         }
-        _log.LogInformation("[EPG] Source {Id}: name-matched {N} channels to the EPG (no provider tvg-id)", sourceId, changed.Count(x => x.Matched != null));
+        _log.LogInformation("[EPG] Source {Id}: matched {N} channels to the EPG (name/core), cleared {D} dead provider tvg-ids",
+            sourceId, changed.Count(x => x.SetMatched != null), changed.Count(x => x.ClearProviderId));
     }
 
     /// <summary>Parse XMLTV time "yyyyMMddHHmmss [+/-HHMM]" to a UTC epoch.</summary>
