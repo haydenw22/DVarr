@@ -22,7 +22,7 @@ DVarr watches the leagues you follow on [TheSportsDB](https://www.thesportsdb.co
 - **Guide + calendar** — a fast EPG grid (click a programme to schedule it), a monthly calendar of everything followed, and a token-secured **ICS feed** you can subscribe to from Google Calendar.
 - **Mobile PWA** — install it on your phone; drawer navigation, card layouts and touch-sized controls, with zero functionality lost.
 - **Login with trusted devices** — HTTP Basic for scripts and automations, a cookie login page for browsers (180-day trusted devices), credentials set via Docker env vars, and a rate-limited login endpoint. Machine-to-machine surfaces (Plex, Home Assistant, IPTV export, health) carry their own tokens and stay reachable.
-- **Integrations** — Plex custom metadata provider, Sonarr-v3-compatible API for Prowlarr, Home Assistant status endpoint, credential-free M3U/XMLTV export for LAN IPTV players.
+- **Integrations** — Plex custom metadata provider, Sonarr-v3-compatible API, Home Assistant status endpoint, credential-free M3U/XMLTV export for LAN IPTV players.
 
 ---
 
