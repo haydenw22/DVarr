@@ -23,6 +23,9 @@ services:
       # (the container log warns while defaults are active).
       - DVARR_AUTH_USER=${DVARR_AUTH_USER:-user}
       - DVARR_AUTH_PASS=${DVARR_AUTH_PASS:-password}
+      # The official GHCR image ships with a built-in TheSportsDB key. A locally-built
+      # image doesn't — either paste a key in Settings → Data sources, or supply one here:
+      # - DVARR_TSDB_API_KEY=${DVARR_TSDB_API_KEY:-}
       # - HOME=/config          # if running as non-root, keep .NET from writing to /
     volumes:
       - /path/to/appdata:/config

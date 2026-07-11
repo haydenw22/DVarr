@@ -81,8 +81,9 @@ public sealed class SettingsService
         // last fired — persisted so a container redeploy after the fire time doesn't re-run the whole sync. Must live in
         // Defaults or EnsureDefaultsAsync's orphan-prune would delete the row on every boot.
         ["epg_auto_sync_last"] = "",
-        // TheSportsDB v2 API key (premium / Patreon), sent as the X-API-KEY header. Empty by default — v2 needs a real
-        // (paid) key; paste yours in Settings to unlock the full catalogue (AFL, NRL, all sports) + complete seasons.
+        // TheSportsDB v2 API key (premium / Patreon), sent as the X-API-KEY header. Empty by default = use the key
+        // BUNDLED with the build (baked into the official image; see TheSportsDbClient). Paste your own key here to
+        // override it. The bundled key itself never enters this table, so GET /api/settings can never expose it.
         // NOTE: a text setting whose default must NOT look numeric, or the /api/settings int-guard would reject a
         // numeric key that overflows Int32 (premium keys are 10 digits).
         ["thesportsdb_api_key"] = "",

@@ -37,6 +37,13 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=build /app/publish .
 
+# Optional bundled TheSportsDB v2 key, passed as a BuildKit SECRET (never an ARG/ENV — those leak via image
+# history / `docker inspect`). The GHCR publish workflow supplies it from the repo secret THESPORTSDB_API_KEY;
+# it lands base64-encoded in /app/tsdb.key, which TheSportsDbClient reads as the fallback when no key is entered
+# in Settings. Building without the secret just skips the file — source builds then need a key in Settings.
+RUN --mount=type=secret,id=tsdb_api_key \
+    if [ -s /run/secrets/tsdb_api_key ]; then base64 -w0 /run/secrets/tsdb_api_key > /app/tsdb.key; fi
+
 # Point the locator straight at the static build (deterministic — no reliance on PATH ordering).
 ENV DVarr__FfmpegPath=/usr/local/bin/ffmpeg \
     DVarr__FfprobePath=/usr/local/bin/ffprobe \

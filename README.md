@@ -97,18 +97,13 @@ DVARR_AUTH_PASS=a-long-random-password
 
 Five steps from empty container to fully automatic sports DVR: **log in → add your IPTV source → ingest channels + EPG → add a league → map it to channels.** Everything after that — event sync, scheduling, conflict planning, recording, filing for Plex — is automatic.
 
+League data works out of the box: the official image ships with a built-in [TheSportsDB](https://www.thesportsdb.com/) key, so the full catalogue and fixture sync need no sign-up. Prefer your own premium (v2) key? Paste it under **Settings → Data sources → TheSportsDB API key** and it takes over.
+
 ### 1 · First login
 
 Browse to `http://<host>:1867`. Sign in with the credentials from your `.env` (defaults are `user` / `password` — the container log warns until you change them). Tick **Trust this device** and the cookie lasts 180 days.
 
-### 2 · Get a TheSportsDB API key
-
-DVarr's league catalogue and fixture sync come from [TheSportsDB](https://www.thesportsdb.com/). The built-in free test key only exposes a small sample of leagues, so a real key is effectively required:
-
-1. Sign up at thesportsdb.com (a Patreon-supporter key unlocks the full v2 API).
-2. In DVarr: **Settings → Data Sources → TheSportsDB API key** → paste the key → **Save**.
-
-### 3 · Add your IPTV source
+### 2 · Add your IPTV source
 
 **Sources → Add source**, then fill in the details from your IPTV provider:
 
@@ -129,7 +124,7 @@ Save, then on the source's row click:
 
 Have multiple logins with the same provider? Add each as its **own source** — each becomes a tuner slot, and DVarr spreads simultaneous recordings across them.
 
-### 4 · Keep the EPG fresh (recommended)
+### 3 · Keep the EPG fresh (recommended)
 
 **Settings → Scheduling & EPG**:
 
@@ -137,7 +132,7 @@ Have multiple logins with the same provider? Add each as its **own source** — 
 - **EPG sync time / timezone** — pick a quiet hour in your local timezone.
 - **EPG re-pick** (on by default) — within ~1 hour of an event, DVarr re-checks each mapped channel's guide and records from the channel *actually showing the event*.
 
-### 5 · Add a league
+### 4 · Add a league
 
 **Leagues → Add league**:
 
@@ -152,7 +147,7 @@ Have multiple logins with the same provider? Add each as its **own source** — 
    - **Monitored** — leave ticked for automatic recording.
 4. Save, then hit **Sync** on the league's row to pull its fixtures immediately.
 
-### 6 · Map the league to channels
+### 5 · Map the league to channels
 
 Recording needs to know *where* the league airs. On the league's row click **Map**:
 
@@ -164,7 +159,7 @@ All fallbacks for a league must be on the **same provider login** — one stream
 
 **That's the setup done.** The dashboard shows what's planned; the Calendar shows every followed event; recordings start, survive drops, auto-extend, then get filed into `/media` with posters and `.nfo` metadata, ready for Plex.
 
-### 7 · Optional extras
+### 6 · Optional extras
 
 - **Plex** — DVarr ships a Plex Custom Metadata Provider (Plex 1.43+). In Plex: **Settings → Metadata Agents → Add Provider** → `http://<dvarr-lan-ip>:1867/plex` → restart Plex → point a **TV Shows** library at the DVarr agent. Real game titles and TheSportsDB artwork on every recording. Full instructions live in **DVarr → Settings → Plex**.
 - **Calendar subscription** — Calendar page → **Subscribe (ICS)** for a token-secured feed Google/Apple Calendar can poll. Set **Settings → Data Sources → Public base URL** if you access DVarr through a reverse proxy.

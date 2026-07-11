@@ -12,6 +12,12 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.33.0] — 2026-07-11
+Works out of the box — a TheSportsDB key now ships with the official image.
+
+### Added
+- **No more mandatory API-key sign-up.** The official GHCR image ships with a built-in TheSportsDB v2 key, so leagues browse and fixtures sync immediately on a fresh install. Pasting your own key under **Settings → Data sources → TheSportsDB API key** overrides it at any time; clearing the field switches back to the built-in key. The bundled key is injected at image-build time as a Docker BuildKit secret (from the `THESPORTSDB_API_KEY` repo secret) — it never appears in the repository, the image's env/history metadata, the Settings table, or the UI/API (`GET /api/settings` still returns only the user-entered value). Source/local-Docker builds don't include it; they can supply one via the `DVARR_TSDB_API_KEY` env var or in Settings, as before. Closes #2.
+
 ## [1.32.0] — 2026-07-09
 Self-healing EPG channel matching — guide data for mis-tagged channels.
 

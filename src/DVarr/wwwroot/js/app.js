@@ -923,7 +923,7 @@ const SETTINGS_META = {
     { v: '-300', l: 'UTC-05:00 — New York' },
     { v: '-480', l: 'UTC-08:00 — Los Angeles' },
   ] },
-  thesportsdb_api_key: { g: 'TheSportsDB', t: 'TheSportsDB API key', h: 'Your premium TheSportsDB (v2) key — required to browse leagues and sync fixtures.', ty: 'text' },
+  thesportsdb_api_key: { g: 'TheSportsDB', t: 'TheSportsDB API key', h: 'Optional — DVarr ships with a built-in key, used while this is blank. Paste your own premium TheSportsDB (v2) key to use it instead.', ty: 'text' },
   ha_webhook_url: { g: 'Integrations', t: 'Home Assistant webhook', h: 'Webhook URL to push recording state changes to Home Assistant. Blank = off.', ty: 'url' },
   public_base_url: { g: 'Integrations', t: 'Public base URL', h: 'Externally-reachable URL of this DVarr (e.g. https://dvr.example.com), used to build the away-from-home calendar-feed link. Blank = off.', ty: 'url' },
   default_channel_source_filter: { g: 'Display', t: 'Default channel filter', h: 'Which source’s channels to show by default (“all” or a source id).', ty: 'text' },
