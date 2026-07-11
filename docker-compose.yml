@@ -17,7 +17,8 @@ services:
     ports:
       - "1867:1867"
     environment:
-      - TZ=Etc/UTC              # your local timezone (display + log times; storage is UTC epoch regardless)
+      - TZ=Etc/UTC              # container/log timezone. The app's DISPLAY times follow Settings →
+                                # Data sources → Display timezone; storage is UTC epoch regardless.
       # Login for the web UI/API. Put the REAL values in an untracked `.env` file
       # next to this compose file — never commit them. Defaults to user/password
       # (the container log warns while defaults are active).

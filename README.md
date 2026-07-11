@@ -4,6 +4,7 @@
   <img alt=".NET 8" src="https://img.shields.io/badge/.NET-8.0-512BD4" />
   <img alt="SQLite" src="https://img.shields.io/badge/SQLite-WAL-003B57" />
   <img alt="Docker" src="https://img.shields.io/badge/Docker-single%20container-2496ED" />
+  <img alt="Unraid" src="https://img.shields.io/badge/Unraid-Community%20Apps-F15A2C" />
   <img alt="PWA" src="https://img.shields.io/badge/PWA-mobile%20ready-5A0FC8" />
   <img alt="License: GPL-3.0" src="https://img.shields.io/badge/License-GPL--3.0-blue" />
 </p>
@@ -18,7 +19,8 @@ DVarr watches the leagues you follow on [TheSportsDB](https://www.thesportsdb.co
 - **League automation** — add a league once; events, posters and season data sync from TheSportsDB. Follow a whole league, just one team (only their fixtures are scheduled), or — for motorsport — exactly the sessions you care about (Qualifying + Race, skip the practice grind).
 - **Sport-aware recording lengths** — an F1 practice, qualifying or sprint session books an hour; the race keeps a full three-hour window. Five resolution tiers mean a sensible default always exists and your override always wins.
 - **Smart auto-stop** — near the scheduled end, DVarr polls the live score and *extends* the recording in 15-minute steps while the match is still in play. Extra time and penalty shoot-outs land in the file; a race ending is never trimmed.
-- **Match-aware channel picking** — mappings are ranked fallbacks with optional pinning. An hour before start, DVarr re-checks the EPG (refreshing it if stale) and re-picks the channel actually showing your event, so a late programming change can't hijack the recording.
+- **Match-aware channel picking** — mappings are ranked fallbacks with optional pinning, and can be scoped to a **single team** for leagues where every club has its own channel (Yankees on YES Network, Mets on SNY — one mapping each, no guesswork). An hour before start, DVarr re-checks the EPG (refreshing it if stale) and re-picks the channel actually showing your event, so a late move to a national broadcaster can't hijack the recording.
+- **Works out of the box** — the official image ships with a built-in TheSportsDB key (no sign-up needed), and every time in the app follows your **Display timezone** setting, wherever in the world you and your server are.
 - **Guide + calendar** — a fast EPG grid (click a programme to schedule it), a monthly calendar of everything followed, and a token-secured **ICS feed** you can subscribe to from Google Calendar.
 - **Mobile PWA** — install it on your phone; drawer navigation, card layouts and touch-sized controls, with zero functionality lost.
 - **Login with trusted devices** — HTTP Basic for scripts and automations, a cookie login page for browsers (180-day trusted devices), credentials set via Docker env vars, and a rate-limited login endpoint. Machine-to-machine surfaces (Plex, Home Assistant, IPTV export, health) carry their own tokens and stay reachable.
@@ -62,19 +64,38 @@ DVarr watches the leagues you follow on [TheSportsDB](https://www.thesportsdb.co
 
 ---
 
-## Quick start (Docker Compose)
+## Install
 
-Requirements: Docker with Compose. That's it — the multi-stage [`Dockerfile`](Dockerfile) builds the .NET app and bundles ffmpeg.
+### Unraid (Community Apps) — the easy way
+
+DVarr is on **Unraid Community Apps**: open the **Apps** tab, search **DVarr**, install, and set the three paths (`/config` → appdata, `/media` and `/segments` → your array/pool) plus your web-UI username and password. Updates arrive through Unraid's normal container-update flow.
+
+### Docker / Docker Compose
+
+The official image is on GHCR (and includes the built-in TheSportsDB key):
 
 ```bash
-git clone https://github.com/haydenw22/DVarr.git
-cd DVarr
-# edit docker-compose.yml volume paths, then:
-docker compose up -d --build
-# UI → http://<host>:1867   ·   health → http://<host>:1867/api/health
+docker pull ghcr.io/haydenw22/dvarr:latest
 ```
 
-The repo's [`docker-compose.yml`](docker-compose.yml) is ready to use — set your three volume paths, your timezone, and real credentials in an untracked `.env` file:
+```yaml
+services:
+  dvarr:
+    image: ghcr.io/haydenw22/dvarr:latest
+    container_name: DVarr
+    restart: unless-stopped
+    ports:
+      - "1867:1867"
+    environment:
+      - DVARR_AUTH_USER=${DVARR_AUTH_USER:-user}
+      - DVARR_AUTH_PASS=${DVARR_AUTH_PASS:-password}
+    volumes:
+      - /path/to/appdata:/config
+      - /path/to/media:/media
+      - /path/to/segments:/segments
+```
+
+Put real credentials in an untracked `.env` file next to the compose file:
 
 ```env
 DVARR_AUTH_USER=yourname
@@ -89,7 +110,19 @@ DVARR_AUTH_PASS=a-long-random-password
 
 > **Provider model:** typical IPTV providers allow **one stream per login**, so DVarr's concurrency comes from multiple credentials (one tuner slot each). Fallback channels are structurally restricted to the same login — the schema itself rejects a cross-credential fallback.
 
-> **Unraid:** a Community Apps template is on the way. Until then, DVarr runs perfectly from Compose (or a manual Docker template) on Unraid — bind `/config` to appdata and `/media`/`/segments` to your array.
+### Build from source
+
+The repo's [`docker-compose.yml`](docker-compose.yml) builds the multi-stage [`Dockerfile`](Dockerfile) (the .NET app + bundled ffmpeg) locally:
+
+```bash
+git clone https://github.com/haydenw22/DVarr.git
+cd DVarr
+# edit docker-compose.yml volume paths, then:
+docker compose up -d --build
+# UI → http://<host>:1867   ·   health → http://<host>:1867/api/health
+```
+
+A locally-built image doesn't include the bundled TheSportsDB key — paste your own under **Settings → Data sources**, or supply `DVARR_TSDB_API_KEY` in the environment.
 
 ---
 
@@ -101,7 +134,9 @@ League data works out of the box: the official image ships with a built-in [TheS
 
 ### 1 · First login
 
-Browse to `http://<host>:1867`. Sign in with the credentials from your `.env` (defaults are `user` / `password` — the container log warns until you change them). Tick **Trust this device** and the cookie lasts 180 days.
+Browse to `http://<host>:1867`. Sign in with the credentials you configured (defaults are `user` / `password` — the container log warns until you change them). Tick **Trust this device** and the cookie lasts 180 days.
+
+While you're there, set **Settings → Data sources → Display timezone** to your IANA zone (e.g. `America/New_York`). Every time in the app — calendar, guide, recording windows — plus recording file dates and Plex air dates follow it, applied the moment you save.
 
 ### 2 · Add your IPTV source
 
@@ -152,8 +187,11 @@ Have multiple logins with the same provider? Add each as its **own source** — 
 Recording needs to know *where* the league airs. On the league's row click **Map**:
 
 1. Pick **Source → Group → Channel** (the channel box is a keyword search — type `bein`, `fox 503`, whatever matches).
-2. **Rank** — 1 is the first choice; add more mappings at rank 2, 3… as fallbacks. If rank 1 won't open or dies mid-event, DVarr fails over down the list automatically.
-3. **Pinned** — your pick beats EPG title-guessing. Leave it on unless you want DVarr free to reorder by guide match.
+2. **Team** *(optional, team sports)* — scope the mapping to one team's games. If every club airs on its own channel (the norm for US regional sports networks — Yankees on YES, Mets on SNY), add one mapping per team and each game records from its own team's channel automatically. A team mapping always beats a whole-league one for that team's games.
+3. **Rank** — 1 is the first choice; add more mappings at rank 2, 3… as fallbacks. If rank 1 won't open or dies mid-event, DVarr fails over down the list automatically.
+4. **Pinned** — your pick beats EPG title-guessing. Leave it on unless you want DVarr free to reorder by guide match.
+
+For **national broadcasts** (a game moved to FOX/ESPN and the like), also map those channels to the league, unpinned — the guide-match re-pick checks each mapped channel's EPG shortly before start and records from the channel actually listing the game.
 
 All fallbacks for a league must be on the **same provider login** — one stream per login means a mid-recording failover can't jump credentials (the schema enforces this).
 
