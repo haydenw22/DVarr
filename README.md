@@ -1,10 +1,4 @@
-<p align="center">
-  <img src="src/DVarr/wwwroot/dvarr-logo.png" alt="DVarr" width="96" />
-</p>
-
-<h1 align="center">DVarr</h1>
-
-<p align="center"><b>Self-hosted IPTV sports DVR with one overriding job: never miss a can't-miss live sports event.</b></p>
+![DVarr — self-hosted IPTV sports DVR](.github/media/hero.png)
 
 <p align="center">
   <img alt=".NET 8" src="https://img.shields.io/badge/.NET-8.0-512BD4" />
@@ -13,8 +7,6 @@
   <img alt="PWA" src="https://img.shields.io/badge/PWA-mobile%20ready-5A0FC8" />
   <img alt="License: GPL-3.0" src="https://img.shields.io/badge/License-GPL--3.0-blue" />
 </p>
-
-![Dashboard](.github/media/dashboard.png)
 
 DVarr watches the leagues you follow on [TheSportsDB](https://www.thesportsdb.com/), maps them to your IPTV channels, and records every event automatically — with a recorder built to survive feed drops, a scheduler that plans around your provider's stream limits, and guide intelligence that picks the right channel an hour before kick-off.
 
