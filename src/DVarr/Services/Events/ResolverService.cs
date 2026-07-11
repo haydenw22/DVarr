@@ -9,15 +9,20 @@ public sealed record ResolvedChannel(int ChannelId, int SourceId, int StreamId, 
 public sealed record ResolveResult(bool Ok, ResolvedChannel? Primary, List<ResolvedChannel> Fallbacks, double Confidence, string? Reason);
 
 /// <summary>
-/// Picks the channel for an event (docs/06 §5). A PINNED league→channel mapping carries a dominant
-/// PIN_FLOOR that EPG data can never outrank (fixes the bug #2 hijack); EPG is only a bounded bonus on
-/// an already-mapped channel; there is NO global confidence gate. Fallbacks are restricted to the SAME
-/// credential as the winner (bug #7 — never steal another login's only slot).
+/// Picks the channel for an event (docs/06 §5). A TEAM-scoped mapping (issue #5 — Yankees→YES, Mets→SNY
+/// inside one league) applies only to that team's games and carries a dominant TEAM_FLOOR above every
+/// league-wide mapping. Below that, a PINNED mapping carries a dominant PIN_FLOOR that EPG data can never
+/// outrank (fixes the bug #2 hijack); EPG is only a bounded bonus on an already-mapped channel; there is
+/// NO global confidence gate. Fallbacks are restricted to the SAME credential as the winner (bug #7 —
+/// never steal another login's only slot).
 /// </summary>
 public sealed class ResolverService
 {
     private const double PinFloor = 1000;
     private const double EpgBonusMax = 30;
+    // A team-scoped mapping matching one of the event's teams dominates every league-wide mapping (pinned or not),
+    // while pin/rank/EPG keep their existing order WITHIN the team-scoped set. Far above PinFloor + EpgBonusMax.
+    private const double TeamFloor = 10000;
 
     private readonly DVarrDbContext _db;
     private readonly ILogger<ResolverService> _log;
@@ -34,6 +39,13 @@ public sealed class ResolverService
         var maps = await _db.LeagueChannelMaps.Where(m => m.LeagueId == ev.LeagueId).OrderBy(m => m.Rank).ToListAsync(ct);
         if (maps.Count == 0) return new ResolveResult(false, null, new(), 0, "no channel mapping for this league");
 
+        // Team scope: a mapping with a TeamId applies ONLY to that team's games. Drop non-matching team-scoped rows
+        // (a Mets game must never land on the Yankees' channel); an event with no team ids (motorsport / missing
+        // data) keeps only the league-wide rows. League-wide mappings always stay as candidates/fallbacks.
+        bool TeamMatch(LeagueChannelMap m) => m.TeamId is { Length: > 0 } t && (t == ev.HomeTeamId || t == ev.AwayTeamId);
+        maps = maps.Where(m => string.IsNullOrEmpty(m.TeamId) || TeamMatch(m)).ToList();
+        if (maps.Count == 0) return new ResolveResult(false, null, new(), 0, "no channel mapping applies to this event (all mappings are scoped to other teams)");
+
         // Off-limits guard: never resolve to a channel on a disabled source, so the auto-scheduler can't even
         // create a Pending recording that would later try to contact it.
         var disabledSources = (await _db.Sources.Where(s => !s.Enabled).Select(s => s.Id).ToListAsync(ct)).ToHashSet();
@@ -45,11 +57,13 @@ public sealed class ResolverService
             if (ch is null || !ch.Enabled || disabledSources.Contains(ch.SourceId)) continue;
             if (restrictSourceId is { } rs && ch.SourceId != rs) continue;
 
-            // Pinned mappings dominate; ranked mappings score below them. EPG can only ADD a bounded bonus.
+            // Team-scoped mappings dominate for their team's games; below that, pinned mappings dominate ranked
+            // ones. EPG can only ADD a bounded bonus.
             var score = m.Pinned ? PinFloor - m.Rank : Math.Max(0, 100 - (m.Rank - 1) * 5);
+            if (TeamMatch(m)) score += TeamFloor;
             double epgSim = 0;
 
-            // For a date-only event we only know the day (anchored to Brisbane midnight) — match across the whole
+            // For a date-only event we only know the day (anchored to display-zone midnight) — match across the whole
             // local day; for a timed event keep the tight 30-min window. Pick the BEST-matching programme, not the
             // first arbitrary overlap, so a multi-programme day still resolves to the right title.
             // EPG now lives in a per-source, tvg-id-keyed table (decoupled from the channel row), so join by

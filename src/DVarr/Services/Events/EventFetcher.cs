@@ -53,7 +53,7 @@ public sealed class EventFetcher
         // gone. Take the first non-empty season (calendar-year, then split-year formats — don't mix adjacent seasons),
         // then best-effort merge the NEXT season so fixtures past the season boundary are still mapped. The full set is
         // what makes the chronological episode ordinal correct and the manual-import list complete.
-        var year = EpochTime.ToBrisbane(EpochTime.Now()).Year;
+        var year = EpochTime.ToDisplay(EpochTime.Now()).Year;
         string? hitSeason = null;
         foreach (var season in new[] { year.ToString(), $"{year}-{year + 1}", $"{year - 1}-{year}" })
         {
@@ -141,8 +141,7 @@ public static class IcsParser
             if (name.Contains("VALUE=DATE", StringComparison.OrdinalIgnoreCase) && value.Length == 8)
             {
                 var d = DateTime.ParseExact(value, "yyyyMMdd", CultureInfo.InvariantCulture);
-                var bne = new DateTimeOffset(d.Year, d.Month, d.Day, 0, 0, 0, EpochTime.BrisbaneOffset);
-                return (bne.ToUnixTimeSeconds(), true);
+                return (EpochTime.DisplayMidnightUtc(d.Year, d.Month, d.Day), true); // all-day → display-zone midnight
             }
             if (value.EndsWith("Z", StringComparison.OrdinalIgnoreCase))
             {
@@ -150,10 +149,10 @@ public static class IcsParser
                 return (new DateTimeOffset(dt, TimeSpan.Zero).ToUnixTimeSeconds(), false);
             }
             // A no-Z, non-DATE time is either floating local or TZID-qualified (e.g. DTSTART;TZID=Australia/Brisbane:...).
-            // We don't parse TZID, but this is a Brisbane-based deployment, so interpret it as Brisbane local rather
-            // than UTC (the old TimeSpan.Zero assumption shifted such events by 10h). (ICS is a legacy/dormant path.)
+            // We don't parse TZID; interpret it as the configured display zone rather than UTC (the old TimeSpan.Zero
+            // assumption shifted such events by the whole zone offset). (ICS is a legacy/dormant path.)
             if (DateTime.TryParseExact(value, "yyyyMMddTHHmmss", CultureInfo.InvariantCulture, DateTimeStyles.None, out var n))
-                return (new DateTimeOffset(n, EpochTime.BrisbaneOffset).ToUnixTimeSeconds(), false);
+                return (EpochTime.DisplayWallClockToUtc(n), false);
         }
         catch { }
         return (null, false);

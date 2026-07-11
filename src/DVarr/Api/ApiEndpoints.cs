@@ -417,7 +417,7 @@ public static class ApiEndpoints
                     .ToListAsync(ct);
                 if (evs.Count > 0) return Results.Json(evs);
             }
-            var year = (DateTime.TryParse(date, out var dy) ? dy.Year : EpochTime.ToBrisbane(EpochTime.Now()).Year).ToString();
+            var year = (DateTime.TryParse(date, out var dy) ? dy.Year : EpochTime.ToDisplay(EpochTime.Now()).Year).ToString();
             var live = (await tsdb.GetSeasonEventsAsync(leagueId, year, ct)).OrderBy(e => e.StartUtc ?? 0L)
                 .Select(e => new { id = e.Id, title = e.Title, date = e.StartUtc, round = e.Round }).ToList();
             return Results.Json(live);
@@ -621,8 +621,14 @@ public static class ApiEndpoints
                 // silently fall back to the default at runtime).
                 if (kv.Key == "epg_auto_sync_time" && !System.Text.RegularExpressions.Regex.IsMatch(kv.Value.Trim(), "^([01]?[0-9]|2[0-3]):[0-5][0-9]$"))
                     return Results.Json(new { error = $"setting '{kv.Key}' must be a time in HH:MM (24-hour) format" }, statusCode: 400);
+                // The display timezone must be a real IANA zone id — a typo would silently fall back to fixed +10
+                // everywhere times are shown or files are dated, which is exactly the bug this setting exists to fix.
+                if (kv.Key == "timezone_display" && EpochTime.ResolveZone(kv.Value) is null)
+                    return Results.Json(new { error = $"'{kv.Value}' is not a recognised timezone — use an IANA name like Australia/Brisbane or America/New_York" }, statusCode: 400);
             }
             foreach (var kv in values) await settings.SetAsync(kv.Key, kv.Value);
+            // Apply a timezone change immediately (UI clock, filenames, Plex air dates) — no restart needed.
+            if (values.TryGetValue("timezone_display", out var tzId)) EpochTime.SetDisplayZone(tzId);
             return Results.Json(await settings.GetAllAsync());
         });
 

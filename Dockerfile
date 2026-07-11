@@ -25,7 +25,7 @@ FROM mcr.microsoft.com/dotnet/aspnet:8.0
 ARG FFMPEG_ASSET=ffmpeg-n8.1-latest-linux64-gpl-8.1
 ARG FFMPEG_URL=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/${FFMPEG_ASSET}.tar.xz
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates wget xz-utils \
+    && apt-get install -y --no-install-recommends ca-certificates wget xz-utils tzdata \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /opt/ffmpeg \
     && wget -qO /tmp/ffmpeg.tar.xz "${FFMPEG_URL}" \

@@ -92,7 +92,11 @@ using (var scope = app.Services.CreateScope())
     var db = scope.ServiceProvider.GetRequiredService<DVarrDbContext>();
     await db.Database.MigrateAsync();
 
-    await scope.ServiceProvider.GetRequiredService<SettingsService>().EnsureDefaultsAsync();
+    var settingsSvc = scope.ServiceProvider.GetRequiredService<SettingsService>();
+    await settingsSvc.EnsureDefaultsAsync();
+    // Point display-time conversion (UI clock, filenames, Plex air dates) at the configured zone before anything renders.
+    EpochTime.SetDisplayZone(await settingsSvc.GetAsync("timezone_display"));
+    app.Logger.LogInformation("Display timezone: {Zone}", EpochTime.DisplayZone.Id);
     await scope.ServiceProvider.GetRequiredService<SourceSeeder>().SeedFromFileAsync(configDir);
 
     var gate = scope.ServiceProvider.GetRequiredService<DbWriteGate>();

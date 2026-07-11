@@ -152,7 +152,7 @@ public static class PlexEndpoints
             var l = await db.Leagues.FindAsync(leagueId);
             if (l is null) return (new List<object>(), 0);
             var years = (await db.Events.Where(e => e.LeagueId == leagueId).Select(e => e.StartUtc).ToListAsync())
-                .Select(s => EpochTime.ToBrisbane(s).Year).Distinct().OrderByDescending(y => y).ToList();
+                .Select(s => EpochTime.ToDisplay(s).Year).Distinct().OrderByDescending(y => y).ToList();
             return (years.Skip(start).Take(size).Select(y => (object)Season(l, y, origin)).ToList(), years.Count);
         }
         if (TryParseSeason(ratingKey, out var lId, out var year))
@@ -207,7 +207,7 @@ public static class PlexEndpoints
     private static object Episode(Event e, League l, int year, int epIndex, string origin)
     {
         var thumb = string.IsNullOrWhiteSpace(e.ThumbUrl) ? l.PosterUrl : e.ThumbUrl;
-        var aired = EpochTime.ToBrisbane(e.StartUtc).ToString("yyyy-MM-dd");
+        var aired = EpochTime.ToDisplay(e.StartUtc).ToString("yyyy-MM-dd");
         return new
         {
             ratingKey = $"dvarr-episode-{e.Id}",
@@ -252,7 +252,7 @@ public static class PlexEndpoints
             if (e is null) return null;
             var l = await db.Leagues.FindAsync(e.LeagueId);
             if (l is null) return null;
-            var yr = EpochTime.ToBrisbane(e.StartUtc).Year;
+            var yr = EpochTime.ToDisplay(e.StartUtc).Year;
             var evs = await SeasonEventsAsync(db, l.Id, yr);
             var idx = evs.FindIndex(x => x.Id == e.Id);
             return Episode(e, l, yr, idx >= 0 ? idx + 1 : 1, origin);
@@ -274,7 +274,7 @@ public static class PlexEndpoints
     {
         // ThenBy(Id): stable tie-break so this ordinal matches MediaImportService's on-disk SxxExx exactly.
         var all = await db.Events.Where(e => e.LeagueId == leagueId).OrderBy(e => e.StartUtc).ThenBy(e => e.Id).ToListAsync();
-        return all.Where(e => EpochTime.ToBrisbane(e.StartUtc).Year == year).ToList();
+        return all.Where(e => EpochTime.ToDisplay(e.StartUtc).Year == year).ToList();
     }
 
     private static bool TitleMatch(string? a, string? b)

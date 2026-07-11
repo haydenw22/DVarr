@@ -12,6 +12,21 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.34.0] — 2026-07-12
+Per-team channel mappings + the display timezone setting now actually works. (GitHub issues #4 and #5 — thanks to kamsheel and DrZacharySmith for the reports.)
+
+### Added
+- **Per-team channel mappings (issue #5).** A league mapping can now be scoped to ONE team: pick the team in the Map dialog and that channel is used only for games that team plays in, beating every whole-league mapping for them. This is how US regional sports networks work (Yankees on YES Network, Mets on SNY inside the one MLB league) — previously a single league-wide mapping sent every game to one channel. Team-scoped mappings never apply to other teams' games; mappings without a team behave exactly as before. Events already carry both teams' TheSportsDB ids (Phase 18), so existing schedules pick this up on the next re-resolve.
+- The mappings table shows the team scope, and the Leagues-page help now explains team mappings and the national-broadcast workflow.
+
+### Fixed
+- **The Display timezone setting is now actually used (issue #4).** `timezone_display` existed in Settings but nothing read it — every time in the UI was hardcoded to Australia/Brisbane, so a user in New York saw Brisbane times even after setting the timezone. All times in the app — dashboard, recording windows, calendar day-bucketing, guide, event modals, manual schedule/event forms — now render in the configured zone, applied immediately on save (no restart). The setting validates against the real IANA zone database, DST is handled properly (the old code was a fixed +10 offset), and an unresolvable zone falls back to the previous fixed +10 rather than breaking the page. Stored times were always correct UTC epochs — recordings always fired at the right instant; only the display was wrong.
+- **Server-side dates follow the display timezone too.** Recording filename date stamps, Plex air dates / season years / episode ordinals, auto-stop notification times, and date-only event anchoring (midnight in YOUR zone, not Brisbane's) all use `timezone_display` now. The Docker image explicitly ships tzdata.
+- **Guide-match channel pick can now move a game off its pinned/team channel when the guide shows it elsewhere.** The arm-window re-pick previously ranked candidates by total score, where a pin always dominates — so a nationally-broadcast game never actually moved. It now ranks by guide match: within ~1h of start, if the current channel's guide does NOT look like the event and another MAPPED channel's guide does (same credential, same thresholds + hysteresis as before), the recording moves there. Placement pins are untouched — a pinned channel whose guide shows the game is never abandoned, and manual channel choices (locked) are still never moved.
+
+### Changed
+- `/api/health` `time` now reports `local` + `zone` (the configured display zone) instead of `brisbane`.
+
 ## [1.33.0] — 2026-07-11
 Works out of the box — a TheSportsDB key now ships with the official image.
 

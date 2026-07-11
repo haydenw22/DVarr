@@ -57,7 +57,8 @@ public static class HealthEndpoints
                 time = new
                 {
                     utc_epoch = now,
-                    brisbane = EpochTime.ToBrisbane(now).ToString("yyyy-MM-dd HH:mm:ss zzz"),
+                    local = EpochTime.ToDisplay(now).ToString("yyyy-MM-dd HH:mm:ss zzz"),
+                    zone = EpochTime.DisplayZone.Id,
                 },
                 db = new { ok = dbOk, error = dbErr, mode = "sqlite-wal" },
                 // Concurrency ceiling == number of credentials (1 stream each).

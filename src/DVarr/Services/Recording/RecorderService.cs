@@ -309,7 +309,7 @@ public sealed class RecorderService
     private string BuildOutputPath(RecordingEntity rec, Channel ch)
     {
         var title = !string.IsNullOrWhiteSpace(rec.Title) ? rec.Title! : $"Recording {rec.Id}";
-        var stamp = EpochTime.ToBrisbane(rec.StartUtc).ToString("yyyy-MM-dd_HHmm");
+        var stamp = EpochTime.ToDisplay(rec.StartUtc).ToString("yyyy-MM-dd_HHmm");
         var name = $"{Sanitize(title)} [{stamp}].mkv";
         return Path.Combine(_paths.MediaDir, name);
     }

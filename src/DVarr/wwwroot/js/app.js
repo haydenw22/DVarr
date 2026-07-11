@@ -28,16 +28,26 @@ const esc = s => (s == null ? '' : String(s)).replace(/[<>&"]/g, c => ({ '<': '&
 // For a value embedded in a single-quoted JS string inside an HTML attribute: onclick="fn('${jsq(name)}')".
 // JS-escape \\ and ' first (the browser HTML-decodes the attribute BEFORE the JS runs), then HTML-escape &"<>.
 const jsq = s => esc(String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"));
-const brisbane = e => e ? new Date(e * 1000).toLocaleString('en-AU', { timeZone: 'Australia/Brisbane', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false }) : '—';
-const hhmm = e => e ? new Date(e * 1000).toLocaleString('en-AU', { timeZone: 'Australia/Brisbane', hour: '2-digit', minute: '2-digit', hour12: false }) : '';
+// Display timezone (Settings → Display timezone). Loaded from /api/settings before the first render and
+// re-applied on save; an unknown zone name is ignored so a typo can never blank every time on the page.
+let DISPLAY_TZ = 'Australia/Brisbane';
+function setDisplayTz(tz) { if (!tz) return; try { new Intl.DateTimeFormat('en', { timeZone: tz }); DISPLAY_TZ = tz; } catch { /* not a real IANA zone → keep current */ } }
+// Short human label for the active zone ("Australia/Brisbane" → "Brisbane", "America/New_York" → "New York").
+const tzLabel = () => (DISPLAY_TZ.split('/').pop() || DISPLAY_TZ).replace(/_/g, ' ');
+const dtime = e => e ? new Date(e * 1000).toLocaleString('en-AU', { timeZone: DISPLAY_TZ, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false }) : '—';
+const hhmm = e => e ? new Date(e * 1000).toLocaleString('en-AU', { timeZone: DISPLAY_TZ, hour: '2-digit', minute: '2-digit', hour12: false }) : '';
 const mb = b => b > 0 ? (b / 1e6).toFixed(1) + ' MB' : '—';
 const sc = s => 's-' + (s || '').toLowerCase();
 // Keyword (token) matching: "uk sports" matches "UK| Sports" and "Sky Sports UK".
 const norm = s => (s == null ? '' : String(s)).toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
 const tokensMatch = (hay, q) => { const n = norm(hay); return norm(q).split(' ').filter(Boolean).every(t => n.includes(t)); };
-// Epoch → value for a <input type=datetime-local> in the browser's local zone.
-const toLocalInput = e => new Date((e * 1000) - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+// UTC offset (seconds) of the display zone at a given instant, via Intl parts (DST-safe, no fixed constant).
+const tzOffsetSec = epochSec => { const p = {}; new Intl.DateTimeFormat('en-US', { timeZone: DISPLAY_TZ, year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: false }).formatToParts(new Date(epochSec * 1000)).forEach(x => p[x.type] = x.value); return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour % 24, +p.minute, +p.second) / 1000 - epochSec; };
+// Epoch → value for a <input type=datetime-local>, expressed in the DISPLAY timezone (matches every shown time).
+const toLocalInput = e => new Date((e + tzOffsetSec(e)) * 1000).toISOString().slice(0, 16);
 const nowLocalInput = () => toLocalInput(Math.floor(Date.now() / 1000));
+// datetime-local value (display-zone wall clock) → epoch; the second offset probe handles a DST boundary.
+const fromLocalInput = v => { const g = Math.floor(Date.parse(v + (v.length === 16 ? ':00Z' : 'Z')) / 1000); return g ? g - tzOffsetSec(g - tzOffsetSec(g)) : 0; };
 
 // 10-colour palette for league calendar cards — hues spread around the wheel so they're easy to tell apart.
 const LEAGUE_COLORS = ['#e6194b', '#f58231', '#ffd60a', '#84cc16', '#15803d', '#06b6d4', '#2563eb', '#7c3aed', '#db2777', '#78350f'];
@@ -47,12 +57,11 @@ const okColor = c => /^#[0-9a-fA-F]{6}$/.test(c || '');
 const leagueColor = l => (l && okColor(l.color)) ? l.color : LEAGUE_COLORS[((l && l.id || 0)) % LEAGUE_COLORS.length];
 // Black or white text for contrast on a hex background.
 const textOn = hex => { const c = (hex || '#000').replace('#', ''); const r = parseInt(c.substr(0, 2), 16) || 0, g = parseInt(c.substr(2, 2), 16) || 0, b = parseInt(c.substr(4, 2), 16) || 0; return (0.299 * r + 0.587 * g + 0.114 * b) > 150 ? '#0c0f14' : '#fff'; };
-// Brisbane (fixed UTC+10) helpers for the month calendar.
-const BNE_OFFSET = 10 * 3600;
-const bneDayKey = epochSec => Math.floor((epochSec + BNE_OFFSET) / 86400);            // unique day number in Brisbane
-const bneCellKey = (y, m, d) => Math.floor(Date.UTC(y, m, d) / 86400000);              // same scale for a calendar cell
-const bneMonthStart = (y, m) => Math.floor(Date.UTC(y, m, 1) / 1000) - BNE_OFFSET;     // epoch of Brisbane 1st 00:00
-const bneParts = epochSec => { const p = {}; new Intl.DateTimeFormat('en-AU', { timeZone: 'Australia/Brisbane', year: 'numeric', month: 'numeric', day: 'numeric' }).formatToParts(new Date(epochSec * 1000)).forEach(x => p[x.type] = x.value); return { y: +p.year, m: +p.month - 1, d: +p.day }; };
+// Display-timezone helpers for the month calendar (all day math goes through Intl parts — DST-safe).
+const tzParts = epochSec => { const p = {}; new Intl.DateTimeFormat('en-AU', { timeZone: DISPLAY_TZ, year: 'numeric', month: 'numeric', day: 'numeric' }).formatToParts(new Date(epochSec * 1000)).forEach(x => p[x.type] = x.value); return { y: +p.year, m: +p.month - 1, d: +p.day }; };
+const tzDayKey = epochSec => { const t = tzParts(epochSec); return Math.floor(Date.UTC(t.y, t.m, t.d) / 86400000); }; // unique day number in the display zone
+const tzCellKey = (y, m, d) => Math.floor(Date.UTC(y, m, d) / 86400000);              // same scale for a calendar cell
+const tzMonthStart = (y, m) => { const g = Math.floor(Date.UTC(y, m, 1) / 1000); return g - tzOffsetSec(g - tzOffsetSec(g)); }; // epoch of 00:00 on the 1st in the display zone
 
 const ACTIVE = ['Starting', 'Recording', 'Recovering', 'FailingOver', 'Degraded', 'Stopping', 'Finalizing'];
 // Terminal/finished states for the dashboard "Recently completed" panel (newest first).
@@ -197,7 +206,7 @@ async function pollHealth() {
   try {
     const h = await api.get('/api/health');
     $('#stSlots').textContent = `${h.sources.free_credentials} / ${h.sources.total} free`;
-    $('#stClock').textContent = h.time.brisbane.replace(/:\d\d /, ' ');
+    $('#stClock').textContent = (h.time.local || h.time.brisbane || '').replace(/:\d\d /, ' ');
     // topbar chips (same poll as before — no extra requests): slots dot + database health
     const sd = $('#stSlotsDot'); if (sd) sd.className = 'dot ' + (h.sources.free_credentials > 0 ? 'ok' : 'warn');
     const dd = $('#stDbDot'); if (dd) dd.className = 'dot ' + (h.db.ok ? 'ok' : 'bad');
@@ -305,7 +314,7 @@ function dashRecList(rows, leagues) {
     const active = ACTIVE.includes(r.state);
     return `<div class="prow clickrow" onclick="location.hash='#/recordings'">
       ${rowChip(r, leagues)}
-      <div class="prow-main"><b>${esc(r.title)}</b><div class="prow-sub">${brisbane(r.startUtc)}${r.channel ? ' · ' + esc(r.channel) : ''}</div></div>
+      <div class="prow-main"><b>${esc(r.title)}</b><div class="prow-sub">${dtime(r.startUtc)}${r.channel ? ' · ' + esc(r.channel) : ''}</div></div>
       <div class="prow-side"><span class="pill ${sc(r.state)}">${r.state}</span>${active ? `<button class="ghost sm" onclick="event.stopPropagation();stopRec(${r.id})">stop</button>` : ''}</div>
     </div>`;
   }).join('')}</div>`;
@@ -315,7 +324,7 @@ function completedTable(rows, leagues) {
   return `<div class="dash-rec">${rows.map(r => `
     <div class="prow clickrow" onclick="location.hash='#/recordings'">
       ${rowChip(r, leagues)}
-      <div class="prow-main"><b>${esc(r.title)}</b><div class="prow-sub">${brisbane(r.endUtc || r.startUtc)} · ${mb(r.bytesWritten)}</div></div>
+      <div class="prow-main"><b>${esc(r.title)}</b><div class="prow-sub">${dtime(r.endUtc || r.startUtc)} · ${mb(r.bytesWritten)}</div></div>
       <div class="prow-side"><span class="pill ${sc(r.state)}">${r.state}</span></div>
     </div>`).join('')}</div>`;
 }
@@ -376,7 +385,7 @@ PAGES.recordings = {
 };
 
 function recTable(rows, withActions) {
-  return `<table class="rtable"><thead><tr><th>Title</th><th>State</th><th>Channel</th><th>Source</th><th>Size</th><th>Window (Brisbane)</th>${withActions ? '<th></th>' : ''}</tr></thead><tbody>${rows.map(r => {
+  return `<table class="rtable"><thead><tr><th>Title</th><th>State</th><th>Channel</th><th>Source</th><th>Size</th><th>Window (${esc(tzLabel())})</th>${withActions ? '<th></th>' : ''}</tr></thead><tbody>${rows.map(r => {
     // Same conditions as the inline desktop buttons — the phone kebab mirrors them 1:1 so no action is lost.
     const pendingish = r.state === 'Pending' || r.state === 'Conflict';
     const stoppable = ACTIVE.includes(r.state) || pendingish;
@@ -386,7 +395,7 @@ function recTable(rows, withActions) {
       <td data-label="State"><span class="pill ${sc(r.state)}">${r.state}</span>${r.attemptCount ? ` <span class="muted" title="relaunch/failover attempts">↻${r.attemptCount}</span>` : ''}</td>
       <td data-label="Channel">${esc(r.channel)}</td><td data-label="Source" class="muted">${esc(r.source)}</td>
       <td data-label="Size" class="mono">${mb(r.bytesWritten)}</td>
-      <td data-label="Window" class="mono muted">${brisbane(r.startUtc)} – ${brisbane(r.endUtc)}</td>
+      <td data-label="Window" class="mono muted">${dtime(r.startUtc)} – ${dtime(r.endUtc)}</td>
       ${withActions ? `<td data-label="" class="row acts" style="gap:6px">${pendingish ? `<button class="sm" onclick="startRec(${r.id})" title="Start this recording now (early/manual)">start</button><button class="ghost sm" onclick="reresolveRec(${r.id})" title="Re-resolve the channel from the league's current mapping">re-resolve</button>` : ''}${stoppable ? `<button class="ghost sm" onclick="stopRec(${r.id})">stop</button>` : ''}${importable ? `<button class="sm" onclick="openImportModal(${r.id}, ${r.startUtc}, '${jsq(r.title || '')}')" title="Sort this manual recording into the library">import</button>` : ''}<button class="danger sm" onclick="delRec(${r.id})">delete</button>${kebab([
         pendingish && { label: 'Start now', fn: `startRec(${r.id})` },
         pendingish && { label: 'Re-resolve channel', fn: `reresolveRec(${r.id})` },
@@ -400,7 +409,7 @@ function recTable(rows, withActions) {
 function notesList(notes) {
   const col = s => s === 'Critical' ? 'var(--crit)' : s === 'Warn' ? 'var(--warn)' : 'var(--dim)';
   return `<table class="rtable"><tbody>${notes.map(n => `<tr>
-    <td data-label="" class="mono muted" style="width:120px">${brisbane(n.tsUtc)}</td>
+    <td data-label="" class="mono muted" style="width:120px">${dtime(n.tsUtc)}</td>
     <td data-label="" style="width:120px"><span class="tag" style="color:${col(n.severity)}">${esc(n.kind)}</span></td>
     <td data-label="">${esc(n.message || (n.fromState ? n.fromState + ' → ' + n.toState : ''))}${n.recordingId ? ` <span class="muted">#${n.recordingId}</span>` : ''}</td></tr>`).join('')}</tbody></table>`;
 }
@@ -409,7 +418,7 @@ function upcomingEvents(events, leagues) {
     const c = leagueColor(leagues.find(l => l.id === e.leagueId) || e);
     return `<div class="prow clickrow" onclick="openCalEvent(${e.id})">
       <span class="lg-dot" style="background:${c}"></span>
-      <div class="prow-main"><b>${esc(e.title)}</b><div class="prow-sub">${brisbane(e.start)} · ${esc(e.league)}</div></div>
+      <div class="prow-main"><b>${esc(e.title)}</b><div class="prow-sub">${dtime(e.start)} · ${esc(e.league)}</div></div>
       <div class="prow-side">${e.monitored ? '<span class="tag ok">monitored</span>' : ''}</div>
     </div>`;
   }).join('')}</div>`;
@@ -556,7 +565,7 @@ function renderGuide(wrap, g) {
   }).join('');
 
   wrap.innerHTML = `<div class="guide-scroll"><div class="guide-inner" style="--gch:${chCol}px;width:${chCol + trackW}px">
-    <div class="g-head"><div class="g-corner">${new Date(winStart * 1000).toLocaleDateString('en-AU', { timeZone: 'Australia/Brisbane', weekday: 'short', day: '2-digit', month: 'short' })}</div><div class="g-hours" style="width:${trackW}px">${ticks}</div></div>
+    <div class="g-head"><div class="g-corner">${new Date(winStart * 1000).toLocaleDateString('en-AU', { timeZone: DISPLAY_TZ, weekday: 'short', day: '2-digit', month: 'short' })}</div><div class="g-hours" style="width:${trackW}px">${ticks}</div></div>
     ${rows}
     ${(now >= winStart && now <= winEnd) ? `<div class="g-now" style="left:${chCol + xOf(now)}px"></div>` : ''}
   </div></div>`;
@@ -633,8 +642,10 @@ PAGES.leagues = {
         </td></tr>`).join('')}</tbody></table>` : emptyBox('No leagues yet. Add one and pin a channel to start auto-recording.')}</div>
       <div class="section"><h2>Channel mappings</h2>
         <div class="note">
-          <b>How mappings &amp; ranks work.</b> Each row maps a league to a channel. <b>Rank</b> is the order DVarr tries them — lowest first: <b>rank&nbsp;1</b> is the primary (first choice), rank&nbsp;2, 3… are fallbacks. When an event is due, DVarr records the best-ranked channel; if that channel <b>won't open or drops out</b>, it automatically walks down the list to the next working channel. Add a few channels that all carry the same event so there's always a backup.
+          <b>How mappings &amp; ranks work.</b> Each row maps a league — or one <b>team</b> in it — to a channel. <b>Rank</b> is the order DVarr tries them — lowest first: <b>rank&nbsp;1</b> is the primary (first choice), rank&nbsp;2, 3… are fallbacks. When an event is due, DVarr records the best-ranked channel; if that channel <b>won't open or drops out</b>, it automatically walks down the list to the next working channel. Add a few channels that all carry the same event so there's always a backup.
+          <div style="margin-top:6px"><b>Team mappings.</b> If each team airs on its own channel (common in US sports — e.g. Yankees on YES Network, Mets on SNY), pick the team in the Map dialog: that channel is then used <b>only for that team's games</b> and beats every whole-league mapping for them. Games are matched by team, so you don't need to map every channel in the league.</div>
           <div style="margin-top:6px"><b>★ Pinned</b> means your pick wins over EPG guesswork — a similar-looking guide entry can't hijack the recording. Unpinned mappings still work but let a strong EPG title match reorder them.</div>
+          <div style="margin-top:6px"><b>National broadcasts.</b> Also map the national channels (FOX, ESPN, …) to the league, unpinned. With <b>Guide-match channel pick</b> on (Settings → Scheduling &amp; EPG), DVarr re-checks each mapped channel's guide shortly before start and records from the channel that actually shows the game — so a game moved to a national channel is caught automatically.</div>
           <div class="muted" style="margin-top:6px;font-size:12px;line-height:1.5">All fallbacks must be on the <b>same provider login</b> as the primary (one stream per login). With <b>content check</b> on (Settings), DVarr also fails over when a channel is alive but stuck on a dead <b>black or frozen</b> slate. It does <b>not</b> watch the picture to decide whether the “right” match is on — that relies on your ranks, the EPG, and pre/post-padding, which is exactly why a pre-show/intro is captured rather than skipped.</div>
         </div>
         <div class="toolbar" style="margin:12px 0">
@@ -648,9 +659,9 @@ PAGES.leagues = {
       const lf = $('#mapLeagueFilter').value;
       const rows = lf ? maps.filter(m => String(m.leagueId) === lf) : maps;
       $('#mapCount').textContent = maps.length ? (lf ? `${rows.length} of ${maps.length} mapping${maps.length === 1 ? '' : 's'}` : `${maps.length} mapping${maps.length === 1 ? '' : 's'}`) : '';
-      $('#mapsWrap').innerHTML = rows.length ? `<table class="rtable"><thead><tr><th>League</th><th>Channel</th><th>Source</th><th>Rank</th><th>Pinned</th><th></th></tr></thead><tbody>${rows.map(m => {
+      $('#mapsWrap').innerHTML = rows.length ? `<table class="rtable"><thead><tr><th>League</th><th>Team</th><th>Channel</th><th>Source</th><th>Rank</th><th>Pinned</th><th></th></tr></thead><tbody>${rows.map(m => {
         const lg = ls.find(x => x.id === m.leagueId);
-        return `<tr><td data-label="">${esc(lg ? lg.name : '#' + m.leagueId)}</td><td data-label="Channel">${esc(m.channel)}</td><td data-label="Source" class="muted">${esc(m.source)}</td><td data-label="Rank" class="mono">${m.rank}</td><td data-label="Pinned">${m.pinned ? '★' : ''}</td><td data-label="" class="acts"><button class="danger sm" onclick="deleteMapping(${m.id})">Del</button>${kebab([{ label: 'Remove mapping', fn: `deleteMapping(${m.id})`, danger: true }])}</td></tr>`;
+        return `<tr><td data-label="">${esc(lg ? lg.name : '#' + m.leagueId)}</td><td data-label="Team" class="muted">${m.teamId ? esc(m.teamName || m.teamId) : 'whole league'}</td><td data-label="Channel">${esc(m.channel)}</td><td data-label="Source" class="muted">${esc(m.source)}</td><td data-label="Rank" class="mono">${m.rank}</td><td data-label="Pinned">${m.pinned ? '★' : ''}</td><td data-label="" class="acts"><button class="danger sm" onclick="deleteMapping(${m.id})">Del</button>${kebab([{ label: 'Remove mapping', fn: `deleteMapping(${m.id})`, danger: true }])}</td></tr>`;
       }).join('')}</tbody></table>` : emptyBox(lf ? 'No mappings for this league yet — use “Map” on it above.' : 'No mappings. Use “Map” on a league to pin a channel.');
     };
     $('#mapLeagueFilter').addEventListener('change', drawMaps);
@@ -670,10 +681,10 @@ PAGES.calendar = {
     const leagueFilter = params.get('league') || '';
     const ls = await api.get('/api/leagues'); window._leagues = ls;
     window._calEvents = {};
-    const today = bneParts(Math.floor(Date.now() / 1000));
+    const today = tzParts(Math.floor(Date.now() / 1000));
     // selDay drives the phone-only "selected day" list under the mini-grid (default = today); harmless on desktop.
-    const state = { y: today.y, m: today.m, league: leagueFilter, selDay: bneCellKey(today.y, today.m, today.d) };
-    let byDay = {}; // events bucketed by Brisbane day — shared by the grid and the phone day list
+    const state = { y: today.y, m: today.m, league: leagueFilter, selDay: tzCellKey(today.y, today.m, today.d) };
+    let byDay = {}; // events bucketed by display-zone day — shared by the grid and the phone day list
 
     el.innerHTML = `
       <div class="toolbar cal-toolbar">
@@ -695,7 +706,8 @@ PAGES.calendar = {
       const host = $('#calDayList'); if (!host) return;
       if (!phoneCal()) { host.innerHTML = ''; return; }
       const evs = byDay[state.selDay] || [];
-      const label = new Date((state.selDay * 86400 - BNE_OFFSET) * 1000).toLocaleDateString('en-AU', { timeZone: 'Australia/Brisbane', weekday: 'long', day: 'numeric', month: 'long' });
+      // selDay is a UTC-scale day number, so formatting it AT UTC yields that calendar date regardless of zone.
+      const label = new Date(state.selDay * 86400000).toLocaleDateString('en-AU', { timeZone: 'UTC', weekday: 'long', day: 'numeric', month: 'long' });
       host.innerHTML = `<div class="section"><h2>${esc(label)}</h2>${evs.length ? `<div class="panel"><div class="panel-body">${evs.map(e => {
         const c = leagueColor(ls.find(l => l.id === e.leagueId) || e);
         return `<div class="prow clickrow" onclick="openCalEvent(${e.id})"><span class="lg-dot" style="background:${c}"></span><div class="prow-main"><b>${esc(e.title)}</b><div class="prow-sub">${hhmm(e.start)} · ${esc(e.league)}</div></div><div class="prow-side">${e.monitored ? '<span class="tag ok">monitored</span>' : ''}</div></div>`;
@@ -713,36 +725,36 @@ PAGES.calendar = {
 
     const draw = async () => {
       $('#calTitle').textContent = `${MONTHS[state.m]} ${state.y}`;
-      const from = bneMonthStart(state.y, state.m);
-      const to = bneMonthStart(state.m === 11 ? state.y + 1 : state.y, (state.m + 1) % 12) - 1;
+      const from = tzMonthStart(state.y, state.m);
+      const to = tzMonthStart(state.m === 11 ? state.y + 1 : state.y, (state.m + 1) % 12) - 1;
       const events = await api.get(`/api/events?from=${from}&to=${to}${state.league ? `&leagueId=${state.league}` : ''}`);
       window._calEvents = {}; events.forEach(e => { window._calEvents[e.id] = e; });
 
-      // bucket events by Brisbane day
+      // bucket events by display-zone day
       byDay = {};
-      events.forEach(e => { (byDay[bneDayKey(e.start)] ||= []).push(e); });
+      events.forEach(e => { (byDay[tzDayKey(e.start)] ||= []).push(e); });
       Object.values(byDay).forEach(list => list.sort((a, b) => a.start - b.start));
 
       // build the month grid (weeks start Monday)
       const firstDow = (new Date(Date.UTC(state.y, state.m, 1)).getUTCDay() + 6) % 7; // 0=Mon
       const daysInMonth = new Date(Date.UTC(state.y, state.m + 1, 0)).getUTCDate();
-      const todayKey = bneCellKey(today.y, today.m, today.d);
+      const todayKey = tzCellKey(today.y, today.m, today.d);
       // Keep the phone day-list selection inside the displayed month (today when visible, else the 1st).
-      const monthFirstKey = bneCellKey(state.y, state.m, 1), monthLastKey = bneCellKey(state.y, state.m, daysInMonth);
+      const monthFirstKey = tzCellKey(state.y, state.m, 1), monthLastKey = tzCellKey(state.y, state.m, daysInMonth);
       if (state.selDay < monthFirstKey || state.selDay > monthLastKey)
         state.selDay = (todayKey >= monthFirstKey && todayKey <= monthLastKey) ? todayKey : monthFirstKey;
 
       let cells = '';
       for (let i = 0; i < firstDow; i++) cells += `<div class="cal-cell empty-cell"></div>`;
       for (let d = 1; d <= daysInMonth; d++) {
-        const key = bneCellKey(state.y, state.m, d);
+        const key = tzCellKey(state.y, state.m, d);
         const evs = byDay[key] || [];
         const isToday = key === todayKey;
         cells += `<div class="cal-cell${isToday ? ' today' : ''}${key === state.selDay ? ' sel' : ''}" data-day="${key}">
           <div class="cal-daynum">${d}</div>
           <div class="cal-events">${evs.map(e => {
           const bg = leagueColor(ls.find(l => l.id === e.leagueId) || e);
-          return `<div class="cal-ev" style="background:${bg};color:${textOn(bg)}" title="${esc(e.title)} · ${esc(e.league)} · ${brisbane(e.start)}" onclick="openCalEvent(${e.id})"><span class="cal-ev-t">${hhmm(e.start)}</span> ${esc(e.title)}</div>`;
+          return `<div class="cal-ev" style="background:${bg};color:${textOn(bg)}" title="${esc(e.title)} · ${esc(e.league)} · ${dtime(e.start)}" onclick="openCalEvent(${e.id})"><span class="cal-ev-t">${hhmm(e.start)}</span> ${esc(e.title)}</div>`;
         }).join('')}</div></div>`;
       }
       $('#calGrid').innerHTML = `<div class="cal-grid"><div class="cal-head">${DOW.map(d => `<div>${d}</div>`).join('')}</div><div class="cal-body">${cells}</div></div>`;
@@ -751,7 +763,7 @@ PAGES.calendar = {
 
     $('#calPrev').addEventListener('click', () => { if (state.m === 0) { state.m = 11; state.y--; } else state.m--; draw(); });
     $('#calNext').addEventListener('click', () => { if (state.m === 11) { state.m = 0; state.y++; } else state.m++; draw(); });
-    $('#calToday').addEventListener('click', () => { const t = bneParts(Math.floor(Date.now() / 1000)); state.y = t.y; state.m = t.m; draw(); });
+    $('#calToday').addEventListener('click', () => { const t = tzParts(Math.floor(Date.now() / 1000)); state.y = t.y; state.m = t.m; draw(); });
     $('#calSubscribe').addEventListener('click', openCalendarFeedModal);
     $('#calLeague').addEventListener('change', () => { state.league = $('#calLeague').value; draw(); });
     await draw();
@@ -763,7 +775,7 @@ function openCalEvent(id) {
   const dur = e.end ? Math.max(1, Math.round((e.end - e.start) / 60)) : 180;
   modal(`<h2>${esc(e.title)}</h2><div class="fields">
     <div class="muted">${esc(e.league)} · ${esc(e.sport || '')}</div>
-    <div>${brisbane(e.start)} (Brisbane)${e.dateOnly ? ' <span class="tag">date-only</span>' : ''} · <span class="tag">${esc(e.status)}</span></div>
+    <div>${dtime(e.start)} (${esc(tzLabel())})${e.dateOnly ? ' <span class="tag">date-only</span>' : ''} · <span class="tag">${esc(e.status)}</span></div>
     <div class="muted" style="font-size:12px">A <b>monitored</b> event auto-records on the league's pinned channel. “Resolve” previews which channel it picks.</div>
     </div><div class="foot">
       <button class="ghost" onclick="closeModals()">Close</button>
@@ -829,7 +841,7 @@ PAGES.activity = {
     el.innerHTML = `
       <div class="section"><h2>Notifications</h2>${notes.length ? notesList(notes) : emptyBox('No notifications yet.')}</div>
       <div class="section"><h2>Scheduler ticks</h2>${ticks.length ? `<table class="rtable"><thead><tr><th>Time</th><th>Examined</th><th>Started</th><th>Missed</th><th>Conflicts</th><th>ms</th></tr></thead><tbody>${ticks.map(t => `
-        <tr><td data-label="" class="mono muted">${brisbane(t.tickUtc)}</td><td data-label="Examined" class="mono">${t.recordingsExamined}</td><td data-label="Started" class="mono">${t.started}</td><td data-label="Missed" class="mono">${t.missed}</td><td data-label="Conflicts" class="mono">${t.conflicts}</td><td data-label="Duration (ms)" class="mono muted">${t.durationMs}</td></tr>`).join('')}</tbody></table>`
+        <tr><td data-label="" class="mono muted">${dtime(t.tickUtc)}</td><td data-label="Examined" class="mono">${t.recordingsExamined}</td><td data-label="Started" class="mono">${t.started}</td><td data-label="Missed" class="mono">${t.missed}</td><td data-label="Conflicts" class="mono">${t.conflicts}</td><td data-label="Duration (ms)" class="mono muted">${t.durationMs}</td></tr>`).join('')}</tbody></table>`
         : emptyBox('Scheduler has not ticked yet.')}</div>`;
   },
 };
@@ -847,7 +859,7 @@ PAGES.conflicts = {
     const conflictCards = conflicts.length ? conflicts.map(r => `
       <div class="card" style="border-color:var(--warn);margin-bottom:12px">
         <div style="min-width:0"><b>${esc(r.title || ('Recording #' + r.id))}</b>
-          <div class="muted" style="font-size:12px">${brisbane(r.startUtc)} – ${hhmm(r.endUtc)} · ${esc(r.reason || 'conflict')}</div></div>
+          <div class="muted" style="font-size:12px">${dtime(r.startUtc)} – ${hhmm(r.endUtc)} · ${esc(r.reason || 'conflict')}</div></div>
         <div class="row acts-row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
           ${enabled.map(s => `<button class="sm ghost" onclick="reassignRec(${r.id},${s.id})">Record on ${esc(s.label)}</button>`).join('')}
           <button class="sm" onclick="bumpRec(${r.id})">Bump to Can't-Miss</button>
@@ -865,7 +877,7 @@ PAGES.conflicts = {
           <div class="row" style="justify-content:space-between;gap:10px;border-bottom:1px solid var(--line);padding:7px 0">
             <div style="min-width:0">
               <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(r.title || ('Recording #' + r.id))}</div>
-              <div class="muted" style="font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(r.channel || '')} · ${brisbane(r.startUtc)}–${hhmm(r.endUtc)}</div>
+              <div class="muted" style="font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(r.channel || '')} · ${dtime(r.startUtc)}–${hhmm(r.endUtc)}</div>
             </div>
             <span class="pill ${sc(r.state)}">${esc(r.state)}</span>
           </div>`).join('') : `<div class="muted" style="font-size:12px">Idle.</div>`}
@@ -927,7 +939,7 @@ const SETTINGS_META = {
   ha_webhook_url: { g: 'Integrations', t: 'Home Assistant webhook', h: 'Webhook URL to push recording state changes to Home Assistant. Blank = off.', ty: 'url' },
   public_base_url: { g: 'Integrations', t: 'Public base URL', h: 'Externally-reachable URL of this DVarr (e.g. https://dvr.example.com), used to build the away-from-home calendar-feed link. Blank = off.', ty: 'url' },
   default_channel_source_filter: { g: 'Display', t: 'Default channel filter', h: 'Which source’s channels to show by default (“all” or a source id).', ty: 'text' },
-  timezone_display: { g: 'Display', t: 'Display timezone', h: 'IANA timezone used to show times (e.g. Australia/Brisbane).', ty: 'text' },
+  timezone_display: { g: 'Display', t: 'Display timezone', h: 'Timezone used to show every time in the app and to date recording files (IANA name, e.g. Australia/Brisbane or America/New_York).', ty: 'text' },
   litestream_target: { g: 'Backups', t: 'Litestream backup target', h: 'Continuous database backup destination (e.g. s3://bucket/path). Blank = off.', ty: 'url' },
 };
 function settingField(k, v) {
@@ -1148,7 +1160,7 @@ async function openScheduleModal(prefill = {}) {
       <label class="field">Recording name<input id="mName" value="${esc(prefill.title || '')}" placeholder="e.g. Adelaide Crows vs Carlton"/></label>
       <label class="field" style="flex-direction:row;align-items:center;gap:8px"><input id="mMatch" type="checkbox" style="width:auto" ${prefill.title ? 'checked' : ''}/> Match this name to TheSportsDB and rename for Plex when it finishes</label>
       <div class="row" style="gap:10px">
-        <label class="field grow">Start (local)<input id="mStart" type="datetime-local" value="${prefill.startLocal || nowLocalInput()}"/></label>
+        <label class="field grow">Start (${tzLabel()} time)<input id="mStart" type="datetime-local" value="${prefill.startLocal || nowLocalInput()}"/></label>
         <label class="field grow">Duration (minutes)<input id="mDur" type="number" value="${prefill.durationMin || 120}" min="1"/></label>
       </div>
     </div>
@@ -1168,7 +1180,7 @@ async function updatePlanBadge() {
   const channelId = parseInt($('#cascCh')?.value);
   const startStr = $('#mStart')?.value; const dur = parseInt($('#mDur')?.value) || 0;
   if (!channelId || !startStr || dur <= 0) { badge.style.display = 'none'; return; }
-  const start = Math.floor(new Date(startStr).getTime() / 1000);
+  const start = fromLocalInput(startStr);
   try {
     const r = await api.get(`/api/recordings/plan-preview?channelId=${channelId}&startUtc=${start}&endUtc=${start + dur * 60}`);
     badge.style.display = 'block';
@@ -1179,7 +1191,7 @@ async function updatePlanBadge() {
 async function submitSchedule() {
   const channelId = parseInt($('#cascCh').value);
   if (!channelId) return toast('Pick a channel', 'err');
-  const start = Math.floor(new Date($('#mStart').value).getTime() / 1000);
+  const start = fromLocalInput($('#mStart').value);
   if (!start) return toast('Pick a start time', 'err');
   const dur = (parseInt($('#mDur').value) || 120) * 60;
   const name = $('#mName').value.trim();
@@ -1198,7 +1210,7 @@ async function openImportModal(id, startUtc, title) {
   const sports = await api.get('/api/tsdb/sports');
   const dateStr = new Date(startUtc * 1000).toISOString().slice(0, 10);
   modal(`<h2>Import recording</h2>
-    <div class="muted" style="margin-bottom:10px">${esc(title || ('Recording #' + id))} · ${brisbane(startUtc)}</div>
+    <div class="muted" style="margin-bottom:10px">${esc(title || ('Recording #' + id))} · ${dtime(startUtc)}</div>
     <div class="fields">
       <label class="field">Sport<select id="impSport"><option value="">— pick a sport —</option>${sports.map(s => `<option value="${esc(s.name)}">${esc(s.name)}</option>`).join('')}</select></label>
       <label class="field">League<input id="impLeagueQ" placeholder="filter leagues (keyword)…" disabled/><select id="impLeague" disabled><option value="">— pick a sport first —</option></select></label>
@@ -1223,12 +1235,12 @@ async function openImportModal(id, startUtc, title) {
   // Game: a keyword search + custom ellipsis listbox writing the chosen id into #impGame (mirrors the schedule Channel step).
   const renderGames = () => {
     const q = $('#impGameQ').value;
-    const f = q ? games.filter(g => tokensMatch(g.title + ' ' + (g.date ? brisbane(g.date) : ''), q)) : games;
+    const f = q ? games.filter(g => tokensMatch(g.title + ' ' + (g.date ? dtime(g.date) : ''), q)) : games;
     const sel = $('#impGame').value;
     const list = $('#impGameList');
     if (!f.length) { list.innerHTML = `<div class="muted" style="padding:8px 11px">(no games)</div>`; return; }
     list.innerHTML = f.slice(0, 500).map(g => {
-      const label = g.title + (g.date ? ` — ${brisbane(g.date)}` : '');
+      const label = g.title + (g.date ? ` — ${dtime(g.date)}` : '');
       return `<div class="pickrow${String(g.id) === String(sel) ? ' sel' : ''}" role="option" data-id="${g.id}" title="${esc(label)}">${esc(label)}</div>`;
     }).join('');
   };
@@ -1349,6 +1361,7 @@ async function saveSettings() {
   if (badJson) { toast(`“${(SETTINGS_META[badJson] || {}).t || badJson}” isn’t valid JSON`, 'err'); return; }
   const r = await api.put('/api/settings', vals);
   if (r.error) { toast(r.error, 'err'); return; }
+  if (r.timezone_display) setDisplayTz(r.timezone_display); // times pick up the new zone on the next page draw
   const m = $('#setMsg'); if (m) { m.textContent = 'saved ✓'; setTimeout(() => { const e = $('#setMsg'); if (e) e.textContent = ''; }, 1800); }
 }
 
@@ -1527,17 +1540,32 @@ function openMapModal(leagueId, name) {
   const bg = modal(`<h2>Map channel — ${esc(name)}</h2>
     <div class="fields" id="mapCascade"></div>
     <div class="fields" style="margin-top:12px;border-top:1px solid var(--line);padding-top:12px">
+      <label class="field" id="mTeamWrap" style="display:none">Team — only this team's games use this channel<select id="mTeam"><option value="">Whole league (every game)</option></select></label>
       <label class="field">Rank — try order, 1 = first choice<input id="mRank" type="number" min="1" step="1" value="1"/></label>
       <label class="field" style="flex-direction:row;align-items:center;gap:8px"><input id="mPin" type="checkbox" checked style="width:auto"/> Pinned — your pick beats EPG guessing</label>
     </div>
-    <div class="muted" style="font-size:12px;margin-top:8px;line-height:1.5">Rank 1 records first; if it won't open or drops out, DVarr falls back to rank 2, 3… (same provider login). Map several channels carrying the same event for resilience.</div>
+    <div class="muted" style="font-size:12px;margin-top:8px;line-height:1.5">Rank 1 records first; if it won't open or drops out, DVarr falls back to rank 2, 3… (same provider login). Map several channels carrying the same event for resilience. If each team airs on its own channel (common in US sports — e.g. Yankees on YES, Mets on SNY), add one mapping per team using the Team picker.</div>
     <div class="foot"><button class="ghost" onclick="closeModals()">Cancel</button><button onclick="submitMap(${leagueId})">Add mapping</button></div>`, 'min(560px,94vw)');
   buildChannelCascade($('#mapCascade'), {});
+  // Team scope (issue #5): offer the league's team list (team sports only) so a channel can be mapped to ONE
+  // team's games. Followed teams sort first (they're the ones being recorded) and are starred.
+  const lg = (window._leagues || []).find(l => l.id === leagueId);
+  if (lg && lg.externalLeagueId) api.get(`/api/tsdb/league/${encodeURIComponent(lg.externalLeagueId)}`).then(d => {
+    if (!d || !d.teamSport || !Array.isArray(d.teams) || !d.teams.length) return;
+    const sel = $('#mTeam'); if (!sel) return; // modal was closed before the team list arrived
+    const followed = new Set((lg.monitoredTeams || []).map(t => String(t.id)));
+    const teams = [...d.teams].sort((a, b) => (followed.has(String(b.id)) - followed.has(String(a.id))) || String(a.name || '').localeCompare(String(b.name || '')));
+    sel.innerHTML = `<option value="">Whole league (every game)</option>` + teams.map(t => `<option value="${esc(t.id)}" data-name="${esc(t.name)}">${esc(t.name)}${followed.has(String(t.id)) ? ' ★' : ''}</option>`).join('');
+    $('#mTeamWrap').style.display = '';
+  }).catch(() => { /* team list is optional — the mapping still works league-wide */ });
 }
 async function submitMap(leagueId) {
   const channelId = parseInt($('#cascCh').value);
   if (!channelId) return toast('Pick a channel', 'err');
-  const body = { leagueId, channelId, rank: Math.max(1, parseInt($('#mRank').value) || 1), pinned: $('#mPin').checked };
+  const teamSel = $('#mTeam');
+  const teamId = teamSel && teamSel.value ? teamSel.value : null;
+  const teamName = teamId ? ((teamSel.selectedOptions[0] || {}).dataset || {}).name || null : null;
+  const body = { leagueId, channelId, rank: Math.max(1, parseInt($('#mRank').value) || 1), pinned: $('#mPin').checked, teamId, teamName };
   closeModals();
   const r = await api.post('/api/mappings', body); toast(r.error ? r.error : 'Mapping added', r.error ? 'err' : 'ok'); render();
 }
@@ -1549,13 +1577,13 @@ function openEventModal() {
   modal(`<h2>Add event</h2><div class="fields">
     <label class="field">League<select id="eLeague">${ls.map(l => `<option value="${l.id}">${esc(l.name)}</option>`).join('')}</select></label>
     <label class="field">Title<input id="eTitle" placeholder="Team A vs Team B"/></label>
-    <label class="field">Start (local)<input id="eStart" type="datetime-local" value="${nowLocalInput()}"/></label>
+    <label class="field">Start (${tzLabel()} time)<input id="eStart" type="datetime-local" value="${nowLocalInput()}"/></label>
     <label class="field">Duration (minutes)<input id="eDur" type="number" value="120"/></label>
     <label class="field" style="flex-direction:row;align-items:center;gap:8px"><input id="eMon" type="checkbox" checked style="width:auto"/> Monitored (auto-record)</label>
     </div><div class="foot"><button class="ghost" onclick="closeModals()">Cancel</button><button onclick="submitEvent()">Add event</button></div>`);
 }
 async function submitEvent() {
-  const start = Math.floor(new Date($('#eStart').value).getTime() / 1000);
+  const start = fromLocalInput($('#eStart').value);
   const dur = (parseInt($('#eDur').value) || 120) * 60;
   const body = { leagueId: parseInt($('#eLeague').value), title: $('#eTitle').value, startUtc: start, endUtc: start + dur, monitored: $('#eMon').checked };
   closeModals();
@@ -1616,9 +1644,14 @@ buildNav();
   const menu = $('#menu'); if (menu) menu.addEventListener('click', e => { if (e.target.closest('.nav-item')) closeDrawer(); });
 })();
 if (!location.hash) location.hash = '#/dashboard';
-render();
-pollHealth();
-setInterval(pollHealth, 5000);
+// Load the configured display timezone BEFORE the first paint so every time renders in the right zone from the
+// start (a failed fetch just keeps the Brisbane default — the page must never be blocked by this).
+(async () => {
+  try { const s = await api.get('/api/settings'); setDisplayTz(s && s.timezone_display); } catch { /* default stands */ }
+  render();
+  pollHealth();
+  setInterval(pollHealth, 5000);
+})();
 connectSSE();
 // Register the service worker so the app shell loads instantly (and works offline) once installed to the home screen.
 if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));

@@ -110,7 +110,7 @@ public static class LeagueEndpoints
                 // Motorsport: offer only the session kinds this league actually runs (V8 → just Race; F1 → the full set),
                 // classified from the current season's event titles. Non-motorsport, non-team sports (UFC, boxing, …) get
                 // neither a team picker nor a session picker — so skip the schedule fetch entirely for them.
-                var year = EpochTime.ToBrisbane(EpochTime.Now()).Year;
+                var year = EpochTime.ToDisplay(EpochTime.Now()).Year;
                 var evs = new List<TsdbEvent>();
                 foreach (var season in new[] { year.ToString(), (year - 1).ToString() })
                 {
@@ -374,7 +374,7 @@ public static class LeagueEndpoints
                     select new { m, channel = c != null ? c.Name : null, source = s != null ? s.Label : null };
             if (leagueId is > 0) q = q.Where(x => x.m.LeagueId == leagueId);
             var rows = await q.OrderBy(x => x.m.LeagueId).ThenBy(x => x.m.Rank).ToListAsync();
-            return Results.Json(rows.Select(x => new { x.m.Id, x.m.LeagueId, x.m.ChannelId, x.channel, x.m.SourceId, x.source, x.m.Rank, x.m.Pinned }));
+            return Results.Json(rows.Select(x => new { x.m.Id, x.m.LeagueId, x.m.ChannelId, x.channel, x.m.SourceId, x.source, x.m.Rank, x.m.Pinned, x.m.TeamId, x.m.TeamName }));
         });
 
         app.MapPost("/api/mappings", async (MappingCreate req, DVarrDbContext db, DbWriteGate gate) =>
@@ -382,12 +382,17 @@ public static class LeagueEndpoints
             var ch = await db.Channels.FindAsync(req.ChannelId);
             if (ch is null) return Results.BadRequest(new { error = "channel not found" });
             if (await db.Leagues.FindAsync(req.LeagueId) is null) return Results.BadRequest(new { error = "league not found" });
-            if (await db.LeagueChannelMaps.AnyAsync(x => x.LeagueId == req.LeagueId && x.ChannelId == ch.Id))
-                return Results.Json(new { error = "that channel is already mapped to this league" }, statusCode: 409);
+            // Optional team scope (issue #5): the same channel may be mapped league-wide AND per-team, so the
+            // duplicate guard is per (league, channel, team) — only an exact repeat is rejected.
+            var teamId = string.IsNullOrWhiteSpace(req.TeamId) ? null : req.TeamId!.Trim();
+            var teamName = teamId is null || string.IsNullOrWhiteSpace(req.TeamName) ? null : req.TeamName!.Trim();
+            if (await db.LeagueChannelMaps.AnyAsync(x => x.LeagueId == req.LeagueId && x.ChannelId == ch.Id && x.TeamId == teamId))
+                return Results.Json(new { error = teamId is null ? "that channel is already mapped to this league" : "that channel is already mapped to this league for that team" }, statusCode: 409);
             var m = new LeagueChannelMap
             {
                 LeagueId = req.LeagueId, ChannelId = ch.Id, SourceId = ch.SourceId, // denormalised owning credential
                 Rank = req.Rank is > 0 ? req.Rank!.Value : 1, Pinned = req.Pinned ?? true,
+                TeamId = teamId, TeamName = teamName,
             };
             await gate.WriteAsync(async () => { db.LeagueChannelMaps.Add(m); await db.SaveChangesAsync(); });
             return Results.Json(new { m.Id });
@@ -472,4 +477,4 @@ public sealed record TeamRef(string Id, string? Name);
 public sealed record LeagueUpsert(string? Sport, string? Name, string? Provider, string? ExternalLeagueId, string? IcsUrl, int? ScheduleHorizonDays, bool? Monitored, string? Color, int? EventDurationOverrideS, List<TeamRef>? MonitoredTeams, List<string>? MonitoredSessions, Dictionary<string, int>? SessionDurations, string? AutoStopMode, int? AutoStopMaxExtendS);
 public sealed record EventCreate(int LeagueId, string? Title, long StartUtc, long? EndUtc, bool? Monitored);
 public sealed record MonitorReq(bool Monitored);
-public sealed record MappingCreate(int LeagueId, int ChannelId, int? Rank, bool? Pinned);
+public sealed record MappingCreate(int LeagueId, int ChannelId, int? Rank, bool? Pinned, string? TeamId, string? TeamName);

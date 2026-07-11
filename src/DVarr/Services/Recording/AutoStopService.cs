@@ -214,7 +214,7 @@ public sealed class AutoStopService : BackgroundService
                         {
                             track.CapWarned = true;
                             await NotifyAsync(db, c.Id, Severity.Warn,
-                                $"cannot extend further (cap/slot boundary) — will stop at {EpochTime.ToBrisbane(c.RecEndUtc + c.PostPadS).ToString("HH:mm")}", ct);
+                                $"cannot extend further (cap/slot boundary) — will stop at {EpochTime.ToDisplay(c.RecEndUtc + c.PostPadS).ToString("HH:mm")}", ct);
                             _log.LogWarning("[AutoStop] Recording {Id} '{Title}': still in play but cannot extend further (cap/slot boundary)", c.Id, c.Title);
                         }
                     }
@@ -267,14 +267,14 @@ public sealed class AutoStopService : BackgroundService
             db.Notifications.Add(new Notification
             {
                 RecordingId = recId, TsUtc = now, Kind = NotificationKind.AutoExtended, Severity = Severity.Info,
-                Message = $"still in play ({statusText}) — extended to {EpochTime.ToBrisbane(newEnd).ToString("HH:mm")}",
+                Message = $"still in play ({statusText}) — extended to {EpochTime.ToDisplay(newEnd).ToString("HH:mm")}",
             });
             await db.SaveChangesAsync(ct);
             applied = true;
         }, ct);
         if (applied)
             _log.LogInformation("[AutoStop] Recording {Id}: still in play ({Status}) — extended end to {End} (Brisbane {Bne})",
-                recId, statusText, newEnd, EpochTime.ToBrisbane(newEnd).ToString("HH:mm"));
+                recId, statusText, newEnd, EpochTime.ToDisplay(newEnd).ToString("HH:mm"));
     }
 
     /// <summary>Trim an unused extension back to <paramref name="clampTo"/> (≥ the scheduled end, ≥ now — NEVER

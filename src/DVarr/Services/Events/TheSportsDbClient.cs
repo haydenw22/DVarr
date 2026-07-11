@@ -306,8 +306,7 @@ public sealed class TheSportsDbClient
             var time = Str(e, "strTime");
             if (!string.IsNullOrWhiteSpace(time) && TimeSpan.TryParse(time, out var tod))
                 return (new DateTimeOffset(d.Date.Add(tod), TimeSpan.Zero).ToUnixTimeSeconds(), false); // strTime is UTC
-            var bne = new DateTimeOffset(d.Year, d.Month, d.Day, 0, 0, 0, EpochTime.BrisbaneOffset); // date-only → Brisbane midnight
-            return (bne.ToUnixTimeSeconds(), true);
+            return (EpochTime.DisplayMidnightUtc(d.Year, d.Month, d.Day), true); // date-only → display-zone midnight
         }
         return (null, false);
     }

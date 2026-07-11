@@ -74,7 +74,12 @@ public sealed class EpgRepickService
         if (!res.Ok || res.Primary is null) return false;
         var all = new List<ResolvedChannel> { res.Primary };
         all.AddRange(res.Fallbacks);
-        var best = res.Primary;
+        // The guide's pick: among the mapped candidates, the channel whose EPG best matches the event (total score
+        // breaks ties). Judging by EpgScore — not total score — is what lets a nationally-broadcast game move OFF a
+        // pinned or team-scoped channel whose own guide doesn't show it (issue #5): the pin/team scope governs
+        // placement, the guide governs where the game actually airs. The MinEpgScore + Hysteresis gates below mean a
+        // channel whose guide DOES show the event is never abandoned on a weak or merely-similar match elsewhere.
+        var best = all.OrderByDescending(c => c.EpgScore).ThenByDescending(c => c.Score).First();
         var curEpg = all.FirstOrDefault(c => c.ChannelId == rec.ChannelId)?.EpgScore ?? 0;
         if (best.ChannelId == rec.ChannelId) return false;                       // already on the guide's pick
         if (best.EpgScore < MinEpgScore || best.EpgScore < curEpg + Hysteresis) return false; // move only for a real guide reason

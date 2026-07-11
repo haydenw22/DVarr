@@ -126,10 +126,10 @@ public sealed class MediaImportService
         // so the number is cosmetic; still enrich from TheSportsDB and number by chronological season position
         // (stable & sane) rather than day-of-year.
         var lk = await _tsdb.LookupLeagueAsync(resolvedLeagueId, ct);
-        var bne = EpochTime.ToBrisbane(ev.StartUtc ?? rec.StartUtc);
-        var ordinal = await TsdbSeasonOrdinalAsync(resolvedLeagueId, ev, bne.Year, ct);
+        var local = EpochTime.ToDisplay(ev.StartUtc ?? rec.StartUtc);
+        var ordinal = await TsdbSeasonOrdinalAsync(resolvedLeagueId, ev, local.Year, ct);
         var f = new Filing(
-            ev.League ?? lk?.Name ?? "Sports", ev.Sport ?? lk?.Sport, bne.Year, ordinal, ev.Title, bne.ToString("yyyy-MM-dd"),
+            ev.League ?? lk?.Name ?? "Sports", ev.Sport ?? lk?.Sport, local.Year, ordinal, ev.Title, local.ToString("yyyy-MM-dd"),
             lk?.Poster ?? ev.Poster, ev.Thumb ?? ev.Poster ?? lk?.Poster, $"tsdb-league-{resolvedLeagueId}", null);
         var path = await FileRecordingAsync(rec, current!, f, ct);
         return (true, path, null);
@@ -150,7 +150,7 @@ public sealed class MediaImportService
             if (idx >= 0) return idx + 1;
         }
         catch (Exception ex) { _log.LogDebug(ex, "[Media] TheSportsDB season-ordinal lookup failed for league {Lid}", leagueId); }
-        return ev.Round is > 0 ? ev.Round!.Value : EpochTime.ToBrisbane(ev.StartUtc ?? 0L).DayOfYear;
+        return ev.Round is > 0 ? ev.Round!.Value : EpochTime.ToDisplay(ev.StartUtc ?? 0L).DayOfYear;
     }
 
     /// <summary>Move + enrich the file into the Plex/Jellyfin per-game layout from a resolved Filing.
@@ -236,10 +236,10 @@ public sealed class MediaImportService
             var league = ev is null ? null : await _db.Leagues.FindAsync(new object?[] { ev.LeagueId }, ct);
             if (ev is not null && league is not null)
             {
-                var bne = EpochTime.ToBrisbane(ev.StartUtc);
-                var year = bne.Year;
+                var local = EpochTime.ToDisplay(ev.StartUtc);
+                var year = local.Year;
                 var ep = await SeasonOrdinalAsync(league.Id, year, ev.Id, ev.StartUtc, ct);
-                return new Filing(league.Name, league.Sport, year, ep, ev.Title, bne.ToString("yyyy-MM-dd"),
+                return new Filing(league.Name, league.Sport, year, ep, ev.Title, local.ToString("yyyy-MM-dd"),
                     league.PosterUrl, string.IsNullOrWhiteSpace(ev.ThumbUrl) ? league.PosterUrl : ev.ThumbUrl,
                     $"league-{league.Id}", ev.Id);
             }
@@ -250,14 +250,14 @@ public sealed class MediaImportService
         {
             try
             {
-                var year = EpochTime.ToBrisbane(rec.StartUtc).Year;
+                var year = EpochTime.ToDisplay(rec.StartUtc).Year;
                 var hits = await _tsdb.SearchEventsAsync(rec.MatchQuery!, year.ToString(), ct);
                 if (hits.Count == 0) hits = await _tsdb.SearchEventsAsync(rec.MatchQuery!, null, ct);
                 var best = PickBestMatch(hits, rec.StartUtc);
                 if (best is not null)
                 {
-                    var bne = EpochTime.ToBrisbane(best.StartUtc ?? rec.StartUtc);
-                    var bneYear = bne.Year;
+                    var local = EpochTime.ToDisplay(best.StartUtc ?? rec.StartUtc);
+                    var localYear = local.Year;
                     var poster = best.Poster;
                     if (!string.IsNullOrWhiteSpace(best.LeagueId))
                     {
@@ -269,8 +269,8 @@ public sealed class MediaImportService
                     // Event row to take a tournament ordinal from, so use the day-of-year (unique per day; the per-game
                     // folder also carries the full date + title, so same-day games never overwrite). Monitor an event
                     // instead of manual-scheduling it to get the clean chronological E-number (the event-linked path).
-                    var ep = bne.DayOfYear;
-                    return new Filing(best.League ?? rec.MatchQuery!, best.Sport, bneYear, ep, best.Title, bne.ToString("yyyy-MM-dd"),
+                    var ep = local.DayOfYear;
+                    return new Filing(best.League ?? rec.MatchQuery!, best.Sport, localYear, ep, best.Title, local.ToString("yyyy-MM-dd"),
                         poster, best.Thumb ?? best.Poster, $"tsdb-event-{best.Id}", null);
                 }
             }
@@ -285,14 +285,14 @@ public sealed class MediaImportService
         // ordinal exactly matches PlexEndpoints' episode index — without it Plex wouldn't match DVarr's own files.
         var ordered = await _db.Events.Where(e => e.LeagueId == leagueId).OrderBy(e => e.StartUtc).ThenBy(e => e.Id)
             .Select(e => new { e.Id, e.StartUtc }).ToListAsync(ct);
-        var inYear = ordered.Where(e => EpochTime.ToBrisbane(e.StartUtc).Year == year).ToList();
+        var inYear = ordered.Where(e => EpochTime.ToDisplay(e.StartUtc).Year == year).ToList();
         var idx = inYear.FindIndex(e => e.Id == eventId);
         if (idx >= 0) return idx + 1;
         // The event is always expected in its own league+year set, so this only fires if the row was deleted/re-keyed
         // between scheduling and finalize. Fall back to day-of-year (unique per day) rather than a silent E01 that
         // would collide with the real first event.
         _log.LogWarning("[Media] event {Eid} absent from league {Lid} year {Yr} ordinal set; using date fallback", eventId, leagueId, year);
-        return EpochTime.ToBrisbane(eventStartUtc).DayOfYear;
+        return EpochTime.ToDisplay(eventStartUtc).DayOfYear;
     }
 
     private static TsdbEvent? PickBestMatch(List<TsdbEvent> hits, long startUtc)

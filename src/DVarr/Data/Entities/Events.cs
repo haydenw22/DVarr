@@ -90,7 +90,7 @@ public class Event
     public long StartUtc { get; set; }
     public long? EndUtc { get; set; }
 
-    /// <summary>1 for ICS all-day events; anchored Brisbane-midnight→UTC (bug #11).</summary>
+    /// <summary>1 for date-only/all-day events; anchored display-zone-midnight→UTC (bug #11).</summary>
     public bool StartIsDateOnly { get; set; }
 
     public bool Monitored { get; set; } = true;
@@ -168,6 +168,13 @@ public class LeagueChannelMap
 
     public int Rank { get; set; }
     public bool Pinned { get; set; }
+
+    /// <summary>Optional team scope (TheSportsDB team id): when set, this mapping applies ONLY to events this team
+    /// plays in (home or away) — e.g. within one MLB league, Yankees→YES Network and Mets→SNY. Null = league-wide.
+    /// A team-scoped mapping outranks every league-wide one for its team's games (see ResolverService.TeamFloor).</summary>
+    public string? TeamId { get; set; }
+    /// <summary>Display-name snapshot for the scoped team (UI only; the id is authoritative).</summary>
+    public string? TeamName { get; set; }
 
     /// <summary>Denormalised owning credential (docs/06 §3.4).</summary>
     public int? SourceId { get; set; }
