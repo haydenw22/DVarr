@@ -19,7 +19,7 @@ DVarr watches the leagues you follow on [TheSportsDB](https://www.thesportsdb.co
 - **League automation** — add a league once; events, posters and season data sync from TheSportsDB. Follow a whole league, just one team (only their fixtures are scheduled), or — for motorsport — exactly the sessions you care about (Qualifying + Race, skip the practice grind).
 - **Sport-aware recording lengths** — an F1 practice, qualifying or sprint session books an hour; the race keeps a full three-hour window. Five resolution tiers mean a sensible default always exists and your override always wins.
 - **Smart auto-stop** — near the scheduled end, DVarr polls the live score and *extends* the recording in 15-minute steps while the match is still in play. Extra time and penalty shoot-outs land in the file; a race ending is never trimmed.
-- **Match-aware channel picking** — mappings are ranked fallbacks with optional pinning, and can be scoped to a **single team** for leagues where every club has its own channel (Yankees on YES Network, Mets on SNY — one mapping each, no guesswork). An hour before start, DVarr re-checks the EPG (refreshing it if stale) and re-picks the channel actually showing your event, so a late move to a national broadcaster can't hijack the recording.
+- **Match-aware channel picking** — mappings are ranked fallbacks with optional pinning, and can be scoped to a **single team** for leagues where each club airs on its own channel — one mapping per team, no guesswork. An hour before start, DVarr re-checks the EPG (refreshing it if stale) and re-picks the channel actually showing your event, so a late move to a national broadcaster can't hijack the recording.
 - **Works out of the box** — the official image ships with a built-in TheSportsDB key (no sign-up needed), and every time in the app follows your **Display timezone** setting, wherever in the world you and your server are.
 - **Guide + calendar** — a fast EPG grid (click a programme to schedule it), a monthly calendar of everything followed, and a token-secured **ICS feed** you can subscribe to from Google Calendar.
 - **Mobile PWA** — install it on your phone; drawer navigation, card layouts and touch-sized controls, with zero functionality lost.
@@ -187,7 +187,7 @@ Have multiple logins with the same provider? Add each as its **own source** — 
 Recording needs to know *where* the league airs. On the league's row click **Map**:
 
 1. Pick **Source → Group → Channel** (the channel box is a keyword search — type `bein`, `fox 503`, whatever matches).
-2. **Team** *(optional, team sports)* — scope the mapping to one team's games. If every club airs on its own channel (the norm for US regional sports networks — Yankees on YES, Mets on SNY), add one mapping per team and each game records from its own team's channel automatically. A team mapping always beats a whole-league one for that team's games.
+2. **Team** *(optional, team sports)* — scope the mapping to one team's games. If every club airs on its own channel (the norm for US regional sports networks), add one mapping per team and each game records from its own team's channel automatically. A team mapping always beats a whole-league one for that team's games.
 3. **Rank** — 1 is the first choice; add more mappings at rank 2, 3… as fallbacks. If rank 1 won't open or dies mid-event, DVarr fails over down the list automatically.
 4. **Pinned** — your pick beats EPG title-guessing. Leave it on unless you want DVarr free to reorder by guide match.
 
