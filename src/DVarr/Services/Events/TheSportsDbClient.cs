@@ -41,11 +41,39 @@ public sealed class TheSportsDbClient
 
     public TheSportsDbClient(HttpClient http, SettingsService settings, ILogger<TheSportsDbClient> log) { _http = http; _settings = settings; _log = log; }
 
-    // The premium v2 key (Settings → thesportsdb_api_key) is sent as the X-API-KEY header. Folded into cache keys so a
-    // key change re-fetches. The public test key "3" only works on the legacy v1 URL and 401s on v2, so treat both ""
-    // and the legacy "3" as "no key configured" — GetAsync then fails loudly with a clear message instead of firing
-    // doomed requests that look like "provider unreachable" (this also auto-clears a "3" left over from a v1.18 DB).
-    private async Task<string> KeyAsync() { var k = (await _settings.GetAsync("thesportsdb_api_key"))?.Trim(); return string.IsNullOrEmpty(k) || k == "3" ? "" : k; }
+    // The premium v2 key is sent as the X-API-KEY header. A user-entered key (Settings → thesportsdb_api_key) always
+    // wins; otherwise the key BUNDLED with the build is used, so the official image works out of the box with no
+    // sign-up. Folded into cache keys so a key change re-fetches. The public test key "3" only works on the legacy v1
+    // URL and 401s on v2, so treat both "" and the legacy "3" as "no key entered" — those fall through to the bundled
+    // key (this also auto-clears a "3" left over from a v1.18 DB). With neither, GetAsync fails loudly with a clear
+    // message instead of firing doomed requests that look like "provider unreachable".
+    private async Task<string> KeyAsync()
+    {
+        var k = (await _settings.GetAsync("thesportsdb_api_key"))?.Trim();
+        return !string.IsNullOrEmpty(k) && k != "3" ? k : _bundledKey.Value;
+    }
+
+    // The bundled key ships INSIDE the image, never in the repo or the UI: the GHCR publish workflow passes it as a
+    // BuildKit secret and the Dockerfile writes it base64-encoded to tsdb.key beside the app binaries (so it appears
+    // in neither `docker inspect` env output nor image history). DVARR_TSDB_API_KEY overrides for source/dev runs.
+    // It is deliberately kept OUT of the Settings table so GET /api/settings can never surface it.
+    private static readonly Lazy<string> _bundledKey = new(() =>
+    {
+        var env = Environment.GetEnvironmentVariable("DVARR_TSDB_API_KEY")?.Trim();
+        if (!string.IsNullOrEmpty(env)) return env;
+        try
+        {
+            var path = Path.Combine(AppContext.BaseDirectory, "tsdb.key");
+            if (File.Exists(path))
+            {
+                var raw = File.ReadAllText(path).Trim();
+                if (raw.Length > 0)
+                    return System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(raw)).Trim();
+            }
+        }
+        catch { /* unreadable/corrupt bundled key file → behave as if none was shipped */ }
+        return "";
+    });
 
     private async Task<T> CachedAsync<T>(string key, TimeSpan ttl, Func<Task<T>> factory)
     {
@@ -68,9 +96,10 @@ public sealed class TheSportsDbClient
         var key = await KeyAsync();
         if (key.Length == 0)
         {
-            // No premium key configured — every v2 call would 401. Don't fire it; surface a clear, actionable reason
-            // (rather than a generic 4xx that reads like a transient outage). HttpOkCount stays 0 → sync reports failure.
-            _log.LogWarning("[TSDB] {Path} skipped — no TheSportsDB v2 API key set (Settings → TheSportsDB API key); v2 requires a premium key", path);
+            // No key at all — this build shipped without a bundled key AND none was entered in Settings; every v2 call
+            // would 401. Don't fire it; surface a clear, actionable reason (rather than a generic 4xx that reads like a
+            // transient outage). HttpOkCount stays 0 → sync reports failure.
+            _log.LogWarning("[TSDB] {Path} skipped — this build has no bundled TheSportsDB key and no key is set (Settings → TheSportsDB API key); v2 requires a premium key", path);
             return null;
         }
         for (var attempt = 0; ; attempt++)

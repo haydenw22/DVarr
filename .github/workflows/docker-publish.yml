@@ -67,3 +67,9 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # Bundled TheSportsDB v2 key: set the repo secret THESPORTSDB_API_KEY (Settings ->
+          # Secrets and variables -> Actions) and it is baked into the image as a BuildKit
+          # secret (see Dockerfile) — never into the repo, image history, or container env.
+          # Users can still override it with their own key in DVarr's Settings.
+          secrets: |
+            tsdb_api_key=${{ secrets.THESPORTSDB_API_KEY }}
