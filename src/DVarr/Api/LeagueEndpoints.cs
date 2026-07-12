@@ -156,11 +156,14 @@ public static class LeagueEndpoints
                     if (followed.Count > 0)
                     {
                         var leagueEvents = await db.Events.Where(e => e.LeagueId == id)
-                            .Select(e => new { e.Id, e.HomeTeamId, e.AwayTeamId }).ToListAsync();
+                            .Select(e => new { e.Id, e.HomeTeamId, e.AwayTeamId, e.MonitoredLocked, e.Monitored }).ToListAsync();
                         // Out of scope == the team-follow filter (AutoScheduleService) would drop it: has at least one team
                         // id, and neither side is followed. Events with no team ids are kept there (fail-open), so skip them.
+                        // A MANUALLY armed event (locked + monitored) is never out of scope — the scheduler and calendar
+                        // both honour that latch, so the sweep must not cancel its recording either.
                         var outOfScope = leagueEvents.Where(e =>
-                            (e.HomeTeamId != null || e.AwayTeamId != null)
+                            !(e.MonitoredLocked && e.Monitored)
+                            && (e.HomeTeamId != null || e.AwayTeamId != null)
                             && !(e.HomeTeamId != null && followed.Contains(e.HomeTeamId))
                             && !(e.AwayTeamId != null && followed.Contains(e.AwayTeamId)))
                             .Select(e => e.Id).ToList();
@@ -183,9 +186,10 @@ public static class LeagueEndpoints
                     // (mirror the team cleanup — only Pending/Conflict, never an active capture).
                     if (followed.Count > 0)
                     {
-                        var leagueEvents = await db.Events.Where(e => e.LeagueId == id).Select(e => new { e.Id, e.Title }).ToListAsync();
+                        var leagueEvents = await db.Events.Where(e => e.LeagueId == id).Select(e => new { e.Id, e.Title, e.MonitoredLocked, e.Monitored }).ToListAsync();
                         var outOfScope = leagueEvents
-                            .Where(e => MotorsportSession.Classify(e.Title) is { } k && !followed.Contains(k))
+                            .Where(e => !(e.MonitoredLocked && e.Monitored) // manual arm survives a narrowed session filter
+                                        && MotorsportSession.Classify(e.Title) is { } k && !followed.Contains(k))
                             .Select(e => e.Id).ToList();
                         if (outOfScope.Count > 0)
                             await db.Recordings

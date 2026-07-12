@@ -150,7 +150,11 @@ public sealed class AutoScheduleService : BackgroundService
             .Where(x => x.Ids.Count > 0).ToDictionary(x => x.Id, x => x.Ids);
         if (followedTeams.Count > 0)
             candidates = candidates.Where(e =>
-                !followedTeams.TryGetValue(e.LeagueId, out var ids)
+                // A MANUALLY armed event (MonitoredLocked; Monitored is guaranteed by the pool query) always records,
+                // exactly like the calendar's follow filter (LeagueEndpoints.EventFollowed) — without this, a user
+                // could arm a non-followed team's match, see it "monitored" on the calendar, and never get a recording.
+                e.MonitoredLocked
+                || !followedTeams.TryGetValue(e.LeagueId, out var ids)
                 || (e.HomeTeamId != null && ids.Contains(e.HomeTeamId))
                 || (e.AwayTeamId != null && ids.Contains(e.AwayTeamId))
                 // Fail OPEN for an event with NO team ids at all (e.g. a not-yet-drawn final, or pre-v1.19 data): we
@@ -167,7 +171,8 @@ public sealed class AutoScheduleService : BackgroundService
             .Where(x => x.Kinds.Count > 0).ToDictionary(x => x.Id, x => x.Kinds);
         if (followedSessions.Count > 0)
             candidates = candidates.Where(e =>
-                !followedSessions.TryGetValue(e.LeagueId, out var kinds)
+                e.MonitoredLocked // manual arm always records (mirrors the team filter + the calendar's EventFollowed)
+                || !followedSessions.TryGetValue(e.LeagueId, out var kinds)
                 || MotorsportSession.Classify(e.Title) is not { } k
                 || kinds.Contains(k)).ToList();
 
@@ -269,6 +274,33 @@ public sealed class AutoScheduleService : BackgroundService
             }, ct);
             foreach (var x in reviveRows) handledEventIds.Remove(x.EventId);
             _log.LogInformation("[AutoSchedule] revived {N} event(s) whose recording was cancelled by a now-cleared postponement", reviveRows.Count);
+        }
+
+        // 1d) Revive events re-included by a WIDENED team/session follow filter. Narrowing the filter sweep-cancels
+        // Pending/Conflict recordings (LeagueEndpoints PUT, the FailureReason markers below); that Cancelled row then
+        // keeps the event in handledEventIds forever, so removing a team and later re-adding it would silently never
+        // record its events again. Mirror 1c: reclaim ONLY filter-sweep-cancelled rows whose event is back in TODAY'S
+        // candidate pool (it passes the current filters), delete the dead row and drop the event from handledEventIds
+        // so 2b re-places it fresh. A user's own cancellation carries a different/absent reason and stays terminal.
+        var candidateIds = candidates.Select(e => e.Id).ToHashSet();
+        if (candidateIds.Count > 0)
+        {
+            var filterRevive = await db.Recordings.AsNoTracking()
+                .Where(r => r.State == RecordingState.Cancelled && r.EventId != null && candidateIds.Contains(r.EventId.Value)
+                            && (r.FailureReason == "team removed from team-follow filter"
+                                || r.FailureReason == "session removed from session-follow filter"))
+                .Select(r => new { r.Id, EventId = r.EventId!.Value }).ToListAsync(ct);
+            if (filterRevive.Count > 0)
+            {
+                var ids = filterRevive.Select(x => x.Id).ToList();
+                await _gate.WriteAsync(async () =>
+                {
+                    await db.RecordingFallbacks.Where(f => ids.Contains(f.RecordingId)).ExecuteDeleteAsync(ct);
+                    await db.Recordings.Where(r => ids.Contains(r.Id) && r.State == RecordingState.Cancelled).ExecuteDeleteAsync(ct);
+                }, ct);
+                foreach (var x in filterRevive) handledEventIds.Remove(x.EventId);
+                _log.LogInformation("[AutoSchedule] revived {N} event(s) re-included by a widened team/session follow filter", filterRevive.Count);
+            }
         }
 
         // 2a) Re-evaluate parked conflicts FIRST (they have been waiting): a freed slot promotes one back to Pending.

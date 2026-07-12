@@ -8,7 +8,7 @@
     <AssemblyName>DVarr</AssemblyName>
     <!-- SemVer (see CHANGELOG.md). MAJOR=generational leap (still 1), MINOR=new functionality/major fixes,
          PATCH=minor fixes/polish. Surfaced on /api/health and the UI. Bump this with every CHANGELOG entry. -->
-    <Version>1.35.0</Version>
+    <Version>1.35.1</Version>
     <!-- Invariant globalization affects CULTURES only, not time zones: timezone_display resolves IANA zones from the
          OS tz database (tzdata ships in the image; EpochTime falls back to fixed +10 if a zone can't be resolved). -->
     <InvariantGlobalization>true</InvariantGlobalization>
@@ -22,8 +22,13 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="8.0.10" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.10">
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="8.0.28" />
+    <!-- Direct override of the transitive native SQLite build: every 2.x lib.e_sqlite3 (≤ 2.1.11) carries the
+         GHSA-2m69-gcr7-jv3q advisory and the 2.x line has no patched release — the fix line is 3.x, versioned by
+         the bundled SQLite (3.53.x). Only the NATIVE binary is swapped; the managed SQLitePCLRaw wrapper/provider
+         stays at what EF pins, and the SQLite C API is stable across this range. -->
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="3.53.3" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.28">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>

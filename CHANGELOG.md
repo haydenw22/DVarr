@@ -12,7 +12,15 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
-## [1.35.0] — 2026-07-12
+## [1.35.1] — 2026-07-12
+Bug-audit batch: five fixes from an external code audit, all verified against a live instance.
+
+### Fixed
+- **Manually-armed events now always record.** The scheduler's team-follow and session-follow filters dropped an event the user had manually monitored (the calendar showed it as monitored, but no recording was ever created), and narrowing a follow filter could cancel a manually-armed event's existing recording. Both paths now honour the manual-arm latch, matching the calendar's follow logic.
+- **Re-adding a followed team/session re-records its events.** Narrowing a follow filter sweep-cancels not-yet-started recordings; that Cancelled row then blocked the event from ever being re-scheduled, so removing a team and later re-adding it silently lost its games. Filter-sweep-cancelled recordings are now revived (deleted + re-planned fresh) once their event passes the current filters again. A user's own cancellation stays terminal.
+- **Segment filename collisions on instant relaunch.** A relaunched capture within the same wall-clock second (clean-EOF instant relaunch, or the 0s first retry) reused the previous process's segment filename and truncated it, losing up to 8s of already-captured footage on a flappy line. Segment names now carry a per-launch counter.
+- **Xtream API calls honour the source's custom User-Agent.** Auth, channel ingest, categories and short-EPG always sent the default VLC UA even when a custom one was configured — providers that gate every call on UA would fail discovery while streams worked.
+- **Patched a High-severity vulnerability in the bundled SQLite native library** (GHSA-2m69-gcr7-jv3q, `SQLitePCLRaw.lib.e_sqlite3` 2.1.6). Every 2.x release is affected, so the native library is overridden to the patched 3.53.x line (SQLite 3.53); the managed data stack is unchanged apart from EF Core 8.0.10 → 8.0.28. Migrations, WAL mode and reads/writes verified on the new native build.
 Preview fix, unwatchable-recording fix, and channel picks that show up days ahead. (GitHub issues #7, #8 and #9.)
 
 ### Fixed

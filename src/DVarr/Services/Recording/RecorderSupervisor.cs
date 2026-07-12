@@ -76,6 +76,7 @@ public sealed class RecorderSupervisor
         Directory.CreateDirectory(segDir);
         var url = initialUrl;
         var attempt = 0;
+        var launchSeq = 0; // per-ffmpeg-launch counter baked into segment names (see CaptureUntilStopOrStallAsync)
         var fallbacksUsed = 0;
         var cleanEofWindow = new Queue<long>(); // wall-clock marks of recent clean EOFs (flap detector)
 
@@ -108,7 +109,7 @@ public sealed class RecorderSupervisor
             {
                 try
                 {
-                    var exit = await CaptureUntilStopOrStallAsync(recordingId, url, segDir, CurrentWindowEndAsync, stallTimeoutS, nativeRate, contentVerify, contentDeadTimeoutS, contentVerifyHwaccel, contentVerifyFps, userAgent, lease, stopToken);
+                    var exit = await CaptureUntilStopOrStallAsync(recordingId, url, segDir, CurrentWindowEndAsync, stallTimeoutS, nativeRate, contentVerify, contentDeadTimeoutS, contentVerifyHwaccel, contentVerifyFps, userAgent, lease, ++launchSeq, stopToken);
 
                     // Normal end of window or explicit stop → leave the capture loop and finalize.
                     if (stopToken.IsCancellationRequested || EpochTime.Now() >= await CurrentWindowEndAsync())
@@ -277,9 +278,13 @@ public sealed class RecorderSupervisor
     private async Task<CaptureExit> CaptureUntilStopOrStallAsync(
         int recordingId, string url, string segDir, Func<Task<long>> windowEndAsync, int stallTimeoutS, bool nativeRate,
         bool contentVerify, int contentDeadTimeoutS, string? contentVerifyHwaccel, int contentVerifyFps,
-        string? userAgent, TunerLease lease, CancellationToken stopToken)
+        string? userAgent, TunerLease lease, int launchSeq, CancellationToken stopToken)
     {
-        var pattern = Path.Combine(segDir, "seg-%Y%m%d-%H%M%S.ts");
+        // The per-launch counter keeps names unique across relaunches: an instant relaunch (clean-EOF path or the
+        // 0s first backoff) within the SAME wall-clock second would otherwise reuse the previous process's last
+        // segment filename and truncate it — losing up to 8s of already-captured footage on a flappy line. Ordinal
+        // filename sort (finalize) still yields capture order: same-second files differ only by the L counter.
+        var pattern = Path.Combine(segDir, $"seg-%Y%m%d-%H%M%S-L{launchSeq:D3}.ts");
         var psi = new ProcessStartInfo(_d.Ffmpeg.Ffmpeg)
         {
             RedirectStandardInput = true,

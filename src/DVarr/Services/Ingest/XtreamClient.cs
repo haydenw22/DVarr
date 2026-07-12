@@ -54,21 +54,22 @@ public sealed class XtreamClient
         => $"{BaseUrl(s)}/live/{Uri.EscapeDataString(s.Username)}/{Uri.EscapeDataString(s.Password)}/{streamId}.ts";
 
     public Task<XtreamAuthResponse?> AuthAsync(ProviderSource s, CancellationToken ct = default)
-        => GetAsync<XtreamAuthResponse>(Api(s, ""), ct);
+        => GetAsync<XtreamAuthResponse>(Api(s, ""), s.UserAgent, ct);
 
     public async Task<List<XtreamLiveStream>> GetLiveStreamsAsync(ProviderSource s, CancellationToken ct = default)
-        => await GetAsync<List<XtreamLiveStream>>(Api(s, "&action=get_live_streams"), ct) ?? new();
+        => await GetAsync<List<XtreamLiveStream>>(Api(s, "&action=get_live_streams"), s.UserAgent, ct) ?? new();
 
     public async Task<List<XtreamCategory>> GetLiveCategoriesAsync(ProviderSource s, CancellationToken ct = default)
-        => await GetAsync<List<XtreamCategory>>(Api(s, "&action=get_live_categories"), ct) ?? new();
+        => await GetAsync<List<XtreamCategory>>(Api(s, "&action=get_live_categories"), s.UserAgent, ct) ?? new();
 
     public Task<XtreamShortEpgResponse?> GetShortEpgAsync(ProviderSource s, int streamId, int limit, CancellationToken ct = default)
-        => GetAsync<XtreamShortEpgResponse>(Api(s, $"&action=get_short_epg&stream_id={streamId}&limit={limit}"), ct);
+        => GetAsync<XtreamShortEpgResponse>(Api(s, $"&action=get_short_epg&stream_id={streamId}&limit={limit}"), s.UserAgent, ct);
 
-    private async Task<T?> GetAsync<T>(string url, CancellationToken ct)
+    private async Task<T?> GetAsync<T>(string url, string? userAgent, CancellationToken ct)
     {
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
-        req.Headers.UserAgent.ParseAdd(DefaultUserAgent);
+        // Honour the source's configured UA (some providers gate EVERY call on it, not just streams); VLC default otherwise.
+        req.Headers.UserAgent.ParseAdd(string.IsNullOrWhiteSpace(userAgent) ? DefaultUserAgent : userAgent);
         using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
         resp.EnsureSuccessStatusCode();
         await using var stream = await resp.Content.ReadAsStreamAsync(ct);
