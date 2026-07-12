@@ -12,6 +12,15 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.36.0] — 2026-07-13
+Service expiry, a redesigned Leagues page, and bulk actions for mapping and recordings.
+
+### Added
+- **IPTV service expiry in Sources.** The Sources table now shows each provider login's **expiry date** (pulled from the Xtream account info the app already fetches), in your configured display timezone, colour-coded when it's close, with a trial flag. A new **Refresh** action re-checks the account (expiry, status, connections) without re-ingesting all channels.
+- **Leagues page redesigned.** Each league is now its own section showing its mapped channels in a clear **League → Team → Channels** hierarchy (the team layer only appears when a league has team-scoped channels or followed teams). **Drag the grip handle** to reorder a channel's priority.
+- **Map multiple channels at once.** The Map dialog is now multi-select — tick several channels, see them as chips, and **Add all** in one go, instead of one dialog per channel. Ranks are assigned automatically and can be reordered by dragging. (Addresses the channel-mapping feature request.)
+- **Bulk actions on Recordings.** Select multiple recordings with checkboxes and **Start / Re-resolve / Stop / Delete** them together from a toolbar that shows how many are selected.
+
 ## [1.35.1] — 2026-07-12
 Bug-audit batch: five fixes from an external code audit, all verified against a live instance.
 

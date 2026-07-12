@@ -57,15 +57,7 @@ public sealed class IngestService
             await _gate.WriteAsync(async () =>
             {
                 if (auth?.UserInfo is { } ui)
-                {
-                    s.ProviderActiveCons = ui.ActiveCons;
-                    s.ProviderMaxConns = ui.MaxConnections;
-                    s.Healthy = ui.Auth == 1;
-                    s.Status = ui.Status;
-                    s.AllowedOutputFormats = ui.AllowedOutputFormats is { Count: > 0 } ? string.Join(",", ui.AllowedOutputFormats) : null;
-                    s.LastAuthAtUtc = now;
-                    s.UpdatedUtc = now;
-                }
+                    ApplyUserInfo(s, ui, now);
 
                 foreach (var st in streams)
                 {
@@ -122,6 +114,28 @@ public sealed class IngestService
             _log.LogError(ex, "[Ingest] Source {Id} failed", sourceId);
             return new IngestResult(sourceId, false, 0, 0, 0, ex.Message);
         }
+    }
+
+    /// <summary>
+    /// Copy an Xtream auth <c>user_info</c> block onto a source's last-seen advisory fields — connection counts,
+    /// account status/health, allowed output formats, service expiry and trial flag. Shared by the full ingest and
+    /// the lightweight <c>refresh-account</c> endpoint so both stamp identical fields. The caller supplies the
+    /// timestamp and is responsible for persisting inside the DB write gate.
+    /// </summary>
+    public static void ApplyUserInfo(ProviderSource s, XtreamUserInfo ui, long now)
+    {
+        s.ProviderActiveCons = ui.ActiveCons;
+        s.ProviderMaxConns = ui.MaxConnections;
+        s.Healthy = ui.Auth == 1;
+        s.Status = ui.Status;
+        s.AllowedOutputFormats = ui.AllowedOutputFormats is { Count: > 0 } ? string.Join(",", ui.AllowedOutputFormats) : null;
+        // exp_date is unix-seconds as a string; null / empty / "0" all mean "no expiry" (lifetime / unknown).
+        s.ExpDateUtc = long.TryParse(ui.ExpDate, out var exp) && exp > 0 ? exp : null;
+        // is_trial arrives as "0"/"1" (occasionally "true"/"false").
+        s.IsTrial = string.Equals(ui.IsTrial, "1", StringComparison.Ordinal)
+                 || string.Equals(ui.IsTrial, "true", StringComparison.OrdinalIgnoreCase);
+        s.LastAuthAtUtc = now;
+        s.UpdatedUtc = now;
     }
 
     private static readonly Regex QualityToken = new(

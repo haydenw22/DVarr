@@ -409,6 +409,61 @@ public static class LeagueEndpoints
             await gate.WriteAsync(async () => { db.LeagueChannelMaps.Remove(m); await db.SaveChangesAsync(); });
             return Results.Json(new { deleted = true });
         });
+
+        // Bulk-map several channels to one league (+ optional team scope) in a single write — backs the multi-select
+        // Map dialog. Same per-(league, channel, team) dedupe as the single POST; already-mapped/unknown channels are
+        // skipped, not errored. Ranks are assigned sequentially in the given channelIds order, starting just after the
+        // group's current max rank (or the requested startRank, whichever is higher) so a batch appends below what's there.
+        app.MapPost("/api/mappings/bulk", async (MappingBulkCreate req, DVarrDbContext db, DbWriteGate gate) =>
+        {
+            if (await db.Leagues.FindAsync(req.LeagueId) is null) return Results.BadRequest(new { error = "league not found" });
+            var ids = (req.ChannelIds ?? Array.Empty<int>()).Distinct().ToList();
+            if (ids.Count == 0) return Results.BadRequest(new { error = "no channels selected" });
+            var teamId = string.IsNullOrWhiteSpace(req.TeamId) ? null : req.TeamId!.Trim();
+            var teamName = teamId is null || string.IsNullOrWhiteSpace(req.TeamName) ? null : req.TeamName!.Trim();
+            // Load the requested channels once (denormalise SourceId per channel, as the single POST does).
+            var chans = await db.Channels.Where(c => ids.Contains(c.Id)).ToDictionaryAsync(c => c.Id);
+            // Existing mappings in this (league, team) group: back the dedupe guard AND the rank floor.
+            var existing = await db.LeagueChannelMaps
+                .Where(m => m.LeagueId == req.LeagueId && m.TeamId == teamId)
+                .Select(m => new { m.ChannelId, m.Rank }).ToListAsync();
+            var already = existing.Select(e => e.ChannelId).ToHashSet();
+            var rank = Math.Max(existing.Count > 0 ? existing.Max(e => e.Rank) : 0, (req.StartRank ?? 1) - 1);
+            var toAdd = new List<LeagueChannelMap>();
+            var skipped = 0;
+            foreach (var cid in ids) // preserve the client's order so ranks follow the chip order
+            {
+                if (!chans.TryGetValue(cid, out var ch)) { skipped++; continue; } // unknown channel
+                if (already.Contains(cid)) { skipped++; continue; }                 // already mapped in this group
+                toAdd.Add(new LeagueChannelMap
+                {
+                    LeagueId = req.LeagueId, ChannelId = ch.Id, SourceId = ch.SourceId,
+                    Rank = ++rank, Pinned = req.Pinned ?? true, TeamId = teamId, TeamName = teamName,
+                });
+            }
+            if (toAdd.Count > 0)
+                await gate.WriteAsync(async () => { db.LeagueChannelMaps.AddRange(toAdd); await db.SaveChangesAsync(); });
+            return Results.Json(new { added = toAdd.Count, skipped });
+        });
+
+        // Persist a drag-reorder within ONE league+team group (teamId null = whole-league): ranks become 1..N following
+        // orderedIds. Only mappings that belong to the group are touched; stray ids are ignored, so a drop can't renumber
+        // a different league's or team's mappings. One gate write.
+        app.MapPut("/api/mappings/reorder", async (MappingReorder req, DVarrDbContext db, DbWriteGate gate) =>
+        {
+            var teamId = string.IsNullOrWhiteSpace(req.TeamId) ? null : req.TeamId!.Trim();
+            var group = await db.LeagueChannelMaps.Where(m => m.LeagueId == req.LeagueId && m.TeamId == teamId).ToListAsync();
+            if (group.Count == 0) return Results.Json(new { ok = true });
+            var byId = group.ToDictionary(m => m.Id);
+            await gate.WriteAsync(async () =>
+            {
+                var rank = 1;
+                foreach (var id in (req.OrderedIds ?? Array.Empty<int>()))
+                    if (byId.TryGetValue(id, out var m)) m.Rank = rank++; // only ids in this group; ignore strays
+                await db.SaveChangesAsync();
+            });
+            return Results.Json(new { ok = true });
+        });
     }
 
     // Only persist a strict #rrggbb hex (the API is the trust boundary — it's interpolated into a style attr client-side).
@@ -482,3 +537,5 @@ public sealed record LeagueUpsert(string? Sport, string? Name, string? Provider,
 public sealed record EventCreate(int LeagueId, string? Title, long StartUtc, long? EndUtc, bool? Monitored);
 public sealed record MonitorReq(bool Monitored);
 public sealed record MappingCreate(int LeagueId, int ChannelId, int? Rank, bool? Pinned, string? TeamId, string? TeamName);
+public sealed record MappingBulkCreate(int LeagueId, string? TeamId, string? TeamName, int[]? ChannelIds, bool? Pinned, int? StartRank);
+public sealed record MappingReorder(int LeagueId, string? TeamId, int[]? OrderedIds);

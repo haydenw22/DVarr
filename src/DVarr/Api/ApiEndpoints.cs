@@ -28,6 +28,7 @@ public static class ApiEndpoints
                 s.Id, s.Label, s.Type, host = s.BaseUrl, s.Port, protocol = s.ServerProtocol,
                 username = Mask(s.Username), hasPassword = !string.IsNullOrEmpty(s.Password),
                 maxStreams = s.MaxStreams, s.Enabled, s.Healthy,
+                expDateUtc = s.ExpDateUtc, isTrial = s.IsTrial, status = s.Status,
                 epgUrl = s.EpgUrl, epgOverride = s.EpgOverride, userAgent = s.UserAgent,
                 slotFree = tuner.IsFree(s.Id),
                 channels = chCounts.GetValueOrDefault(s.Id),
@@ -47,6 +48,33 @@ public static class ApiEndpoints
         {
             var r = await epg.SyncSourceEpgAsync(id, ct);
             return r.Ok ? Results.Json(r) : Results.Json(r, statusCode: 502);
+        });
+
+        // Lightweight account refresh — auth ONLY (no channel/EPG pull), so it doesn't consume the credential's single
+        // stream slot. Re-stamps the last-seen advisory fields (expiry, trial, status, connections, health) so the
+        // Sources table's service-expiry can be updated cheaply without re-ingesting the full lineup.
+        app.MapPost("/api/sources/{id:int}/refresh-account", async (int id, DVarrDbContext db, XtreamClient xtream, DbWriteGate gate, CancellationToken ct) =>
+        {
+            var s = await db.Sources.FindAsync(new object?[] { id }, ct);
+            if (s is null) return Results.NotFound();
+            if (!s.Enabled) return Results.Json(new { error = "source is disabled — refusing to contact the provider" }, statusCode: 409);
+            try
+            {
+                var auth = await xtream.AuthAsync(s, ct);
+                if (auth?.UserInfo is not { } ui)
+                    return Results.Json(new { error = "provider did not return account info" }, statusCode: 502);
+                var now = EpochTime.Now();
+                await gate.WriteAsync(async () =>
+                {
+                    IngestService.ApplyUserInfo(s, ui, now);
+                    await db.SaveChangesAsync(ct);
+                }, ct);
+                return Results.Json(new { ok = true, expDateUtc = s.ExpDateUtc, status = s.Status });
+            }
+            catch (Exception ex)
+            {
+                return Results.Json(new { error = ex.Message }, statusCode: 502);
+            }
         });
 
         // ---- Source CRUD (set up / edit your own sources) ----

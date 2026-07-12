@@ -36,6 +36,8 @@ function setDisplayTz(tz) { if (!tz) return; try { new Intl.DateTimeFormat('en',
 const tzLabel = () => (DISPLAY_TZ.split('/').pop() || DISPLAY_TZ).replace(/_/g, ' ');
 const dtime = e => e ? new Date(e * 1000).toLocaleString('en-AU', { timeZone: DISPLAY_TZ, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false }) : '—';
 const hhmm = e => e ? new Date(e * 1000).toLocaleString('en-AU', { timeZone: DISPLAY_TZ, hour: '2-digit', minute: '2-digit', hour12: false }) : '';
+// Date-only (no time) in the display zone — used for IPTV service-expiry dates in the Sources table.
+const ddate = e => e ? new Date(e * 1000).toLocaleDateString('en-AU', { timeZone: DISPLAY_TZ, day: '2-digit', month: 'short', year: 'numeric' }) : '—';
 const mb = b => b > 0 ? (b / 1e6).toFixed(1) + ' MB' : '—';
 const sc = s => 's-' + (s || '').toLowerCase();
 // Keyword (token) matching: "uk sports" matches "UK| Sports" and "Sky Sports UK".
@@ -86,6 +88,8 @@ const I = {
   check: '<svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>',
   layers: '<svg viewBox="0 0 24 24"><path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="M2 12l10 5 10-5"/><path d="M2 17l10 5 10-5"/></svg>',
   dots: '<svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="2" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="2" fill="currentColor" stroke="none"/></svg>',
+  chev: '<svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>',
+  grip: '<svg viewBox="0 0 24 24"><circle cx="9" cy="6" r="1.5" fill="currentColor" stroke="none"/><circle cx="15" cy="6" r="1.5" fill="currentColor" stroke="none"/><circle cx="9" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="9" cy="18" r="1.5" fill="currentColor" stroke="none"/><circle cx="15" cy="18" r="1.5" fill="currentColor" stroke="none"/></svg>',
 };
 
 const NAV = [
@@ -345,6 +349,9 @@ function sourcesPanel(sources) {
 }
 
 // ---- Recordings ----
+// Bulk-selection state for the Recordings page — a Set of selected recording ids. Survives the page's periodic
+// SSE redraw (draw() prunes only ids that vanished from the data), and is cleared after any bulk action.
+const recSel = new Set();
 PAGES.recordings = {
   title: 'Recordings',
   actions: () => `<button onclick="openScheduleModal()">${I.plus} Schedule</button><button class="ghost" onclick="openTestModal()">${I.play} Test</button>`,
@@ -353,7 +360,14 @@ PAGES.recordings = {
     el.innerHTML = `<div class="toolbar">
         <select id="recFilter"><option value="">All states</option><option>Recording</option><option>Pending</option><option>Done</option><option>NeedsAttention</option><option>Missed</option></select>
         <select id="recLeague"><option value="">All leagues</option></select>
-        <span class="muted" id="recCount"></span></div>
+        <span class="muted" id="recCount"></span>
+        <span id="recBulk" style="margin-left:auto;display:none;align-items:center;gap:8px;flex-wrap:wrap">
+          <span class="muted" id="recBulkN"></span>
+          <button class="sm" onclick="bulkStart()">Start</button>
+          <button class="ghost sm" onclick="bulkResolve()">Re-resolve</button>
+          <button class="ghost sm" onclick="bulkStop()">Stop</button>
+          <button class="danger sm" onclick="bulkDelete()">Delete</button>
+        </span></div>
       <div id="recTableWrap"></div>`;
     const draw = async () => {
       const recs = await api.get('/api/recordings');
@@ -374,8 +388,13 @@ PAGES.recordings = {
       let rows = f === 'Recording' ? recs.filter(r => ACTIVE.includes(r.state)) : (f ? recs.filter(r => r.state === f) : recs);
       if (lf === 'manual') rows = rows.filter(r => r.leagueId == null);
       else if (lf) rows = rows.filter(r => String(r.leagueId) === lf);
+      // Preserve the bulk selection across this refresh: drop only ids that no longer exist at all (deleted),
+      // so a still-present recording keeps its checkbox even as the SSE-driven redraw replaces the table HTML.
+      const present = new Set(recs.map(r => r.id));
+      [...recSel].forEach(id => { if (!present.has(id)) recSel.delete(id); });
       $('#recCount').textContent = `${rows.length} recording${rows.length === 1 ? '' : 's'}`;
       $('#recTableWrap').innerHTML = rows.length ? recTable(rows, true) : emptyBox('No recordings yet. Use “Schedule” or “Test”.');
+      recBulkSync();
     };
     $('#recFilter').addEventListener('change', draw);
     $('#recLeague').addEventListener('change', draw);
@@ -385,13 +404,13 @@ PAGES.recordings = {
 };
 
 function recTable(rows, withActions) {
-  return `<table class="rtable"><thead><tr><th>Title</th><th>State</th><th>Channel</th><th>Source</th><th>Size</th><th>Window (${esc(tzLabel())})</th>${withActions ? '<th></th>' : ''}</tr></thead><tbody>${rows.map(r => {
+  return `<table class="rtable"><thead><tr>${withActions ? '<th style="width:1%"><input type="checkbox" id="recAll" onclick="recToggleAll(this)" aria-label="Select all recordings"></th>' : ''}<th>Title</th><th>State</th><th>Channel</th><th>Source</th><th>Size</th><th>Window (${esc(tzLabel())})</th>${withActions ? '<th></th>' : ''}</tr></thead><tbody>${rows.map(r => {
     // Same conditions as the inline desktop buttons — the phone kebab mirrors them 1:1 so no action is lost.
     const pendingish = r.state === 'Pending' || r.state === 'Conflict';
     const stoppable = ACTIVE.includes(r.state) || pendingish;
     const importable = r.state === 'Done' && (r.outputPath || '').includes('.unsorted');
     return `
-    <tr><td data-label="">${esc(r.title)}</td>
+    <tr>${withActions ? `<td data-label="" class="rec-cb"><input type="checkbox" class="rec-row-cb" data-id="${r.id}" onclick="recToggle(${r.id}, this)" ${recSel.has(r.id) ? 'checked' : ''} aria-label="Select recording"></td>` : ''}<td data-label="">${esc(r.title)}</td>
       <td data-label="State"><span class="pill ${sc(r.state)}">${r.state}</span>${r.attemptCount ? ` <span class="muted" title="relaunch/failover attempts">↻${r.attemptCount}</span>` : ''}</td>
       <td data-label="Channel">${esc(r.channel)}</td><td data-label="Source" class="muted">${esc(r.source)}</td>
       <td data-label="Size" class="mono">${mb(r.bytesWritten)}</td>
@@ -581,6 +600,18 @@ function scheduleFromGuide(channelId, start, stop, title) {
 }
 
 // ---- Sources ----
+// IPTV service-expiry cell for the Sources table. Colour-codes with the shared tag classes: expired → busy tag,
+// within a week → amber date + days-left, else the plain date in muted mono. Null exp = lifetime/unknown (—).
+// Appends a small "trial" tag when the account is flagged as a trial.
+function srcExpiry(x) {
+  const trial = x.isTrial ? ' <span class="tag" title="trial account">trial</span>' : '';
+  const e = x.expDateUtc;
+  if (e == null) return `<span class="muted">—</span>${trial}`;
+  const days = (e - Date.now() / 1000) / 86400;
+  if (days < 0) return `<span class="tag busy" title="service expired">expired</span>${trial}`;
+  if (days < 7) return `<span class="tag" style="color:var(--warn);border-color:rgba(245,158,11,.4);background:rgba(245,158,11,.08)" title="expires soon">${esc(ddate(e))} (${Math.max(0, Math.ceil(days))}d)</span>${trial}`;
+  return `<span class="muted mono">${esc(ddate(e))}</span>${trial}`;
+}
 PAGES.sources = {
   title: 'Sources',
   actions: () => `<button onclick="openSourceModal(null)">${I.plus} Add source</button><button class="ghost" onclick="render()">${I.refresh} Refresh</button>`,
@@ -589,19 +620,21 @@ PAGES.sources = {
     const s = await api.get('/api/sources');
     window._sources = s;
     el.innerHTML = `<div class="note warn">⚠ Your provider allows <b>one stream per login</b>. <b>Ingest</b>, <b>Sync EPG</b> and <b>Live preview</b> use that login's single slot — don't run them while recording on the same source.</div>
-      <div class="section">${s.length ? `<table class="rtable"><thead><tr><th>Label</th><th>Type</th><th>Host</th><th>User</th><th>Slot</th><th>Channels</th><th>EPG</th><th></th></tr></thead><tbody>${s.map(x => `
-        <tr><td data-label=""><b>${esc(x.label)}</b></td><td data-label="Type" class="muted">${esc(x.type)}</td><td data-label="Host" class="mono muted">${esc(x.host)}${x.port ? ':' + x.port : ''}</td><td data-label="User" class="mono">${esc(x.username)}</td>
+      <div class="section">${s.length ? `<table class="rtable"><thead><tr><th>Label</th><th>Type</th><th>Host</th><th>Expiry</th><th>User</th><th>Slot</th><th>Channels</th><th>EPG</th><th></th></tr></thead><tbody>${s.map(x => `
+        <tr><td data-label=""><b>${esc(x.label)}</b></td><td data-label="Type" class="muted">${esc(x.type)}</td><td data-label="Host" class="mono muted">${esc(x.host)}${x.port ? ':' + x.port : ''}</td><td data-label="Expiry" class="mono">${srcExpiry(x)}</td><td data-label="User" class="mono">${esc(x.username)}</td>
         <td data-label="Slot"><span class="tag ${x.slotFree ? 'ok' : 'busy'}">${x.slotFree ? 'free' : 'busy'}</span></td>
         <td data-label="Channels" class="mono">${x.channels}</td>
         <td data-label="EPG" class="mono muted">${x.programmes || 0}${x.epgOverride ? ' <span class="tag" title="external EPG override active">ext</span>' : ''}</td>
         <td data-label="" class="row acts" style="gap:6px;flex-wrap:wrap">
           <button class="ghost sm" onclick="ingest(${x.id},'${jsq(x.label)}')">Ingest</button>
           <button class="ghost sm" onclick="syncEpg(${x.id},'${jsq(x.label)}')">EPG</button>
+          <button class="ghost sm" onclick="refreshAccount(${x.id})" title="Refresh account status &amp; service expiry (auth only — no channel pull)">Refresh</button>
           <button class="ghost sm" onclick="openSourceModal(${x.id})">Edit</button>
           <button class="danger sm" onclick="deleteSource(${x.id},'${jsq(x.label)}')">Del</button>
           ${kebab([
             { label: 'Ingest channels', fn: `ingest(${x.id},'${jsq(x.label)}')` },
             { label: 'Sync EPG', fn: `syncEpg(${x.id},'${jsq(x.label)}')` },
+            { label: 'Refresh expiry', fn: `refreshAccount(${x.id})` },
             { label: 'Edit source', fn: `openSourceModal(${x.id})` },
             { label: 'Delete source', fn: `deleteSource(${x.id},'${jsq(x.label)}')`, danger: true },
           ])}
@@ -610,7 +643,9 @@ PAGES.sources = {
   },
 };
 
-// ---- Leagues + mappings ----
+// ---- Leagues + channel mappings (accordion: League → Team → Channels) ----
+// Collapsed-card state survives a re-render (drop a mapping, drag-reorder…) so the page doesn't spring back open.
+const _lgCollapsed = new Set();
 PAGES.leagues = {
   title: 'Leagues',
   actions: () => `<button onclick="openLeagueModal(null)">${I.plus} Add league</button><button class="ghost" onclick="render()">${I.refresh} Refresh</button>`,
@@ -618,56 +653,175 @@ PAGES.leagues = {
   async render(el) {
     const ls = await api.get('/api/leagues');
     window._leagues = ls;
-    el.innerHTML = `<div class="page-wide"><div class="note">A <b>monitored</b> league auto-records its events on its mapped channel(s). Leagues come from <b>TheSportsDB</b> — pick a sport then search the league; posters &amp; events sync automatically.</div>
-      <div class="section"><h2>Leagues ${ls.length ? `<span class="count-pill">${ls.length}</span>` : ''}</h2>${ls.length ? `<table class="rtable"><thead><tr><th></th><th>League</th><th>Sport</th><th>Events</th><th>Maps</th><th>Monitored</th><th></th></tr></thead><tbody>${ls.map(l => `
-        <tr><td class="hide-sm">${l.poster ? `<img class="lg-poster" src="${esc(l.poster)}" alt=""/>` : ''}</td>
-        <td data-label=""><span class="lg-dot" style="background:${leagueColor(l)}" title="calendar colour"></span><b>${esc(l.name)}</b>${l.externalLeagueId ? ` <span class="tag" title="TheSportsDB id">#${esc(l.externalLeagueId)}</span>` : ''}${l.monitoredTeams && l.monitoredTeams.length ? `<div class="muted" style="font-size:11px">following ${l.monitoredTeams.length} team${l.monitoredTeams.length === 1 ? '' : 's'}: ${esc(l.monitoredTeams.map(t => t.name).filter(Boolean).join(', '))}</div>` : ''}${l.monitoredSessions && l.monitoredSessions.length ? `<div class="muted" style="font-size:11px">sessions: ${esc(l.monitoredSessions.join(', '))}</div>` : ''}${l.autoStopMode === 'fixed' ? `<div class="muted" style="font-size:11px">auto-stop: fixed</div>` : ''}</td><td data-label="Sport" class="muted">${esc(l.sport)}</td>
-        <td data-label="Events" class="mono">${l.events}</td><td data-label="Maps" class="mono">${l.mappings}</td>
-        <td data-label="Monitored"><span class="tag ${l.monitored ? 'ok' : ''}">${l.monitored ? 'yes' : 'no'}</span></td>
-        <td data-label="" class="row acts" style="gap:6px;flex-wrap:nowrap">
-          <button class="ghost sm" onclick="openMapModal(${l.id},'${jsq(l.name)}')">Map</button>
-          <button class="ghost sm" onclick="syncLeague(${l.id})">Sync</button>
-          <button class="ghost sm" onclick="reresolveLeague(${l.id})" title="Update this league's scheduled recordings to its current channel mapping">Re-resolve</button>
-          <button class="ghost sm" onclick="location.hash='#/calendar?league=${l.id}'">Events</button>
-          <button class="ghost sm" onclick="openLeagueModal(${l.id})">Edit</button>
-          <button class="danger sm" onclick="deleteLeague(${l.id},'${jsq(l.name)}')">Del</button>
-          ${kebab([
-            { label: 'Map channel', fn: `openMapModal(${l.id},'${jsq(l.name)}')` },
-            { label: 'Sync events', fn: `syncLeague(${l.id})` },
-            { label: 'Re-resolve recordings', fn: `reresolveLeague(${l.id})`, title: "Update this league's scheduled recordings to its current channel mapping" },
-            { label: 'View events', fn: `location.hash='#/calendar?league=${l.id}'` },
-            { label: 'Edit league', fn: `openLeagueModal(${l.id})` },
-            { label: 'Delete league', fn: `deleteLeague(${l.id},'${jsq(l.name)}')`, danger: true },
-          ])}
-        </td></tr>`).join('')}</tbody></table>` : emptyBox('No leagues yet. Add one and pin a channel to start auto-recording.')}</div>
-      <div class="section"><h2>Channel mappings</h2>
-        <div class="note">
-          <b>How mappings &amp; ranks work.</b> Each row maps a league — or one <b>team</b> in it — to a channel. <b>Rank</b> is the order DVarr tries them — lowest first: <b>rank&nbsp;1</b> is the primary (first choice), rank&nbsp;2, 3… are fallbacks. When an event is due, DVarr records the best-ranked channel; if that channel <b>won't open or drops out</b>, it automatically walks down the list to the next working channel. Add a few channels that all carry the same event so there's always a backup.
-          <div style="margin-top:6px"><b>Team mappings.</b> If each team airs on its own channel (common in US sports — e.g. Yankees on YES Network, Mets on SNY), pick the team in the Map dialog: that channel is then used <b>only for that team's games</b> and beats every whole-league mapping for them. Games are matched by team, so you don't need to map every channel in the league.</div>
-          <div style="margin-top:6px"><b>★ Pinned</b> means your pick wins over EPG guesswork — a similar-looking guide entry can't hijack the recording. Unpinned mappings still work but let a strong EPG title match reorder them.</div>
-          <div style="margin-top:6px"><b>National broadcasts.</b> Also map the national channels (FOX, ESPN, …) to the league, unpinned. With <b>Guide-match channel pick</b> on (Settings → Scheduling &amp; EPG), DVarr re-checks each mapped channel's guide from 48 hours out and records from the channel that actually shows the game — the Scheduled list updates as soon as the guide lists it.</div>
-          <div class="muted" style="margin-top:6px;font-size:12px;line-height:1.5">All fallbacks must be on the <b>same provider login</b> as the primary (one stream per login). With <b>content check</b> on (Settings), DVarr also fails over when a channel is alive but stuck on a dead <b>black or frozen</b> slate. It does <b>not</b> watch the picture to decide whether the “right” match is on — that relies on your ranks, the EPG, and pre/post-padding, which is exactly why a pre-show/intro is captured rather than skipped.</div>
-        </div>
-        <div class="toolbar" style="margin:12px 0">
-          <select id="mapLeagueFilter"><option value="">All leagues</option>${ls.map(l => `<option value="${l.id}">${esc(l.name)}</option>`).join('')}</select>
-          <span class="muted" id="mapCount"></span>
-        </div>
-        <div id="mapsWrap" class="loading">…</div></div></div>`;
     const maps0 = await api.get('/api/mappings');
     const maps = Array.isArray(maps0) ? maps0 : [];
-    const drawMaps = () => {
-      const lf = $('#mapLeagueFilter').value;
-      const rows = lf ? maps.filter(m => String(m.leagueId) === lf) : maps;
-      $('#mapCount').textContent = maps.length ? (lf ? `${rows.length} of ${maps.length} mapping${maps.length === 1 ? '' : 's'}` : `${maps.length} mapping${maps.length === 1 ? '' : 's'}`) : '';
-      $('#mapsWrap').innerHTML = rows.length ? `<table class="rtable"><thead><tr><th>League</th><th>Team</th><th>Channel</th><th>Source</th><th>Rank</th><th>Pinned</th><th></th></tr></thead><tbody>${rows.map(m => {
-        const lg = ls.find(x => x.id === m.leagueId);
-        return `<tr><td data-label="">${esc(lg ? lg.name : '#' + m.leagueId)}</td><td data-label="Team" class="muted">${m.teamId ? esc(m.teamName || m.teamId) : 'whole league'}</td><td data-label="Channel">${esc(m.channel)}</td><td data-label="Source" class="muted">${esc(m.source)}</td><td data-label="Rank" class="mono">${m.rank}</td><td data-label="Pinned">${m.pinned ? '★' : ''}</td><td data-label="" class="acts"><button class="danger sm" onclick="deleteMapping(${m.id})">Del</button>${kebab([{ label: 'Remove mapping', fn: `deleteMapping(${m.id})`, danger: true }])}</td></tr>`;
-      }).join('')}</tbody></table>` : emptyBox(lf ? 'No mappings for this league yet — use “Map” on it above.' : 'No mappings. Use “Map” on a league to pin a channel.');
-    };
-    $('#mapLeagueFilter').addEventListener('change', drawMaps);
-    drawMaps();
+    // Bucket mappings by league once; each card slices its own whole-league / per-team groups.
+    const byLeague = {};
+    maps.forEach(m => { (byLeague[m.leagueId] = byLeague[m.leagueId] || []).push(m); });
+    el.innerHTML = `<div class="page-wide">
+      <div class="note">A <b>monitored</b> league auto-records its events on its mapped channel(s). Leagues come from <b>TheSportsDB</b> — pick a sport then search the league; posters &amp; events sync automatically.</div>
+      <div class="note" style="margin-top:12px">
+        <b>How mappings &amp; ranks work.</b> Each channel is mapped to a league — or to one <b>team</b> in it. <b>Rank</b> is the order DVarr tries them — lowest first: <b>rank&nbsp;1</b> is the primary (first choice), rank&nbsp;2, 3… are fallbacks. When an event is due, DVarr records the best-ranked channel; if that channel <b>won't open or drops out</b>, it walks down the list to the next working channel. <b>Drag the grip</b> to reorder a channel's priority. Add a few channels that all carry the same event so there's always a backup.
+        <div style="margin-top:6px"><b>Team mappings.</b> If each team airs on its own channel, pick the team in the Map dialog: that channel is then used <b>only for that team's games</b> and beats every whole-league mapping for them. Games are matched by team, so you don't need to map every channel in the league.</div>
+        <div style="margin-top:6px"><b>★ Pinned</b> means your pick wins over EPG guesswork — a similar-looking guide entry can't hijack the recording. Unpinned mappings still work but let a strong EPG title match reorder them.</div>
+        <div style="margin-top:6px"><b>National broadcasts.</b> Also map the national channels (FOX, ESPN, …) to the league, unpinned. With <b>Guide-match channel pick</b> on (Settings → Scheduling &amp; EPG), DVarr re-checks each mapped channel's guide from 48 hours out and records from the channel that actually shows the game — the Scheduled list updates as soon as the guide lists it.</div>
+        <div class="muted" style="margin-top:6px;font-size:12px;line-height:1.5">All fallbacks must be on the <b>same provider login</b> as the primary (one stream per login). With <b>content check</b> on (Settings), DVarr also fails over when a channel is alive but stuck on a dead <b>black or frozen</b> slate. It does <b>not</b> watch the picture to decide whether the “right” match is on — that relies on your ranks, the EPG, and pre/post-padding, which is exactly why a pre-show/intro is captured rather than skipped.</div>
+      </div>
+      <div class="section"><h2>Leagues ${ls.length ? `<span class="count-pill">${ls.length}</span>` : ''}</h2>${ls.length ? `<div class="lg-acc" id="lgAcc">${ls.map(l => renderLeagueCard(l, byLeague[l.id] || [])).join('')}</div>` : emptyBox('No leagues yet. Add one and pin a channel to start auto-recording.')}</div></div>`;
+    wireLeagueDnd($('#lgAcc'));
   },
 };
+
+// One collapsible league card: header (poster + name + chips + actions + chevron) over a body of channel groups.
+function renderLeagueCard(l, lmaps) {
+  const collapsed = _lgCollapsed.has(l.id);
+  const wholeMaps = lmaps.filter(m => !m.teamId).slice().sort((a, b) => a.rank - b.rank);
+  const teamMaps = {};
+  lmaps.filter(m => m.teamId).forEach(m => { (teamMaps[m.teamId] = teamMaps[m.teamId] || []).push(m); });
+  // Team layer = the union of followed teams (from the league's team-follow) and any team a channel is scoped to.
+  // Followed teams sort first so the ones actually being recorded lead. A whole-league-only league shows NO team layer.
+  const teamOrder = [], seen = new Set();
+  (l.monitoredTeams || []).forEach(t => { const id = String(t.id); if (!seen.has(id)) { seen.add(id); teamOrder.push({ id, name: t.name || id, followed: true }); } });
+  Object.keys(teamMaps).forEach(id => { if (!seen.has(id)) { seen.add(id); teamOrder.push({ id, name: teamMaps[id][0].teamName || id, followed: false }); } });
+
+  const body = [];
+  if (wholeMaps.length) body.push(renderChGroup(l, '', 'Mapped channels', wholeMaps));
+  teamOrder.forEach(t => body.push(renderTeamGroup(l, t, (teamMaps[t.id] || []).slice().sort((a, b) => a.rank - b.rank))));
+  if (!body.length) body.push(`<div class="lg-empty">No channels mapped — use <b>Map</b> above.</div>`);
+
+  const acts = [
+    { label: 'Map channels', fn: `openMapModal(${l.id},'${jsq(l.name)}')` },
+    { label: 'Sync events', fn: `syncLeague(${l.id})` },
+    { label: 'Re-resolve recordings', fn: `reresolveLeague(${l.id})`, title: "Update this league's scheduled recordings to its current channel mapping" },
+    { label: 'View events', fn: `location.hash='#/calendar?league=${l.id}'` },
+    { label: 'Edit league', fn: `openLeagueModal(${l.id})` },
+    { label: 'Delete league', fn: `deleteLeague(${l.id},'${jsq(l.name)}')`, danger: true },
+  ];
+  return `<div class="lg-card${collapsed ? ' collapsed' : ''}" data-league="${l.id}">
+    <div class="lg-head">
+      <button class="lg-chev" onclick="toggleLeagueCard(${l.id})" aria-expanded="${collapsed ? 'false' : 'true'}" aria-label="Expand or collapse">${I.chev}</button>
+      <div class="lg-head-main" onclick="toggleLeagueCard(${l.id})">
+        ${l.poster ? `<img class="lg-poster hide-sm" src="${esc(l.poster)}" alt=""/>` : `<span class="lg-poster lg-poster-ph hide-sm"></span>`}
+        <div class="lg-head-txt">
+          <div class="lg-head-title"><span class="lg-dot" style="background:${leagueColor(l)}" title="calendar colour"></span><b>${esc(l.name)}</b>${l.externalLeagueId ? ` <span class="tag" title="TheSportsDB id">#${esc(l.externalLeagueId)}</span>` : ''}<span class="tag ${l.monitored ? 'ok' : ''}">${l.monitored ? 'monitored' : 'not monitored'}</span></div>
+          <div class="lg-head-meta">
+            <span class="chip">${esc(l.sport)}</span>
+            <span class="chip">${l.events} event${l.events === 1 ? '' : 's'}</span>
+            <span class="chip">${lmaps.length} map${lmaps.length === 1 ? '' : 's'}</span>
+            ${l.monitoredSessions && l.monitoredSessions.length ? `<span class="chip">sessions: ${esc(l.monitoredSessions.join(', '))}</span>` : ''}
+            ${l.autoStopMode === 'fixed' ? `<span class="chip">auto-stop: fixed</span>` : ''}
+          </div>
+        </div>
+      </div>
+      <div class="lg-head-acts acts-row">
+        <button class="ghost sm" onclick="openMapModal(${l.id},'${jsq(l.name)}')">Map</button>
+        <button class="ghost sm" onclick="syncLeague(${l.id})">Sync</button>
+        <button class="ghost sm" onclick="reresolveLeague(${l.id})" title="Update this league's scheduled recordings to its current channel mapping">Re-resolve</button>
+        <button class="ghost sm" onclick="location.hash='#/calendar?league=${l.id}'">Events</button>
+        <button class="ghost sm" onclick="openLeagueModal(${l.id})">Edit</button>
+        <button class="danger sm" onclick="deleteLeague(${l.id},'${jsq(l.name)}')">Del</button>
+        ${kebab(acts)}
+      </div>
+    </div>
+    <div class="lg-body">${body.join('')}</div>
+  </div>`;
+}
+
+// A plain "Mapped channels" group (whole-league, teamId ''): a caption + a drag-reorderable channel list.
+function renderChGroup(l, teamId, cap, rows) {
+  return `<div class="lg-group">
+    <div class="lg-group-cap">${esc(cap)} <span class="count-pill">${rows.length}</span></div>
+    <div class="lg-chgroup" data-league="${l.id}" data-team="${esc(teamId)}">${rows.map(m => renderChRow(m)).join('')}</div>
+  </div>`;
+}
+
+// A team sub-group: team badge + name (+ "Followed team" tag) + "Add team" (opens the Map modal scoped to this team).
+function renderTeamGroup(l, t, rows) {
+  const initial = ((t.name || '?').trim().charAt(0) || '?').toUpperCase();
+  return `<div class="lg-group lg-teamgrp">
+    <div class="lg-team-head">
+      <span class="lg-team-badge">${esc(initial)}</span>
+      <b>${esc(t.name)}</b>
+      ${t.followed ? '<span class="tag ok">Followed team</span>' : ''}
+      <button class="ghost sm lg-addteam" onclick="openMapModal(${l.id},'${jsq(l.name)}','${jsq(t.id)}','${jsq(t.name)}')">${I.plus} Add team</button>
+    </div>
+    <div class="lg-chgroup" data-league="${l.id}" data-team="${esc(t.id)}">${rows.length ? rows.map(m => renderChRow(m)).join('') : `<div class="lg-empty sm">No channels for this team yet.</div>`}</div>
+  </div>`;
+}
+
+// A single channel row: grip handle (drag), channel name + source, a RANK/PRIORITY badge, and remove.
+function renderChRow(m) {
+  return `<div class="lg-chrow" data-mapid="${m.id}" draggable="false">
+    <span class="lg-grip" title="Drag to reorder priority">${I.grip}</span>
+    <div class="lg-chrow-main">
+      <b>${esc(m.channel || ('channel ' + m.channelId))}</b>
+      <div class="lg-chrow-sub">${esc(m.source || '')}${m.pinned ? ' · <span class="lg-pin" title="Pinned — beats EPG guessing">★ pinned</span>' : ''}</div>
+    </div>
+    <span class="lg-rank" title="Rank / priority — 1 is tried first"><span class="lg-rank-cap">RANK</span><span class="lg-rank-n">${m.rank}</span></span>
+    <span class="lg-chrow-acts acts-row">
+      <button class="danger sm" onclick="deleteMapping(${m.id})">Del</button>
+      ${kebab([{ label: 'Remove mapping', fn: `deleteMapping(${m.id})`, danger: true }])}
+    </span>
+  </div>`;
+}
+
+// Expand/collapse a league card; remember the state so a re-render keeps it.
+function toggleLeagueCard(id) {
+  const card = document.querySelector(`.lg-card[data-league="${id}"]`);
+  if (!card) return;
+  const collapsed = card.classList.toggle('collapsed');
+  if (collapsed) _lgCollapsed.add(id); else _lgCollapsed.delete(id);
+  const chev = card.querySelector('.lg-chev'); if (chev) chev.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+}
+
+// HTML5 drag-reorder, constrained to WITHIN one channel group. The whole card container gets one delegated set of
+// listeners; the row is only draggable while the grip is held (mousedown on the grip flips draggable on). On drop we
+// read the group's new DOM order and PUT /api/mappings/reorder, optimistically renumbering the RANK badges.
+function wireLeagueDnd(root) {
+  if (!root) return;
+  let dragEl = null, dragGroup = null;
+  root.addEventListener('mousedown', e => {
+    const row = e.target.closest('.lg-chrow'); if (!row) return;
+    row.setAttribute('draggable', e.target.closest('.lg-grip') ? 'true' : 'false'); // grip-only handle
+  });
+  root.addEventListener('dragstart', e => {
+    const row = e.target.closest('.lg-chrow'); if (!row) return;
+    dragEl = row; dragGroup = row.closest('.lg-chgroup');
+    row.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    try { e.dataTransfer.setData('text/plain', row.dataset.mapid || ''); } catch { /* older WebView */ }
+  });
+  root.addEventListener('dragover', e => {
+    if (!dragEl) return;
+    const group = e.target.closest('.lg-chgroup');
+    if (!group || group !== dragGroup) return; // ignore drops into a different league/team group
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const over = e.target.closest('.lg-chrow');
+    if (!over || over === dragEl) return;
+    const r = over.getBoundingClientRect();
+    group.insertBefore(dragEl, (e.clientY - r.top) > r.height / 2 ? over.nextSibling : over);
+  });
+  root.addEventListener('drop', e => {
+    if (!dragEl) return;
+    e.preventDefault();
+    commitGroupOrder(dragEl.closest('.lg-chgroup'));
+  });
+  root.addEventListener('dragend', () => {
+    if (dragEl) { dragEl.classList.remove('dragging'); dragEl.setAttribute('draggable', 'false'); }
+    dragEl = null; dragGroup = null;
+  });
+}
+async function commitGroupOrder(group) {
+  if (!group) return;
+  const leagueId = parseInt(group.dataset.league);
+  const teamId = group.dataset.team || null;
+  const orderedIds = [...group.querySelectorAll('.lg-chrow')].map(r => parseInt(r.dataset.mapid));
+  // Optimistic: renumber the visible RANK badges to 1..N before the round-trip so the reorder reads instantly.
+  [...group.querySelectorAll('.lg-chrow')].forEach((r, i) => { const b = r.querySelector('.lg-rank-n'); if (b) b.textContent = i + 1; });
+  const res = await api.put('/api/mappings/reorder', { leagueId, teamId, orderedIds });
+  if (res && res.error) { toast(res.error, 'err'); render(); }
+}
 
 // ---- Calendar (monthly grid; events per day, colour-coded by league) ----
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -1009,9 +1163,12 @@ function emptyBox(msg) { return `<div class="empty">${I.recordings}<div>${esc(ms
 // =========================================================================
 // Channel cascade (Source → Group → Channel, each with keyword search)
 // =========================================================================
-async function buildChannelCascade(host, prefill = {}) {
+async function buildChannelCascade(host, prefill = {}, opts = {}) {
+  const multi = !!opts.multi;                          // multi-select (Map dialog) vs single-select (Schedule dialog)
+  const selection = multi ? new Map() : null;          // id(string) -> { id, name, source } — persists across source/group switches
   const sources = await api.get('/api/sources');
   if (!sources.length) { host.innerHTML = `<div class="note">No sources yet — add one first (Sources page).</div>`; return; }
+  const srcLabel = () => ((sources.find(s => String(s.id) === $('#cascSrc').value) || {}).label || '');
   // Default to the first ENABLED source so we never steer the user at an off-limits/disabled credential.
   const startSrc = prefill.sourceId != null ? String(prefill.sourceId) : String((sources.find(s => s.enabled) || sources[0]).id);
   host.innerHTML = `
@@ -1029,25 +1186,40 @@ async function buildChannelCascade(host, prefill = {}) {
   const renderChannels = () => {
     const q = $('#cascChQ').value;
     const f = q ? chans.filter(c => tokensMatch(c.name + ' ' + (c.group || ''), q)) : chans;
-    const sel = $('#cascCh').value;
+    const sel = multi ? null : $('#cascCh').value;
     const list = $('#cascChList');
     if (!f.length) { list.innerHTML = `<div class="muted" style="padding:8px 11px">(no channels)</div>`; return; }
     list.innerHTML = f.slice(0, 500).map(c => {
       const label = c.name + (c.group ? ` — ${c.group}` : '');
+      if (multi) {
+        const on = selection.has(String(c.id));
+        return `<div class="pickrow multi${on ? ' sel' : ''}" role="option" aria-selected="${on}" data-id="${c.id}" data-name="${esc(c.name)}" title="${esc(label)}"><span class="pick-box"></span><span class="pick-lbl">${esc(label)}</span></div>`;
+      }
       return `<div class="pickrow${String(c.id) === String(sel) ? ' sel' : ''}" role="option" data-id="${c.id}" title="${esc(label)}">${esc(label)}</div>`;
     }).join('');
   };
   const loadGroups = async () => { groups = await api.get(`/api/channels/groups?source=${$('#cascSrc').value}`); renderGroups(); };
   const loadChannels = async () => { chans = await api.get(`/api/channels?source=${$('#cascSrc').value}&group=${encodeURIComponent($('#cascGrp').value)}&take=1000`); renderChannels(); };
-  // Click a row → record its id in the hidden input and move the highlight (single-select listbox).
+  // Click a row → single-select: record its id in the hidden input + move the highlight; multi-select: toggle it in
+  // the selection Map (which persists across source/group switches) and let the modal re-render its chip list.
   $('#cascChList').onclick = (e) => {
     const row = e.target.closest('.pickrow'); if (!row || !row.dataset.id) return;
+    if (multi) {
+      const id = String(row.dataset.id);
+      if (selection.has(id)) selection.delete(id);
+      else selection.set(id, { id: parseInt(id), name: row.dataset.name, source: srcLabel() });
+      const on = selection.has(id);
+      row.classList.toggle('sel', on); row.setAttribute('aria-selected', on);
+      if (opts.onChange) opts.onChange();
+      return;
+    }
     $('#cascCh').value = row.dataset.id;
     [...$('#cascChList').children].forEach(r => r.classList.toggle('sel', r === row));
   };
-  // Changing source/group invalidates the current channel choice (it may not exist in the new list).
-  $('#cascSrc').onchange = async () => { $('#cascCh').value = ''; await loadGroups(); $('#cascGrp').value = 'all'; await loadChannels(); };
-  $('#cascGrp').onchange = () => { $('#cascCh').value = ''; loadChannels(); };
+  // Changing source/group invalidates a single-select choice (it may not exist in the new list); a multi-select
+  // batch keeps everything already ticked so you can gather channels from several sources/groups in one go.
+  $('#cascSrc').onchange = async () => { if (!multi) $('#cascCh').value = ''; await loadGroups(); $('#cascGrp').value = 'all'; await loadChannels(); };
+  $('#cascGrp').onchange = () => { if (!multi) $('#cascCh').value = ''; loadChannels(); };
   let gt; $('#cascGrpQ').oninput = () => { clearTimeout(gt); gt = setTimeout(renderGroups, 150); };
   let ct; $('#cascChQ').oninput = () => { clearTimeout(ct); ct = setTimeout(renderChannels, 200); };
   await loadGroups();
@@ -1070,6 +1242,9 @@ async function buildChannelCascade(host, prefill = {}) {
     $('#cascCh').value = String(prefill.channelId);
     [...list.children].forEach(r => r.classList.toggle('sel', String(r.dataset.id) === String(prefill.channelId)));
   }
+  // Multi-select callers (Map dialog) drive their own chip list + submit from the live selection Map; `refresh`
+  // re-renders the channel list so removing a chip un-ticks its row even when it's the current source/group view.
+  if (multi) return { selection, refresh: renderChannels };
 }
 
 // =========================================================================
@@ -1287,11 +1462,62 @@ async function submitImport(id) {
   if (r.error) { toast(r.error, 'err'); $('#impGo').disabled = false; $('#impMsg').textContent = ''; }
   else { toast('Imported into the library', 'ok'); closeModals(); render(); }
 }
-async function startRec(id) { const r = await api.post(`/api/recordings/${id}/start`); if (r.error) toast(r.error, 'err'); else toast(r.started ? 'Starting…' : 'Already running', 'ok'); render(); }
-async function stopRec(id) { const r = await api.post(`/api/recordings/${id}/stop`); toast(r.cancelled ? 'Cancelled' : r.stopping ? 'Stopping…' : 'No change', r.error ? 'err' : 'ok'); render(); }
-async function reresolveRec(id) { const r = await api.post(`/api/recordings/${id}/resolve`); if (r.error) toast(r.error, 'err'); else toast(r.changed ? `Re-resolved → ${r.channel}` : `Already on ${r.channel}`, 'ok'); render(); }
+// Raw per-item API calls (no toast/render). The single-item action fns below wrap these with a toast + render; the
+// Recordings bulk actions reuse them directly so a batch can summarise once instead of toasting per item.
+const startRecReq = id => api.post(`/api/recordings/${id}/start`);
+const stopRecReq = id => api.post(`/api/recordings/${id}/stop`);
+const reresolveRecReq = id => api.post(`/api/recordings/${id}/resolve`);
+const delRecReq = id => api.del(`/api/recordings/${id}`);
+async function startRec(id) { const r = await startRecReq(id); if (r.error) toast(r.error, 'err'); else toast(r.started ? 'Starting…' : 'Already running', 'ok'); render(); }
+async function stopRec(id) { const r = await stopRecReq(id); toast(r.cancelled ? 'Cancelled' : r.stopping ? 'Stopping…' : 'No change', r.error ? 'err' : 'ok'); render(); }
+async function reresolveRec(id) { const r = await reresolveRecReq(id); if (r.error) toast(r.error, 'err'); else toast(r.changed ? `Re-resolved → ${r.channel}` : `Already on ${r.channel}`, 'ok'); render(); }
 async function reresolveLeague(id) { const r = await api.post(`/api/leagues/${id}/reresolve`); if (r.error) toast(r.error, 'err'); else toast(`Re-resolved ${r.updated} scheduled recording${r.updated === 1 ? '' : 's'}${r.changed ? ` (${r.changed} changed channel)` : ''}`, 'ok'); render(); }
-async function delRec(id) { if (!confirm('Delete this recording?')) return; const r = await api.del(`/api/recordings/${id}`); if (r.error) return toast(r.error, 'err'); toast('Deleted'); render(); }
+async function delRec(id) { if (!confirm('Delete this recording?')) return; const r = await delRecReq(id); if (r.error) return toast(r.error, 'err'); toast('Deleted'); render(); }
+
+// ---- Recordings bulk selection + actions ----
+// Toggle one row's selection (per-row checkbox), then refresh the toolbar/select-all without a full table redraw.
+function recToggle(id, cb) { if (cb.checked) recSel.add(id); else recSel.delete(id); recBulkSync(); }
+// Select-all toggles every currently-visible row's checkbox + selection.
+function recToggleAll(cb) {
+  document.querySelectorAll('#recTableWrap input.rec-row-cb').forEach(el => {
+    el.checked = cb.checked;
+    if (cb.checked) recSel.add(+el.dataset.id); else recSel.delete(+el.dataset.id);
+  });
+  recBulkSync();
+}
+// Reconcile the bulk toolbar (visibility + "N selected") and the select-all box (checked/indeterminate) with recSel.
+function recBulkSync() {
+  const bulk = $('#recBulk');
+  if (bulk) { bulk.style.display = recSel.size ? 'inline-flex' : 'none'; const n = $('#recBulkN'); if (n) n.textContent = `${recSel.size} selected`; }
+  const all = $('#recAll');
+  if (all) {
+    const boxes = [...document.querySelectorAll('#recTableWrap input.rec-row-cb')];
+    const sel = boxes.filter(b => b.checked).length;
+    all.checked = boxes.length > 0 && sel === boxes.length;
+    all.indeterminate = sel > 0 && sel < boxes.length;
+  }
+}
+// Run op(id) over ids with a concurrency cap of 4; a result carrying .error (the per-item endpoint rejecting an
+// invalid state) counts as skipped rather than done, so the summary reads e.g. "Started 3 · skipped 1".
+async function bulkRun(ids, op) {
+  let done = 0, skipped = 0, i = 0;
+  const worker = async () => { while (i < ids.length) { const id = ids[i++]; try { const r = await op(id); if (r && r.error) skipped++; else done++; } catch { skipped++; } } };
+  await Promise.all(Array.from({ length: Math.min(4, ids.length) }, worker));
+  return { done, skipped };
+}
+async function bulkAction(op, verb, confirmMsg) {
+  const ids = [...recSel];
+  if (!ids.length) return;
+  if (confirmMsg && !confirm(confirmMsg(ids.length))) return;
+  const { done, skipped } = await bulkRun(ids, op);
+  recSel.clear();
+  toast(`${verb} ${done}${skipped ? ` · skipped ${skipped}` : ''}`, (skipped && !done) ? 'err' : 'ok');
+  render();
+}
+const bulkStart = () => bulkAction(startRecReq, 'Started');
+const bulkResolve = () => bulkAction(reresolveRecReq, 'Re-resolved');
+const bulkStop = () => bulkAction(stopRecReq, 'Stopped');
+const bulkDelete = () => bulkAction(delRecReq, 'Deleted', n => `Delete ${n} recording${n === 1 ? '' : 's'}? This cannot be undone.`);
 function ingest(id, label) {
   modal(`<h2>Ingest channels — ${esc(label)}</h2>
     <div class="note warn">This contacts your IPTV provider and uses <b>${esc(label)}</b>'s single stream slot. Only proceed if you're not using that stream right now.</div>
@@ -1353,6 +1579,14 @@ async function deleteSource(id, label) {
   if (!confirm(`Delete source “${label}”?\nThis removes its channels and EPG (recordings are kept).`)) return;
   const r = await api.del('/api/sources/' + id);
   if (r.error) toast(r.error, 'err'); else { toast('Source deleted', 'ok'); render(); }
+}
+// Cheap account/expiry refresh — auth only, so it's safe to run any time (doesn't touch the single stream slot).
+async function refreshAccount(id) {
+  toast('Refreshing account…');
+  const r = await api.post(`/api/sources/${id}/refresh-account`);
+  if (r.error) toast(r.error, 'err');
+  else toast(r.expDateUtc ? `Expires ${ddate(r.expDateUtc)}` : 'Account refreshed (no expiry set)', 'ok');
+  render();
 }
 async function saveSettings() {
   const vals = {};
@@ -1540,19 +1774,27 @@ async function submitLeague(id) {
 async function deleteLeague(id, name) { if (!confirm(`Delete league “${name}”? Removes its events & mappings.`)) return; const r = await api.del('/api/leagues/' + id); if (r.error) return toast(r.error, 'err'); toast('League deleted', 'ok'); render(); }
 async function syncLeague(id) { toast('Syncing events…'); const r = await api.post('/api/leagues/' + id + '/sync'); toast(r.ok ? `Synced ${r.fetched} events (${r.added} new)` : `Sync failed: ${r.error}`, r.ok ? 'ok' : 'err'); render(); }
 
-function openMapModal(leagueId, name) {
-  const bg = modal(`<h2>Map channel — ${esc(name)}</h2>
+// Multi-select Map dialog: tick several channels (accumulating across sources/groups into chips), optionally scope to
+// one team, then "Add all" POSTs the batch to /api/mappings/bulk. `_mapPicker` holds the live selection Map for submit.
+let _mapPicker = null;
+async function openMapModal(leagueId, name, presetTeamId, presetTeamName) {
+  modal(`<h2>Map channels — ${esc(name)}</h2>
     <div class="fields" id="mapCascade"></div>
+    <div class="lg-sel-hdr" id="mapSelHdr">0 selected</div>
+    <div class="lg-sel-cap">Selected channels <span id="mapSelCount" class="count-pill">0</span></div>
+    <div id="mapSelChips" class="lg-chips"><span class="muted" style="font-size:12px">None yet — tick channels above.</span></div>
     <div class="fields" style="margin-top:12px;border-top:1px solid var(--line);padding-top:12px">
-      <label class="field" id="mTeamWrap" style="display:none">Team — only this team's games use this channel<select id="mTeam"><option value="">Whole league (every game)</option></select></label>
-      <label class="field">Rank — try order, 1 = first choice<input id="mRank" type="number" min="1" step="1" value="1"/></label>
+      <label class="field" id="mTeamWrap" style="display:none">Team — only this team's games use these channels<select id="mTeam"><option value="">Whole league (every game)</option></select></label>
+      <label class="field">Starting priority (rank) for this batch — 1 = first choice<input id="mRank" type="number" min="1" step="1" value="1"/></label>
       <label class="field" style="flex-direction:row;align-items:center;gap:8px"><input id="mPin" type="checkbox" checked style="width:auto"/> Pinned — your pick beats EPG guessing</label>
     </div>
-    <div class="muted" style="font-size:12px;margin-top:8px;line-height:1.5">Rank 1 records first; if it won't open or drops out, DVarr falls back to rank 2, 3… (same provider login). Map several channels carrying the same event for resilience. If each team airs on its own channel (common in US sports — e.g. Yankees on YES, Mets on SNY), add one mapping per team using the Team picker.</div>
-    <div class="foot"><button class="ghost" onclick="closeModals()">Cancel</button><button onclick="submitMap(${leagueId})">Add mapping</button></div>`, 'min(560px,94vw)');
-  buildChannelCascade($('#mapCascade'), {});
-  // Team scope (issue #5): offer the league's team list (team sports only) so a channel can be mapped to ONE
-  // team's games. Followed teams sort first (they're the ones being recorded) and are starred.
+    <div class="muted" style="font-size:12px;margin-top:8px;line-height:1.5">Rank 1 records first; if it won't open or drops out, DVarr falls back to rank 2, 3… (same provider login). Add several channels carrying the same event for resilience. To use a channel for just one team's games, pick the team above.</div>
+    <div class="foot"><button class="ghost" onclick="closeModals()">Cancel</button><button onclick="submitMap(${leagueId})">Add all</button></div>`, 'min(560px,94vw)');
+  _mapPicker = await buildChannelCascade($('#mapCascade'), {}, { multi: true, onChange: renderMapSel });
+  renderMapSel();
+  // Team scope (issue #5): offer the league's team list (team sports only) so channels can be mapped to ONE team's
+  // games. Followed teams sort first (they're the ones being recorded) and are starred. A preset (from "+ Add team")
+  // selects that team once the list arrives.
   const lg = (window._leagues || []).find(l => l.id === leagueId);
   if (lg && lg.externalLeagueId) api.get(`/api/tsdb/league/${encodeURIComponent(lg.externalLeagueId)}`).then(d => {
     if (!d || !d.teamSport || !Array.isArray(d.teams) || !d.teams.length) return;
@@ -1561,17 +1803,45 @@ function openMapModal(leagueId, name) {
     const teams = [...d.teams].sort((a, b) => (followed.has(String(b.id)) - followed.has(String(a.id))) || String(a.name || '').localeCompare(String(b.name || '')));
     sel.innerHTML = `<option value="">Whole league (every game)</option>` + teams.map(t => `<option value="${esc(t.id)}" data-name="${esc(t.name)}">${esc(t.name)}${followed.has(String(t.id)) ? ' ★' : ''}</option>`).join('');
     $('#mTeamWrap').style.display = '';
+    if (presetTeamId != null) { sel.value = String(presetTeamId); if (sel.value !== String(presetTeamId)) { sel.insertAdjacentHTML('beforeend', `<option value="${esc(presetTeamId)}" data-name="${esc(presetTeamName || '')}" selected>${esc(presetTeamName || presetTeamId)}</option>`); } }
   }).catch(() => { /* team list is optional — the mapping still works league-wide */ });
 }
+// Redraw the "N selected · Clear all" header + the removable chip list from the live selection Map.
+function renderMapSel() {
+  const sel = _mapPicker && _mapPicker.selection; if (!sel) return;
+  const hdr = $('#mapSelHdr'), cnt = $('#mapSelCount'), wrap = $('#mapSelChips'); if (!hdr || !wrap) return;
+  const items = [...sel.values()];
+  hdr.innerHTML = items.length ? `<b>${items.length}</b> selected · <button type="button" class="lg-linkbtn" onclick="clearMapSel()">Clear all</button>` : '0 selected';
+  if (cnt) cnt.textContent = items.length;
+  wrap.innerHTML = items.length
+    ? items.map(it => `<span class="lg-chip">${esc(it.name)}${it.source ? `<span class="lg-chip-src">${esc(it.source)}</span>` : ''}<button type="button" class="lg-chip-x" aria-label="Remove" title="Remove" onclick="removeMapSel('${jsq(String(it.id))}')">×</button></span>`).join('')
+    : `<span class="muted" style="font-size:12px">None yet — tick channels above.</span>`;
+}
+function removeMapSel(id) {
+  const p = _mapPicker; if (!p) return;
+  p.selection.delete(String(id));
+  if (p.refresh) p.refresh();   // un-tick the row if it's in the current view
+  renderMapSel();
+}
+function clearMapSel() {
+  const p = _mapPicker; if (!p) return;
+  p.selection.clear();
+  if (p.refresh) p.refresh();
+  renderMapSel();
+}
 async function submitMap(leagueId) {
-  const channelId = parseInt($('#cascCh').value);
-  if (!channelId) return toast('Pick a channel', 'err');
+  const sel = _mapPicker && _mapPicker.selection;
+  const channelIds = sel ? [...sel.keys()].map(Number) : [];
+  if (!channelIds.length) return toast('Pick at least one channel', 'err');
   const teamSel = $('#mTeam');
   const teamId = teamSel && teamSel.value ? teamSel.value : null;
   const teamName = teamId ? ((teamSel.selectedOptions[0] || {}).dataset || {}).name || null : null;
-  const body = { leagueId, channelId, rank: Math.max(1, parseInt($('#mRank').value) || 1), pinned: $('#mPin').checked, teamId, teamName };
+  const body = { leagueId, teamId, teamName, channelIds, pinned: $('#mPin').checked, startRank: Math.max(1, parseInt($('#mRank').value) || 1) };
   closeModals();
-  const r = await api.post('/api/mappings', body); toast(r.error ? r.error : 'Mapping added', r.error ? 'err' : 'ok'); render();
+  const r = await api.post('/api/mappings/bulk', body);
+  if (r.error) toast(r.error, 'err');
+  else toast(`Added ${r.added} channel${r.added === 1 ? '' : 's'}${r.skipped ? ` · ${r.skipped} skipped` : ''}`, r.added ? 'ok' : '');
+  render();
 }
 async function deleteMapping(id) { const r = await api.del('/api/mappings/' + id); if (r.error) return toast(r.error, 'err'); toast('Mapping removed'); render(); }
 
@@ -1630,12 +1900,14 @@ window.addEventListener('keydown', e => {
 window.render = render; window.openTestModal = openTestModal; window.submitTest = submitTest;
 window.openScheduleModal = openScheduleModal; window.submitSchedule = submitSchedule; window.scheduleFor = scheduleFor; window.scheduleFromGuide = scheduleFromGuide;
 window.openPreview = openPreview; window.stopRec = stopRec; window.startRec = startRec; window.delRec = delRec; window.reresolveRec = reresolveRec; window.reresolveLeague = reresolveLeague;
+window.recToggle = recToggle; window.recToggleAll = recToggleAll; window.bulkStart = bulkStart; window.bulkResolve = bulkResolve; window.bulkStop = bulkStop; window.bulkDelete = bulkDelete;
 window.openImportModal = openImportModal; window.submitImport = submitImport;
 window.ingest = ingest; window.doIngest = doIngest; window.saveSettings = saveSettings; window.closeModals = closeModals;
 window.toggleKebab = toggleKebab; window.closeKebabs = closeKebabs;
-window.syncEpg = syncEpg; window.doSyncEpg = doSyncEpg; window.openSourceModal = openSourceModal; window.submitSource = submitSource; window.deleteSource = deleteSource;
+window.syncEpg = syncEpg; window.doSyncEpg = doSyncEpg; window.openSourceModal = openSourceModal; window.submitSource = submitSource; window.deleteSource = deleteSource; window.refreshAccount = refreshAccount;
 window.openLeagueModal = openLeagueModal; window.submitLeague = submitLeague; window.deleteLeague = deleteLeague; window.syncLeague = syncLeague;
 window.openMapModal = openMapModal; window.submitMap = submitMap; window.deleteMapping = deleteMapping;
+window.toggleLeagueCard = toggleLeagueCard; window.clearMapSel = clearMapSel; window.removeMapSel = removeMapSel;
 window.openEventModal = openEventModal; window.submitEvent = submitEvent; window.monitorEvent = monitorEvent; window.resolvePreview = resolvePreview; window.openCalEvent = openCalEvent;
 window.copyText = copyText; window.openCalendarFeedModal = openCalendarFeedModal; window.saveCalendarPublicBase = saveCalendarPublicBase; window.editCalendarPublicBase = editCalendarPublicBase;
 window.donate = donate;

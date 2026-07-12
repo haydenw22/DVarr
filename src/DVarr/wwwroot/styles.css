@@ -222,6 +222,71 @@ label.field { display:flex; flex-direction:column; gap:5px; font-size:12px; colo
 .team-pick-dot { width:22px; height:22px; border-radius:50%; background:var(--line2); flex:0 0 auto; }
 .team-pick span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
 
+/* =========================================================================
+   Leagues page — per-league accordion (League → Team → Channels) + drag-reorder
+   ========================================================================= */
+.lg-acc { display:flex; flex-direction:column; gap:14px; }
+.lg-card { background:var(--card-grad); border:1px solid var(--line); border-radius:14px; box-shadow:var(--shadow); overflow:hidden; }
+.lg-head { display:flex; align-items:center; gap:10px; padding:12px 14px; flex-wrap:wrap; }
+.lg-chev { flex:0 0 auto; background:transparent; border:1px solid transparent; color:var(--dim); padding:6px; border-radius:8px; min-height:0; }
+.lg-chev:hover { background:rgba(59,130,246,.08); color:var(--txt); box-shadow:none; }
+.lg-chev svg { width:18px; height:18px; transition:transform .15s ease; }
+.lg-card.collapsed .lg-chev svg { transform:rotate(-90deg); }
+.lg-card.collapsed .lg-body { display:none; }
+.lg-head-main { flex:1 1 240px; min-width:0; display:flex; align-items:center; gap:12px; cursor:pointer; }
+.lg-poster-ph { background:var(--chip-bg); }
+.lg-head-txt { min-width:0; }
+.lg-head-title { display:flex; align-items:center; flex-wrap:wrap; gap:7px; }
+.lg-head-title b { font-size:15px; font-weight:700; }
+.lg-head-meta { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+.lg-head-meta .chip { padding:2px 9px; font-size:11px; }
+.lg-head-acts { flex:0 0 auto; display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-left:auto; }
+
+.lg-body { padding:4px 16px 16px; border-top:1px solid var(--line); }
+.lg-group { margin-top:14px; }
+.lg-group-cap { display:flex; align-items:center; gap:8px; font-size:11px; text-transform:uppercase; letter-spacing:.6px; color:var(--dim); font-weight:700; margin-bottom:8px; }
+.lg-chgroup { display:flex; flex-direction:column; gap:7px; min-height:8px; }
+
+.lg-chrow { display:flex; align-items:center; gap:11px; padding:8px 11px; background:var(--chip-bg); border:1px solid var(--line2); border-radius:10px; }
+.lg-chrow.dragging { opacity:.55; outline:1px dashed var(--acc); }
+.lg-grip { flex:0 0 auto; display:inline-flex; color:var(--dim2); cursor:grab; padding:2px; border-radius:6px; }
+.lg-grip:hover { color:var(--txt); background:rgba(59,130,246,.08); }
+.lg-grip:active { cursor:grabbing; }
+.lg-grip svg { width:16px; height:16px; }
+.lg-chrow-main { flex:1 1 auto; min-width:0; }
+.lg-chrow-main b { display:block; font-size:13px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.lg-chrow-sub { font-size:11.5px; color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.lg-pin { color:var(--warn); }
+.lg-rank { flex:0 0 auto; display:flex; flex-direction:column; align-items:center; line-height:1.1; padding:0 4px; }
+.lg-rank-cap { font-size:9px; letter-spacing:.5px; color:var(--dim2); font-weight:700; }
+.lg-rank-n { font-family:ui-monospace,Consolas,"Courier New",monospace; font-size:15px; font-weight:700; color:var(--txt); }
+.lg-chrow-acts { flex:0 0 auto; display:flex; align-items:center; gap:6px; }
+
+.lg-teamgrp { border-left:2px solid var(--line2); padding-left:12px; }
+.lg-team-head { display:flex; align-items:center; gap:9px; flex-wrap:wrap; margin-bottom:8px; }
+.lg-team-badge { width:24px; height:24px; border-radius:50%; flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center; background:var(--panel2); border:1px solid var(--line2); font-size:12px; font-weight:700; color:var(--txt); }
+.lg-team-head b { font-size:13.5px; }
+.lg-addteam { margin-left:auto; }
+.lg-empty { color:var(--dim); font-size:13px; padding:16px; text-align:center; border:1px dashed var(--line2); border-radius:10px; background:var(--panel); }
+.lg-empty.sm { padding:9px; font-size:12px; }
+
+/* ---- Map dialog: multi-select channel rows + selected-channel chips ---- */
+.pickrow.multi { display:flex; align-items:center; gap:9px; }
+.pickrow.multi.sel { background:rgba(59,130,246,.12); color:var(--txt); }
+.pick-box { flex:0 0 auto; width:16px; height:16px; border:1px solid var(--line2); border-radius:4px; position:relative; background:var(--bg); }
+.pickrow.multi.sel .pick-box { background:linear-gradient(180deg,#3b82f6,#2563eb); border-color:var(--acc); }
+.pickrow.multi.sel .pick-box::after { content:""; position:absolute; left:5px; top:2px; width:4px; height:8px; border:solid #fff; border-width:0 2px 2px 0; transform:rotate(45deg); }
+.pick-lbl { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+.lg-sel-hdr { margin-top:12px; font-size:12.5px; color:var(--dim); }
+.lg-sel-cap { margin-top:12px; display:flex; align-items:center; gap:8px; font-size:11px; text-transform:uppercase; letter-spacing:.6px; color:var(--dim); font-weight:700; }
+.lg-chips { display:flex; flex-wrap:wrap; gap:7px; margin-top:8px; min-height:8px; }
+.lg-chip { display:inline-flex; align-items:center; gap:7px; background:var(--chip-bg); border:1px solid var(--line2); border-radius:20px; padding:4px 6px 4px 11px; font-size:12px; color:var(--txt); max-width:100%; }
+.lg-chip-src { color:var(--dim); font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.lg-chip-x { min-height:0; width:20px; height:20px; padding:0; border-radius:50%; background:var(--panel2); color:var(--dim); border:1px solid var(--line2); font-size:14px; line-height:1; display:inline-flex; align-items:center; justify-content:center; flex:0 0 auto; }
+.lg-chip-x:hover { background:rgba(239,68,68,.18); color:#fca5a5; box-shadow:none; }
+.lg-linkbtn { background:transparent; border:0; color:var(--acc); font-weight:600; padding:0; min-height:0; font-size:12.5px; }
+.lg-linkbtn:hover { background:transparent; box-shadow:none; text-decoration:underline; }
+
 /* ---- settings: pill tabs + columns/rows ---- */
 .settings-wrap { max-width:980px; }
 .tab-nav { display:flex; flex-wrap:wrap; gap:6px; border-bottom:1px solid var(--line); padding-bottom:14px; margin-bottom:20px; }
