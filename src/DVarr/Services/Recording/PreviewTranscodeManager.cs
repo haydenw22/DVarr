@@ -160,7 +160,9 @@ public sealed class PreviewTranscodeManager : IAsyncDisposable
     {
         var psi = new ProcessStartInfo(_ffmpeg.Ffmpeg) { RedirectStandardError = true, RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true };
         var args = new List<string> { "-hide_banner", "-loglevel", "error" };
-        if (!string.IsNullOrWhiteSpace(userAgent)) { args.Add("-user_agent"); args.Add(userAgent!); }
+        // Always send a player UA (issue #8) — ffmpeg's default Lavf UA is blocked by many providers.
+        args.Add("-user_agent");
+        args.Add(string.IsNullOrWhiteSpace(userAgent) ? DVarr.Services.Ingest.XtreamClient.DefaultUserAgent : userAgent!);
         // GPU path: decode on NVDEC and keep frames in CUDA memory so scale + encode also run on the GPU.
         if (useNvenc) args.AddRange(new[] { "-hwaccel", "cuda", "-hwaccel_output_format", "cuda" });
         args.AddRange(new[] { "-fflags", "+genpts", "-i", url, "-map", "0:v:0", "-map", "0:a:0?" });

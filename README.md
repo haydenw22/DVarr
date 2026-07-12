@@ -10,7 +10,7 @@
   <a href="https://discord.gg/Nb59pEzGb6"><img alt="Discord" src="https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white" /></a>
 </p>
 
-DVarr watches the leagues you follow on [TheSportsDB](https://www.thesportsdb.com/), maps them to your IPTV channels, and records every event automatically — with a recorder built to survive feed drops, a scheduler that plans around your provider's stream limits, and guide intelligence that picks the right channel an hour before kick-off.
+DVarr watches the leagues you follow on [TheSportsDB](https://www.thesportsdb.com/), maps them to your IPTV channels, and records every event automatically — with a recorder built to survive feed drops, a scheduler that plans around your provider's stream limits, and guide intelligence that picks the channel actually showing each game.
 
 ---
 
@@ -20,7 +20,7 @@ DVarr watches the leagues you follow on [TheSportsDB](https://www.thesportsdb.co
 - **League automation** — add a league once; events, posters and season data sync from TheSportsDB. Follow a whole league, just one team (only their fixtures are scheduled), or — for motorsport — exactly the sessions you care about (Qualifying + Race, skip the practice grind).
 - **Sport-aware recording lengths** — an F1 practice, qualifying or sprint session books an hour; the race keeps a full three-hour window. Five resolution tiers mean a sensible default always exists and your override always wins.
 - **Smart auto-stop** — near the scheduled end, DVarr polls the live score and *extends* the recording in 15-minute steps while the match is still in play. Extra time and penalty shoot-outs land in the file; a race ending is never trimmed.
-- **Match-aware channel picking** — mappings are ranked fallbacks with optional pinning, and can be scoped to a **single team** for leagues where each club airs on its own channel — one mapping per team, no guesswork. An hour before start, DVarr re-checks the EPG (refreshing it if stale) and re-picks the channel actually showing your event, so a late move to a national broadcaster can't hijack the recording.
+- **Match-aware channel picking** — mappings are ranked fallbacks with optional pinning, and can be scoped to a **single team** for leagues where each club airs on its own channel — one mapping per team, no guesswork. From 48 hours out, DVarr re-checks the EPG (refreshing it if stale) and re-picks the channel actually showing your event, so a late move to a national broadcaster can't hijack the recording.
 - **Works out of the box** — the official image ships with a built-in TheSportsDB key (no sign-up needed), and every time in the app follows your **Display timezone** setting, wherever in the world you and your server are.
 - **Guide + calendar** — a fast EPG grid (click a programme to schedule it), a monthly calendar of everything followed, and a token-secured **ICS feed** you can subscribe to from Google Calendar.
 - **Mobile PWA** — install it on your phone; drawer navigation, card layouts and touch-sized controls, with zero functionality lost.
@@ -166,7 +166,7 @@ Have multiple logins with the same provider? Add each as its **own source** — 
 
 - **Auto-sync enabled** — refreshes every source's guide once a day.
 - **EPG sync time / timezone** — pick a quiet hour in your local timezone.
-- **EPG re-pick** (on by default) — within ~1 hour of an event, DVarr re-checks each mapped channel's guide and records from the channel *actually showing the event*.
+- **EPG re-pick** (on by default) — from 48 hours out, DVarr re-checks each mapped channel's guide and records from the channel *actually showing the event*; the Scheduled list updates as soon as the guide lists the game.
 
 ### 4 · Add a league
 

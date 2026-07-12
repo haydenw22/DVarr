@@ -645,7 +645,7 @@ PAGES.leagues = {
           <b>How mappings &amp; ranks work.</b> Each row maps a league — or one <b>team</b> in it — to a channel. <b>Rank</b> is the order DVarr tries them — lowest first: <b>rank&nbsp;1</b> is the primary (first choice), rank&nbsp;2, 3… are fallbacks. When an event is due, DVarr records the best-ranked channel; if that channel <b>won't open or drops out</b>, it automatically walks down the list to the next working channel. Add a few channels that all carry the same event so there's always a backup.
           <div style="margin-top:6px"><b>Team mappings.</b> If each team airs on its own channel (common in US sports — e.g. Yankees on YES Network, Mets on SNY), pick the team in the Map dialog: that channel is then used <b>only for that team's games</b> and beats every whole-league mapping for them. Games are matched by team, so you don't need to map every channel in the league.</div>
           <div style="margin-top:6px"><b>★ Pinned</b> means your pick wins over EPG guesswork — a similar-looking guide entry can't hijack the recording. Unpinned mappings still work but let a strong EPG title match reorder them.</div>
-          <div style="margin-top:6px"><b>National broadcasts.</b> Also map the national channels (FOX, ESPN, …) to the league, unpinned. With <b>Guide-match channel pick</b> on (Settings → Scheduling &amp; EPG), DVarr re-checks each mapped channel's guide shortly before start and records from the channel that actually shows the game — so a game moved to a national channel is caught automatically.</div>
+          <div style="margin-top:6px"><b>National broadcasts.</b> Also map the national channels (FOX, ESPN, …) to the league, unpinned. With <b>Guide-match channel pick</b> on (Settings → Scheduling &amp; EPG), DVarr re-checks each mapped channel's guide from 48 hours out and records from the channel that actually shows the game — the Scheduled list updates as soon as the guide lists it.</div>
           <div class="muted" style="margin-top:6px;font-size:12px;line-height:1.5">All fallbacks must be on the <b>same provider login</b> as the primary (one stream per login). With <b>content check</b> on (Settings), DVarr also fails over when a channel is alive but stuck on a dead <b>black or frozen</b> slate. It does <b>not</b> watch the picture to decide whether the “right” match is on — that relies on your ranks, the EPG, and pre/post-padding, which is exactly why a pre-show/intro is captured rather than skipped.</div>
         </div>
         <div class="toolbar" style="margin:12px 0">
@@ -923,7 +923,7 @@ const SETTINGS_META = {
   epg_past_window_h: { g: 'Guide', t: 'Guide history (hours)', h: 'How many hours of past guide data to keep.', ty: 'int' },
   epg_future_window_d: { g: 'Guide', t: 'Guide lookahead (days)', h: 'How many days of upcoming guide data to keep.', ty: 'int' },
   epg_max_programmes: { g: 'Guide', t: 'Guide safety cap', h: 'Max programmes stored per source to prevent runaway database growth.', ty: 'int' },
-  epg_repick_enabled: { g: 'Guide', t: 'Guide-match channel pick', h: 'Within ~1 hour of start, re-check each mapped channel’s guide — refreshing the source’s EPG first if it’s more than 12 hours old — and record from the channel that actually shows the event. Manual channel choices are never moved.', ty: 'bool' },
+  epg_repick_enabled: { g: 'Guide', t: 'Guide-match channel pick', h: 'Once a recording is within 48 hours of start, re-check each mapped channel’s guide — refreshing the source’s EPG first if it’s more than 12 hours old — and record from the channel that actually shows the event. Manual channel choices are never moved.', ty: 'bool' },
   epg_auto_sync_enabled: { g: 'Guide', t: 'Auto-sync EPG daily', h: 'Automatically refresh every source’s TV guide once a day at the time below.', ty: 'bool' },
   epg_auto_sync_time: { g: 'Guide', t: 'EPG sync time', h: 'Time of day (24-hour) to auto-refresh the guide, in the timezone below.', ty: 'time' },
   epg_auto_sync_offset_minutes: { g: 'Guide', t: 'EPG sync timezone', h: 'Timezone for the sync time — a fixed offset (no daylight-saving adjustment).', ty: 'select', opts: [
@@ -1100,9 +1100,13 @@ function startPreview(channelId) {
   _player.on(mpegts.Events.ERROR, (type, detail, info) => {
     if (type === mpegts.ErrorTypes.MEDIA_ERROR) { startHls(channelId); return; } // codec not browser-playable → transcode
     const busy = info && (info.code === 409 || /conflict/i.test(info.msg || ''));
+    // The preview proxy passes the PROVIDER's status through (e.g. 403/458/512), so show the number the
+    // provider actually answered with instead of the player library's opaque error name.
+    const code = info && info.code > 0 ? info.code : null;
+    const hint = code && code !== 404 ? `the provider answered <b>${code}</b> for this stream` : `it may be offline`;
     msg.innerHTML = busy
       ? `<span style="color:var(--warn)">This source's single stream is busy</span> — a recording or another preview is using it. Close that and retry.`
-      : `<span style="color:var(--warn)">Couldn't reach this channel</span> — it may be offline. <span class="muted">[${esc(detail || type)}]</span>`;
+      : `<span style="color:var(--warn)">Couldn't reach this channel</span> — ${hint}. <span class="muted">[${esc(code || detail || type)}]</span>`;
   });
   _player.load();
   video.play().catch(() => { });

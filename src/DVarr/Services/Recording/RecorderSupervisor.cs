@@ -294,7 +294,7 @@ public sealed class RecorderSupervisor
         if (nativeRate) args.Add("-re");
         // Use the source's configured user-agent if set (some IPTV providers require a specific UA); else the VLC default.
         args.Add("-user_agent");
-        args.Add(string.IsNullOrWhiteSpace(userAgent) ? "VLC/3.0.18 LibVLC/3.0.18" : userAgent!);
+        args.Add(string.IsNullOrWhiteSpace(userAgent) ? DVarr.Services.Ingest.XtreamClient.DefaultUserAgent : userAgent!);
         args.AddRange(new[]
         {
             "-reconnect", "1", "-reconnect_streamed", "1",
@@ -619,10 +619,10 @@ public sealed class RecorderSupervisor
         // (the "going back in time" bug). Falls back to a plain list if PTS can't be read — never worse than before.
         var deoverlap = await GetBoolSettingAsync("finalize_deoverlap_enabled", true);
         var listPath = Path.Combine(segDir, "concat.ffconcat");
-        var (listLines, trimmed, dropped) = await BuildConcatListAsync(segs, deoverlap);
+        var (listLines, trimmed, dropped, jumpDropped) = await BuildConcatListAsync(segs, deoverlap);
         await File.WriteAllLinesAsync(listPath, listLines);
-        if (deoverlap && (trimmed > 0 || dropped > 0))
-            _log.LogInformation("[Recorder] Recording {Id} de-overlap: {Trim} segment(s) trimmed, {Drop} dropped as duplicates", recordingId, trimmed, dropped);
+        if (deoverlap && (trimmed > 0 || dropped > 0 || jumpDropped > 0))
+            _log.LogInformation("[Recorder] Recording {Id} de-overlap: {Trim} segment(s) trimmed, {Drop} dropped as duplicates, {Jump} dropped for internal clock jumps", recordingId, trimmed, dropped, jumpDropped);
 
         var psi = new ProcessStartInfo(_d.Ffmpeg.Ffmpeg)
         { RedirectStandardError = true, RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true };
@@ -686,17 +686,18 @@ public sealed class RecorderSupervisor
     /// Build the ffconcat lines (header + file/inpoint directives). When <paramref name="deoverlap"/> is on, probe
     /// each segment's PTS range and skip duplicated content re-served on reconnect: a fully-duplicate segment is
     /// dropped; a partial overlap gets an `inpoint` at the running timeline end so only the new tail is kept.
+    /// A segment whose INTERNAL span is impossibly long is dropped too (see <see cref="MaxSaneSegmentSpanS"/>).
     /// </summary>
-    private async Task<(List<string> lines, int trimmed, int dropped)> BuildConcatListAsync(List<string> segs, bool deoverlap)
+    private async Task<(List<string> lines, int trimmed, int dropped, int jumpDropped)> BuildConcatListAsync(List<string> segs, bool deoverlap)
     {
         static string FileLine(string s) => $"file '{s.Replace("\\", "/").Replace("'", "'\\''")}'";
         var lines = new List<string> { "ffconcat version 1.0" };
-        if (!deoverlap) { lines.AddRange(segs.Select(FileLine)); return (lines, 0, 0); }
+        if (!deoverlap) { lines.AddRange(segs.Select(FileLine)); return (lines, 0, 0, 0); }
 
         const double eps = 0.05;
         var inv = System.Globalization.CultureInfo.InvariantCulture;
         double timelineEnd = double.NegativeInfinity;
-        int trimmed = 0, dropped = 0;
+        int trimmed = 0, dropped = 0, jumpDropped = 0;
         foreach (var s in segs)
         {
             var (min, max, ok) = await ProbePtsRangeAsync(s);
@@ -705,6 +706,18 @@ public sealed class RecorderSupervisor
                 // Unreadable PTS → include verbatim and reset the guard (never worse than the old behaviour).
                 lines.Add(FileLine(s));
                 timelineEnd = double.NegativeInfinity;
+            }
+            else if (max - min > MaxSaneSegmentSpanS)
+            {
+                // Intra-segment clock jump (bug #7 residual): ffmpeg's own -reconnect splices the provider's NEW
+                // connection into the SAME segment file, and if that connection restarted its PCR/PTS clock the jump
+                // sits INSIDE one file — the setts BSF misses it (PTS and DTS jump together) and the concat demuxer
+                // only re-bases at file boundaries, so it survived into the MKV (players see a ~20h file and stall at
+                // the seam). An 8s clock-cut segment can span a GOP or two more, never minutes — drop the straddling
+                // file (≤ ~8s of footage at the glitch) and the neighbours join at a boundary concat re-bases cleanly.
+                // timelineEnd is left as-is: the next clean segment (on the jumped clock) simply appends after it.
+                jumpDropped++;
+                _log.LogWarning("[Recorder] segment {Seg} spans {Span:0.#}s internally (clock jump inside the file) — dropped from finalize", Path.GetFileName(s), max - min);
             }
             else if (double.IsNegativeInfinity(timelineEnd) || min >= timelineEnd - eps)
             {
@@ -723,8 +736,20 @@ public sealed class RecorderSupervisor
                 timelineEnd = max;
             }
         }
-        return (lines, trimmed, dropped);
+        // Pathological source (e.g. every segment straddles a PCR wrap): if the jump filter would leave NOTHING,
+        // fall back to the plain list — a file with a weird timeline still beats no recording at all.
+        if (jumpDropped > 0 && !lines.Skip(1).Any())
+        {
+            lines = new List<string> { "ffconcat version 1.0" };
+            lines.AddRange(segs.Select(FileLine));
+            return (lines, 0, 0, 0);
+        }
+        return (lines, trimmed, dropped, jumpDropped);
     }
+
+    /// <summary>Longest internal PTS span (seconds) a single clock-cut segment can legitimately have. Segments are
+    /// cut every 8s of wall clock (plus up to a GOP), so minutes of internal span always means a mid-file clock jump.</summary>
+    private const double MaxSaneSegmentSpanS = 300;
 
     /// <summary>Min &amp; max video packet PTS (seconds) of a segment via ffprobe (demux only, no decode). Min/max
     /// (not first/last) so an intra-segment reconnect that itself regressed PTS doesn't fool the overlap maths.</summary>
@@ -744,7 +769,10 @@ public sealed class RecorderSupervisor
             var inv = System.Globalization.CultureInfo.InvariantCulture;
             foreach (var line in outp.Split('\n', StringSplitOptions.RemoveEmptyEntries))
             {
-                if (double.TryParse(line.Trim(), System.Globalization.NumberStyles.Float, inv, out var v))
+                // ffprobe 7/8's csv writer appends a trailing comma when the packet carries side data
+                // ("1.423222,"), which silently failed the parse and no-op'd the whole de-overlap pass.
+                var cell = line.Trim().TrimEnd(',');
+                if (double.TryParse(cell, System.Globalization.NumberStyles.Float, inv, out var v))
                 { if (v < min) min = v; if (v > max) max = v; any = true; }
             }
             return any ? (min, max, true) : (0, 0, false);

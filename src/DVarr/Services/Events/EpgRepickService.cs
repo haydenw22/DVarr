@@ -8,11 +8,12 @@ using Microsoft.EntityFrameworkCore;
 namespace DVarr.Services.Events;
 
 /// <summary>
-/// Arm-window EPG re-pick (docs: "map Fox 503+504 and record whichever the guide says has the game"). The resolver
+/// Guide re-pick (docs: "map Fox 503+504 and record whichever the guide says has the game"). The resolver
 /// already scores mapped channels by guide-title similarity, but it runs at PLACEMENT — days before the provider's
-/// guide can see the event, so the pick degenerates to rank order. This service re-runs that same resolver ≈1h before
-/// start (the sweep horizon — the provider's EPG often has no content 24h out) and re-points the recording (SAME
-/// credential only — slot planning is untouched) when another mapped channel's guide actually shows the event.
+/// guide can see the event, so the pick degenerates to rank order. This service re-runs that same resolver for any
+/// recording starting within the sweep horizon (48h — as soon as the guide lists the game, the Scheduled list shows
+/// the corrected channel; issue #9) and re-points the recording (SAME credential only — slot planning is untouched)
+/// when another mapped channel's guide actually shows the event.
 /// It also keeps the guide fresh: if this source's last successful EPG sync is >12h old (or never), it kicks a
 /// background refresh before re-picking (the next sweep re-picks against the fresh data); and if the guide is blank for
 /// every mapped channel close to start it does the same. Both are rate-limited by a shared 30-min per-source cooldown,
@@ -24,7 +25,7 @@ public sealed class EpgRepickService
     // Tuning (constants, not settings — one kill-switch setting `epg_repick_enabled` governs the feature):
     private const double MinEpgScore = 0.25;   // proposed channel must actually look like the event
     private const double Hysteresis = 0.10;    // and beat the current channel by this much (no tick-to-tick flapping)
-    private const int BlankRefreshWindowS = 3600;      // only chase a blank guide when the event is this close (matches the sweep horizon)
+    private const int BlankRefreshWindowS = 3600;      // only chase a blank guide when the event is this close (a blank guide days out is normal)
     private const int StaleEpgS = 12 * 3600;           // refresh the source's guide if its last good sync is older than this
     private const int RefreshCooldownS = 30 * 60;      // at most one opportunistic EPG refresh per source per 30 min
 

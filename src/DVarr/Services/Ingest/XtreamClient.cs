@@ -28,6 +28,11 @@ public sealed class XtreamClient
         _log = log;
     }
 
+    /// <summary>The player User-Agent sent whenever a source has none configured. Providers routinely reject
+    /// requests without a recognisable player UA, so EVERY provider-facing call (discovery, EPG, recorder,
+    /// preview) must fall back to this same value — never send a blank/default-client UA.</summary>
+    public const string DefaultUserAgent = "VLC/3.0.18 LibVLC/3.0.18";
+
     public string BaseUrl(ProviderSource s)
     {
         var proto = string.IsNullOrWhiteSpace(s.ServerProtocol) ? "http" : s.ServerProtocol;
@@ -63,7 +68,7 @@ public sealed class XtreamClient
     private async Task<T?> GetAsync<T>(string url, CancellationToken ct)
     {
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
-        req.Headers.UserAgent.ParseAdd("VLC/3.0.18 LibVLC/3.0.18");
+        req.Headers.UserAgent.ParseAdd(DefaultUserAgent);
         using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
         resp.EnsureSuccessStatusCode();
         await using var stream = await resp.Content.ReadAsStreamAsync(ct);
@@ -88,7 +93,7 @@ public sealed class XtreamClient
     public async Task<Stream> OpenUrlAsync(string url, string? userAgent, CancellationToken ct = default)
     {
         var req = new HttpRequestMessage(HttpMethod.Get, url);
-        req.Headers.UserAgent.ParseAdd(string.IsNullOrWhiteSpace(userAgent) ? "VLC/3.0.18 LibVLC/3.0.18" : userAgent);
+        req.Headers.UserAgent.ParseAdd(string.IsNullOrWhiteSpace(userAgent) ? DefaultUserAgent : userAgent);
         var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
         resp.EnsureSuccessStatusCode();
         var net = await resp.Content.ReadAsStreamAsync(ct);

@@ -58,12 +58,20 @@ public static class PreviewEndpoints
             try
             {
                 using var req = new HttpRequestMessage(HttpMethod.Get, upstreamUrl);
-                if (!string.IsNullOrWhiteSpace(src.UserAgent)) req.Headers.TryAddWithoutValidation("User-Agent", src.UserAgent);
+                // Always send a player UA (issue #8): a blank Source.UserAgent must fall back to the same VLC UA the
+                // recorder and discovery use — providers routinely 4xx a request with no recognisable player UA, which
+                // made preview the ONLY provider call that failed while ingest and recording worked.
+                req.Headers.TryAddWithoutValidation("User-Agent",
+                    string.IsNullOrWhiteSpace(src.UserAgent) ? XtreamClient.DefaultUserAgent : src.UserAgent);
                 using var resp = await client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
                 if (!resp.IsSuccessStatusCode)
                 {
-                    ctx.Response.StatusCode = 502;
-                    await ctx.Response.WriteAsJsonAsync(new { error = "upstream", status = (int)resp.StatusCode });
+                    // Pass the provider's real status through (clamped to an error class) so the player surfaces
+                    // e.g. [403] instead of a generic 502 the UI can't explain.
+                    var status = (int)resp.StatusCode;
+                    ctx.Response.StatusCode = status >= 400 ? status : 502;
+                    log.LogInformation("[Preview] upstream {Status} for channel {Id} ({Url})", status, channelId, upstreamUrl);
+                    await ctx.Response.WriteAsJsonAsync(new { error = "upstream", status });
                     return;
                 }
 

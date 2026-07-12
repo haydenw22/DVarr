@@ -12,6 +12,16 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.35.0] — 2026-07-12
+Preview fix, unwatchable-recording fix, and channel picks that show up days ahead. (GitHub issues #7, #8 and #9.)
+
+### Fixed
+- **Live preview no longer fails on providers that require a player User-Agent (issue #8).** The in-browser preview proxy was the only provider-facing call that sent NO User-Agent when the source's optional UA field was blank — channel ingest and recording always fall back to a VLC UA, so the list worked and recordings worked while every preview got rejected. The preview proxy and the HLS transcode fallback now use the same VLC default (one shared constant so the paths can't drift again), and when a provider still refuses, the error shows the provider's actual HTTP status (e.g. `403`) instead of the opaque `HttpStatusCodeInvalid`.
+- **Recordings can no longer come out as a bogus ~20-hour file that stalls mid-playback (issue #7).** When a provider stream glitches, ffmpeg's transparent `-reconnect` can splice the new connection — with a restarted PCR/PTS clock — into the MIDDLE of a single 8s segment file. That intra-file clock jump slipped past every existing guard (the `setts` repair only fires when PTS and DTS diverge; de-overlap only handles backward jumps; the concat demuxer only re-bases at file boundaries), so the final MKV's timeline leapt hours forward mid-file: players computed a ~20h duration and stalled at the seam. Finalize now probes each segment's internal PTS span and drops any segment spanning more than 5 minutes internally (a clock-cut 8s segment can never do that legitimately) — the glitch costs ≤ ~8 seconds of footage instead of the whole recording, and if every segment were somehow flagged it falls back to the old behaviour rather than producing nothing.
+
+### Changed
+- **Guide-match channel picks now happen up to 48 hours out instead of 1 hour (issue #9).** With per-team or multi-channel mappings, placement (days ahead, before the guide has data) falls back to rank order — and the correction sweep only ran within 1h of start, so the Scheduled list showed the same channel for every game all week even though it would self-correct at air time. The sweep now covers everything starting within 48h: as soon as the provider's guide lists the game, the recording moves to the channel actually showing it and the Scheduled list reflects it. All safety rails unchanged (match threshold, hysteresis, same credential only, manual channel locks never moved); the blank-guide refresh chase stays at 1h since an empty guide days out is normal.
+
 ## [1.34.0] — 2026-07-12
 Per-team channel mappings + the display timezone setting now actually works. (GitHub issues #4 and #5 — thanks to kamsheel and DrZacharySmith for the reports.)
 
