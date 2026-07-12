@@ -12,6 +12,8 @@
 
 DVarr watches the leagues you follow on [TheSportsDB](https://www.thesportsdb.com/), maps them to your IPTV channels, and records every event automatically — with a recorder built to survive feed drops, a scheduler that plans around your provider's stream limits, and guide intelligence that picks the channel actually showing each game.
 
+> **New in v1.36** — provider **expiry dates** in Sources, a redesigned **Leagues page** (League → Team → Channels, with drag-to-reorder priority), **multi-select channel mapping** (tick several and add them all at once), and **bulk actions on Recordings** (start / re-resolve / stop / delete together). Full history in the [changelog](CHANGELOG.md).
+
 ---
 
 ## Highlights
@@ -31,7 +33,7 @@ DVarr watches the leagues you follow on [TheSportsDB](https://www.thesportsdb.co
 
 ## Screenshots
 
-### Leagues — follow a league, a team, or just the sessions you want
+### Leagues — every league's mapped channels in one place; map a whole league or a single team, and drag the grip to reorder priority
 
 ![Leagues](.github/media/leagues.png)
 
@@ -69,7 +71,7 @@ DVarr watches the leagues you follow on [TheSportsDB](https://www.thesportsdb.co
 
 ### Unraid (Community Apps) — the easy way
 
-DVarr is on **Unraid Community Apps**: open the **Apps** tab, search **DVarr**, install, and set the three paths (`/config` → appdata, `/media` and `/segments` → your array/pool) plus your web-UI username and password. Updates arrive through Unraid's normal container-update flow.
+DVarr is on **Unraid Community Apps**: open the **Apps** tab, search **DVarr**, install, and set the three paths — `/config` → appdata; `/media` → your sports library; `/segments` → a **hidden scratch path outside your media library** (e.g. `/mnt/user/media/.dvarr-segments`, see the folder note below) — plus your web-UI username and password. Updates arrive through Unraid's normal container-update flow.
 
 ### Docker / Docker Compose
 
@@ -106,8 +108,12 @@ DVARR_AUTH_PASS=a-long-random-password
 | Mount | Purpose |
 |---|---|
 | `/config` | SQLite DB + settings — small; put it on a fast disk (SSD/NVMe) |
-| `/media` | Finished recordings, filed in Plex-scannable show/season folders |
-| `/segments` | In-flight capture scratch (several GB per recording), auto-cleaned after finalize — same filesystem as `/media` makes finalizing a cheap move |
+| `/media` | Finished recordings, filed into Plex/Jellyfin-scannable `League / Season / Event` show folders |
+| `/segments` | In-flight capture scratch (several GB per recording), auto-cleaned after each recording finalizes |
+
+> **⚠ Keep `/segments` out of the folder your media server scans.** Putting it on the **same filesystem** as `/media` is ideal — finalizing a recording becomes an instant move instead of a copy — but point it at a **hidden or sibling** path, e.g. `/mnt/user/media/.dvarr-segments` (the leading dot hides it from Plex/Jellyfin). **Do not nest it inside your media library** (like `.../sports/segments`); if you do, it turns up as a bogus "segments" entry in Plex/Jellyfin.
+
+> **What DVarr puts in `/media`:** only your **league show folders**, a hidden **`.unsorted`** staging folder (recordings it couldn't match to an event), and — briefly, while a recording finalizes — a flat `.mkv` at the root before it's filed. It creates nothing else, so any other folder you see there came from somewhere else (a previous DVR app, or your media server's own Live-TV/DVR recording path pointed at the same folder).
 
 > **Provider model:** typical IPTV providers allow **one stream per login**, so DVarr's concurrency comes from multiple credentials (one tuner slot each). Fallback channels are structurally restricted to the same login — the schema itself rejects a cross-credential fallback.
 
