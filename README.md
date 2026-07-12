@@ -7,6 +7,7 @@
   <img alt="Unraid" src="https://img.shields.io/badge/Unraid-Community%20Apps-F15A2C" />
   <img alt="PWA" src="https://img.shields.io/badge/PWA-mobile%20ready-5A0FC8" />
   <img alt="License: GPL-3.0" src="https://img.shields.io/badge/License-GPL--3.0-blue" />
+  <a href="https://discord.gg/Nb59pEzGb6"><img alt="Discord" src="https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white" /></a>
 </p>
 
 DVarr watches the leagues you follow on [TheSportsDB](https://www.thesportsdb.com/), maps them to your IPTV channels, and records every event automatically — with a recorder built to survive feed drops, a scheduler that plans around your provider's stream limits, and guide intelligence that picks the right channel an hour before kick-off.
@@ -272,6 +273,12 @@ Dockerfile                    # multi-stage build + ffmpeg runtime
 - Recordings are **never orphaned by a re-sync** — events upsert by a stable natural key; nothing is deleted or re-keyed.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the full per-version history.
+
+---
+
+## Community
+
+Questions, feature ideas, or just want to talk sport? [**Join the DVarr Discord**](https://discord.gg/Nb59pEzGb6) — setup help in `#support`, ideas in `#feature-requests`, bugs in `#bug-reports` (confirmed ones get tracked here on GitHub), and `#sport-chat` for match-day company.
 
 ---
 
