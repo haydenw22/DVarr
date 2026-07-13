@@ -12,6 +12,7 @@ public class DVarrDbContext : DbContext
     public DbSet<TunerLease> TunerLeases => Set<TunerLease>();
     public DbSet<ChannelHealth> ChannelHealth => Set<ChannelHealth>();
     public DbSet<Channel> Channels => Set<Channel>();
+    public DbSet<ChannelGroupPref> ChannelGroupPrefs => Set<ChannelGroupPref>();
     public DbSet<Programme> Programmes => Set<Programme>();
     public DbSet<League> Leagues => Set<League>();
     public DbSet<Event> Events => Set<Event>();
@@ -57,6 +58,13 @@ public class DVarrDbContext : DbContext
             // test-recording flow (test channels share StreamId=0) and risk orphaning rows on a dedup migration.
             e.HasIndex(c => new { c.SourceId, c.StreamId });
             e.HasOne(c => c.Source).WithMany().HasForeignKey(c => c.SourceId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // --- ChannelGroupPref (per-source hide/favourite for a provider group; absence = normal visibility) ---
+        b.Entity<ChannelGroupPref>(e =>
+        {
+            e.HasIndex(p => new { p.SourceId, p.GroupName }).IsUnique();
+            e.HasOne<ProviderSource>().WithMany().HasForeignKey(p => p.SourceId).OnDelete(DeleteBehavior.Cascade);
         });
 
         // --- Programme (EPG keyed by per-source XMLTV channel id; joined to channels at render time) ---

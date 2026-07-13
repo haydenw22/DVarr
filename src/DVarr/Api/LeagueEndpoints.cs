@@ -31,6 +31,7 @@ public static class LeagueEndpoints
                     l.ScheduleHorizonDays, eventDurationOverrideS = l.EventDurationOverrideS, monitoredTeams = ParseTeams(l.MonitoredTeamsJson),
                     monitoredSessions = ParseSessions(l.MonitoredSessionsJson), sessionDurations = SettingsService.ParseSessionDurations(l.SessionDurationsJson),
                     autoStopMode = l.AutoStopMode ?? "auto", autoStopMaxExtendS = l.AutoStopMaxExtendS,
+                    priority = l.Priority,
                     lastSync = l.LastEventSyncUtc, events, mappings = maps,
                 });
             }
@@ -205,6 +206,27 @@ public static class LeagueEndpoints
                 await db.SaveChangesAsync();
             });
             return Results.Json(new { l.Id, updated = true });
+        });
+
+        // Persist the league RECORDING-PRIORITY order (the Leagues page "Priority" dialog): orderedIds is the full
+        // league list, most important first. Stored as League.Priority = N..1 (higher wins in the conflict ladder;
+        // a league added later defaults to 0 = below everything ranked here). Must be a complete unique permutation
+        // so a stale client can't half-apply and corrupt the ladder — same contract as /api/mappings/reorder.
+        app.MapPut("/api/leagues/priority", async (LeaguePriorityReorder req, DVarrDbContext db, DbWriteGate gate) =>
+        {
+            var leagues = await db.Leagues.ToListAsync();
+            var ordered = req.OrderedIds ?? Array.Empty<int>();
+            var ids = leagues.Select(l => l.Id).ToHashSet();
+            if (ordered.Length != leagues.Count || ordered.Distinct().Count() != ordered.Length || !ordered.All(ids.Contains))
+                return Results.Json(new { error = "priority order rejected: the list no longer matches your leagues — refresh the page and try again" }, statusCode: 409);
+            var byId = leagues.ToDictionary(l => l.Id);
+            await gate.WriteAsync(async () =>
+            {
+                var prio = ordered.Length; // top of the list = highest number = wins conflicts
+                foreach (var id in ordered) byId[id].Priority = prio--;
+                await db.SaveChangesAsync();
+            });
+            return Results.Json(new { ok = true });
         });
 
         app.MapDelete("/api/leagues/{id:int}", async (int id, DVarrDbContext db, DbWriteGate gate) =>
@@ -402,6 +424,19 @@ public static class LeagueEndpoints
             return Results.Json(new { m.Id });
         });
 
+        // Edit ONE mapping in place (currently just the pin flag) — so un-pinning no longer means delete + re-add.
+        app.MapPut("/api/mappings/{id:int}", async (int id, MappingUpdate req, DVarrDbContext db, DbWriteGate gate) =>
+        {
+            var m = await db.LeagueChannelMaps.FindAsync(id);
+            if (m is null) return Results.NotFound();
+            await gate.WriteAsync(async () =>
+            {
+                if (req.Pinned.HasValue) m.Pinned = req.Pinned.Value;
+                await db.SaveChangesAsync();
+            });
+            return Results.Json(new { m.Id, m.Pinned });
+        });
+
         app.MapDelete("/api/mappings/{id:int}", async (int id, DVarrDbContext db, DbWriteGate gate) =>
         {
             var m = await db.LeagueChannelMaps.FindAsync(id);
@@ -543,3 +578,5 @@ public sealed record MonitorReq(bool Monitored);
 public sealed record MappingCreate(int LeagueId, int ChannelId, int? Rank, bool? Pinned, string? TeamId, string? TeamName);
 public sealed record MappingBulkCreate(int LeagueId, string? TeamId, string? TeamName, int[]? ChannelIds, bool? Pinned, int? StartRank);
 public sealed record MappingReorder(int LeagueId, string? TeamId, int[]? OrderedIds);
+public sealed record MappingUpdate(bool? Pinned);
+public sealed record LeaguePriorityReorder(int[]? OrderedIds);

@@ -164,37 +164,126 @@ public static class ApiEndpoints
         });
 
         // ---- Channels + source toggle (?source=all|<id>, ?q=) ----
-        app.MapGet("/api/channels", async (DVarrDbContext db, string? source, string? q, string? group, int? take) =>
+        // Paged: returns { total, items } (v1.39.0 — the page UI needs the true count for its pager). Hidden channels
+        // and channels in hidden groups are excluded by default; ?view=favorites narrows to starred channels,
+        // ?view=hidden shows ONLY hidden ones (so they can be unhidden). Favourites always sort first.
+        app.MapGet("/api/channels", async (DVarrDbContext db, string? source, string? q, string? group, int? take, int? skip, string? view) =>
         {
             var query = from c in db.Channels
                         join s in db.Sources on c.SourceId equals s.Id
                         select new { c, sourceLabel = s.Label };
             if (!string.IsNullOrWhiteSpace(source) && source != "all" && int.TryParse(source, out var sid))
                 query = query.Where(x => x.c.SourceId == sid);
-            if (!string.IsNullOrWhiteSpace(group) && group != "all")
+            var explicitGroup = !string.IsNullOrWhiteSpace(group) && group != "all";
+            if (explicitGroup)
                 query = query.Where(x => x.c.GroupName == group);
             if (!string.IsNullOrWhiteSpace(q))
             {
                 var ql = q.ToLower();
                 query = query.Where(x => x.c.Name.ToLower().Contains(ql));
             }
-            var rows = await query.OrderBy(x => x.c.Name).Take(take is > 0 and <= 2000 ? take.Value : 500).ToListAsync();
-            return Results.Json(rows.Select(x => new
+            if (view == "hidden")
             {
-                x.c.Id, x.c.Name, x.c.SourceId, x.sourceLabel, x.c.StreamId,
-                quality = x.c.DetectedQuality, number = x.c.ChannelNumber, group = x.c.GroupName,
-                logicalKey = x.c.LogicalKey, manual = !string.IsNullOrEmpty(x.c.DirectUrl),
-            }));
+                // Only channels the user hid (per-channel flag or via a hidden group) — the "unhide" management view.
+                query = query.Where(x => x.c.Hidden
+                    || db.ChannelGroupPrefs.Any(p => p.Hidden && p.SourceId == x.c.SourceId && p.GroupName == x.c.GroupName));
+            }
+            else
+            {
+                query = query.Where(x => !x.c.Hidden);
+                // Group-level hide: skipped when ONE group was explicitly requested (you're already inside it).
+                if (!explicitGroup)
+                    query = query.Where(x => !db.ChannelGroupPrefs.Any(p => p.Hidden && p.SourceId == x.c.SourceId && p.GroupName == x.c.GroupName));
+                if (view == "favorites")
+                    query = query.Where(x => x.c.Favorite);
+            }
+            var total = await query.CountAsync();
+            var rows = await query
+                .OrderByDescending(x => x.c.Favorite).ThenBy(x => x.c.Name).ThenBy(x => x.c.Id)
+                .Skip(skip is > 0 ? skip.Value : 0)
+                .Take(take is > 0 and <= 2000 ? take.Value : 500)
+                .ToListAsync();
+            return Results.Json(new
+            {
+                total,
+                items = rows.Select(x => new
+                {
+                    x.c.Id, x.c.Name, x.c.SourceId, x.sourceLabel, x.c.StreamId,
+                    quality = x.c.DetectedQuality, number = x.c.ChannelNumber, group = x.c.GroupName,
+                    logicalKey = x.c.LogicalKey, manual = !string.IsNullOrEmpty(x.c.DirectUrl),
+                    favorite = x.c.Favorite, hidden = x.c.Hidden,
+                }),
+            });
         });
 
-        // Distinct groups/categories, scoped to a source (drives the source-aware group filter).
+        // Distinct groups/categories, scoped to a source, each with its user pref (favourite/hidden) + channel count.
+        // Returns objects (v1.39.0; was a plain string array) — favourites first, then name; hidden groups are
+        // included WITH their flag so the management dialog can unhide them (list consumers filter them out).
         app.MapGet("/api/channels/groups", async (DVarrDbContext db, string? source) =>
         {
             var q = db.Channels.Where(c => c.GroupName != null && c.GroupName != "");
-            if (!string.IsNullOrWhiteSpace(source) && source != "all" && int.TryParse(source, out var sid))
-                q = q.Where(c => c.SourceId == sid);
-            var groups = await q.Select(c => c.GroupName!).Distinct().OrderBy(g => g).ToListAsync();
-            return Results.Json(groups);
+            int? sid = (!string.IsNullOrWhiteSpace(source) && source != "all" && int.TryParse(source, out var s0)) ? s0 : null;
+            if (sid is { } sv) q = q.Where(c => c.SourceId == sv);
+            var groups = await q.GroupBy(c => c.GroupName!)
+                .Select(g => new { name = g.Key, channels = g.Count() }).ToListAsync();
+            var prefQ = db.ChannelGroupPrefs.AsQueryable();
+            if (sid is { } sv2) prefQ = prefQ.Where(p => p.SourceId == sv2);
+            var prefs = await prefQ.ToListAsync();
+            // "All sources": a group counts as hidden/favourite when ANY source marks it (prefs are written per source
+            // for every source carrying the group, so in practice they agree).
+            var hiddenSet = prefs.Where(p => p.Hidden).Select(p => p.GroupName).ToHashSet();
+            var favSet = prefs.Where(p => p.Favorite).Select(p => p.GroupName).ToHashSet();
+            return Results.Json(groups
+                .Select(g => new { g.name, g.channels, hidden = hiddenSet.Contains(g.name), favorite = favSet.Contains(g.name) })
+                .OrderByDescending(g => g.favorite).ThenBy(g => g.name));
+        });
+
+        // Per-channel user pref (favourite / hidden). Mapped channels keep working when hidden — browse-time only.
+        app.MapPut("/api/channels/{id:int}/pref", async (int id, ChannelPrefUpdate req, DVarrDbContext db, DbWriteGate gate) =>
+        {
+            var c = await db.Channels.FindAsync(id);
+            if (c is null) return Results.NotFound();
+            await gate.WriteAsync(async () =>
+            {
+                if (req.Favorite.HasValue) c.Favorite = req.Favorite.Value;
+                if (req.Hidden.HasValue) c.Hidden = req.Hidden.Value;
+                c.UpdatedUtc = EpochTime.Now();
+                await db.SaveChangesAsync();
+            });
+            return Results.Json(new { c.Id, favorite = c.Favorite, hidden = c.Hidden });
+        });
+
+        // Per-GROUP user pref. source=all applies it to every source that carries the group, so the "All sources"
+        // view behaves the same as per-source. Prefs are keyed (SourceId, GroupName) and survive channel re-ingests.
+        app.MapPut("/api/channels/groups/pref", async (GroupPrefUpdate req, DVarrDbContext db, DbWriteGate gate) =>
+        {
+            if (string.IsNullOrWhiteSpace(req.Group)) return Results.BadRequest(new { error = "group is required" });
+            var srcQ = db.Channels.Where(c => c.GroupName == req.Group);
+            if (!string.IsNullOrWhiteSpace(req.Source) && req.Source != "all" && int.TryParse(req.Source, out var sid))
+                srcQ = srcQ.Where(c => c.SourceId == sid);
+            var sourceIds = await srcQ.Select(c => c.SourceId).Distinct().ToListAsync();
+            if (sourceIds.Count == 0) return Results.NotFound(new { error = "no source carries that group" });
+            var existing = await db.ChannelGroupPrefs
+                .Where(p => p.GroupName == req.Group && sourceIds.Contains(p.SourceId)).ToListAsync();
+            await gate.WriteAsync(async () =>
+            {
+                foreach (var sidV in sourceIds)
+                {
+                    var p = existing.FirstOrDefault(x => x.SourceId == sidV);
+                    var fav = req.Favorite ?? p?.Favorite ?? false;
+                    var hid = req.Hidden ?? p?.Hidden ?? false;
+                    if (!fav && !hid)
+                    {
+                        // No pref left at all → drop the row (absence = normal visibility) instead of storing noise.
+                        if (p is not null) db.ChannelGroupPrefs.Remove(p);
+                        continue;
+                    }
+                    if (p is null) { p = new DVarr.Data.Entities.ChannelGroupPref { SourceId = sidV, GroupName = req.Group! }; db.ChannelGroupPrefs.Add(p); }
+                    p.Favorite = fav; p.Hidden = hid;
+                }
+                await db.SaveChangesAsync();
+            });
+            return Results.Json(new { ok = true, sources = sourceIds.Count });
         });
 
         // ---- Guide (timeline EPG): channels + their programmes in a window, joined by epg_channel_id, with
@@ -210,13 +299,20 @@ public static class ApiEndpoints
             var chq = db.Channels.AsQueryable();
             int? sid = (!string.IsNullOrWhiteSpace(source) && source != "all" && int.TryParse(source, out var s0)) ? s0 : null;
             if (sid is { } sv) chq = chq.Where(c => c.SourceId == sv);
-            if (!string.IsNullOrWhiteSpace(group) && group != "all") chq = chq.Where(c => c.GroupName == group);
+            var explicitGroup = !string.IsNullOrWhiteSpace(group) && group != "all";
+            if (explicitGroup) chq = chq.Where(c => c.GroupName == group);
             if (!string.IsNullOrWhiteSpace(q)) { var ql = q.ToLower(); chq = chq.Where(c => c.Name.ToLower().Contains(ql)); }
+            // Hidden channels/groups stay out of the guide too (same browse-time rule as /api/channels); picking a
+            // specific group shows it even if hidden — you asked for it.
+            chq = chq.Where(c => !c.Hidden);
+            if (!explicitGroup)
+                chq = chq.Where(c => !db.ChannelGroupPrefs.Any(p => p.Hidden && p.SourceId == c.SourceId && p.GroupName == c.GroupName));
 
-            // Surface channels that CAN have guide data first (provider tvg-id OR a name-matched one), so the default
-            // view isn't a wall of "no guide data".
+            // Favourite channels first, then channels that CAN have guide data (provider tvg-id OR a name-matched
+            // one), so the default view leads with your channels instead of a wall of "no guide data".
             var chans = await chq
-                .OrderByDescending(c => (c.EpgChannelId != null && c.EpgChannelId != "") || (c.MatchedEpgId != null && c.MatchedEpgId != ""))
+                .OrderByDescending(c => c.Favorite)
+                .ThenByDescending(c => (c.EpgChannelId != null && c.EpgChannelId != "") || (c.MatchedEpgId != null && c.MatchedEpgId != ""))
                 .ThenBy(c => c.Name)
                 .Take(take is > 0 and <= 400 ? take.Value : 120)
                 .Select(c => new { c.Id, c.Name, c.SourceId, c.EpgChannelId, c.MatchedEpgId, c.StreamId, group = c.GroupName, manual = c.DirectUrl != null && c.DirectUrl != "" })
@@ -811,6 +907,8 @@ public static class ApiEndpoints
 }
 
 public sealed record CreateRecordingRequest(int ChannelId, long StartUtc, long EndUtc, int? PrePadS, int? PostPadS, string? Title, string? Priority, string? MatchQuery);
+public sealed record ChannelPrefUpdate(bool? Favorite, bool? Hidden);
+public sealed record GroupPrefUpdate(string? Source, string? Group, bool? Favorite, bool? Hidden);
 public sealed record ReassignRequest(int? SourceId, string? Priority);
 public sealed record ImportAssignRequest(string? LeagueId, string? EventId);
 public sealed record TestRecordingRequest(string Url, string? Name, int? Minutes);

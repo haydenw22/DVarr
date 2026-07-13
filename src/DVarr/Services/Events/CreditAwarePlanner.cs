@@ -25,20 +25,22 @@ public sealed class CreditAwarePlanner
     /// <summary>The outcome for one event: placed on Option (optionally preempting an incumbent), or a Conflict with a reason.</summary>
     public sealed record Decision(bool Placed, Option? Option, int? PreemptRecordingId, bool Conflict, string Reason);
 
-    /// <summary>Conflict rank (HIGHER wins): priority class, then league priority, then earlier start, then lower id.</summary>
-    public readonly record struct PRank(int Prio, int League, long NegStart, long NegId) : IComparable<PRank>
+    /// <summary>Conflict rank (HIGHER wins): priority class, then league priority, then team priority (the order of
+    /// the league's followed teams — first = most important), then earlier start, then lower id.</summary>
+    public readonly record struct PRank(int Prio, int League, int Team, long NegStart, long NegId) : IComparable<PRank>
     {
         public int CompareTo(PRank o)
         {
             var c = Prio.CompareTo(o.Prio); if (c != 0) return c;
             c = League.CompareTo(o.League); if (c != 0) return c;
+            c = Team.CompareTo(o.Team); if (c != 0) return c;
             c = NegStart.CompareTo(o.NegStart); if (c != 0) return c;
             return NegId.CompareTo(o.NegId);
         }
     }
 
-    public static PRank MakeRank(RecordingPriority prio, int leaguePriority, long startUtc, int id)
-        => new(PrioScore(prio), leaguePriority, -startUtc, -(long)id);
+    public static PRank MakeRank(RecordingPriority prio, int leaguePriority, int teamPriority, long startUtc, int id)
+        => new(PrioScore(prio), leaguePriority, teamPriority, -startUtc, -(long)id);
 
     private static int PrioScore(RecordingPriority p) => p switch
     {

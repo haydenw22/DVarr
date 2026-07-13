@@ -12,6 +12,23 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.39.0] — 2026-07-14
+Community feature batch (Discord requests): recording priority for leagues & teams, per-mapping pin editing, hide/favourite for channels & groups, real pagination on the Channels page, and a Library alignment fix.
+
+### Added
+- **Recording priority for leagues and teams.** When both logins are busy for the same window, DVarr no longer effectively falls back to "whichever was added first" — a new **Priority** button on the Leagues page opens a ranked list of your leagues (drag or ▲▼) and, for any league following 2+ teams, a ranked team list. The higher item wins the slot; the loser waits in Conflicts and auto-promotes when a login frees. Order of followed teams breaks ties within a league (top team wins), and a per-recording **Can't-Miss** bump still beats everything. A league's rank shows as a `priority N` chip on its card.
+- **Hide or favourite channels and groups** (Discord request: *"my provider is huge — 650 groups, 35,000 channels; since this is for sports I don't need to see all that"*). A **Manage groups** dialog on the Channels page hides whole provider groups from every list, dropdown and the Guide, and can favourite groups so they sort first in dropdowns. Every channel row has a **★ favourite** (sorts first in the Channels page, Guide and every channel picker) and a **Hide** button; a **Hidden** view lists what's hidden so anything can be brought back (including "unhide group" for channels hidden via their group). Hiding is browse-time only — existing mappings and recordings keep working, and prefs survive re-ingests. No extra playlist "hop" needed.
+- **Channels page pagination.** The page no longer silently stops at 500 rows: a pager (prev/next, "page X of Y · N channels") with a per-page selector (50/100/250/500) covers the whole lineup.
+
+### Changed
+- **Pin/unpin a mapping in place.** Each mapped channel row (and its ⋯ menu) now has a pin toggle — no more deleting and re-adding a channel just to change its pin.
+- **One reorder control at a time.** On mouse/trackpad setups a mapping row shows just the drag grip; the ▲▼ buttons appear only on hover or keyboard focus. Touch devices show ▲▼ only (drag isn't a thing there). Same behaviour in the new priority dialog.
+- The Guide now lists favourite channels first and leaves hidden channels/groups out.
+- `/api/channels` now returns `{ total, items }` (was a bare array) to back the pager, and `/api/channels/groups` returns objects with per-group `hidden`/`favorite`/`channels` fields (was a string array).
+
+### Fixed
+- **Library action buttons line up again.** Each league/season section is its own table, so columns auto-sized differently per section and the watch/delete buttons drifted horizontally — worst on smaller screens (Discord screenshot). Columns are now fixed-width across every section and actions right-align.
+
 ## [1.38.2] — 2026-07-14
 Library/preview playback survives files the browser can't decode directly (Discord report: one clip played, another gave a "playback failed" error).
 

@@ -572,7 +572,10 @@ function libSection(name, items, isUnsorted) {
 }
 
 function libTable(rows) {
-  return `<table class="rtable"><tbody>${rows.map(i => {
+  // Fixed column widths (via the colgroup + .lib-rtable's table-layout:fixed): every league/season section renders
+  // its own <table>, so without them each table auto-sized its columns differently and the watch/delete buttons
+  // drifted horizontally between sections — worst on smaller screens. The first (title) column absorbs the rest.
+  return `<table class="rtable lib-rtable"><colgroup><col/><col class="c-aired"/><col class="c-qual"/><col class="c-dur"/><col class="c-size"/><col class="c-acts"/></colgroup><tbody>${rows.map(i => {
     const missing = i.status === 'Missing';
     const epTag = i.season > 0 && i.episode > 0 ? `S${i.season}E${String(i.episode).padStart(2, '0')}` : '';
     const quality = [i.height ? i.height + 'p' : '', (i.videoCodec || '').toUpperCase()].filter(Boolean).join(' · ');
@@ -642,51 +645,166 @@ function recPreview(id, title) {
 }
 
 // ---- Channels ----
+// Render a group <option> list from the /api/channels/groups objects: hidden groups stay out of the dropdown
+// (unhide them via "Manage groups"), favourites lead with a ★. Shared by the Channels page, Guide and cascades.
+function groupOptions(groups, q, selected, cap = 800) {
+  const vis = groups.filter(g => !g.hidden);
+  const f = q ? vis.filter(g => tokensMatch(g.name, q)) : vis;
+  return `<option value="all">All groups${f.length ? ` (${f.length})` : ''}</option>`
+    + f.slice(0, cap).map(g => `<option value="${esc(g.name)}" ${g.name === selected ? 'selected' : ''}>${g.favorite ? '★ ' : ''}${esc(g.name)}</option>`).join('');
+}
 PAGES.channels = {
   title: 'Channels',
+  actions: () => `<button class="ghost" onclick="openGroupManageModal()">Manage groups</button>`,
+  menuActions: [{ label: 'Manage groups', fn: 'openGroupManageModal()' }],
   async render(el) {
     const sources = await api.get('/api/sources');
-    el.innerHTML = `<div class="note">Channels are per source. Filter by source and by the provider's <b>group</b> (category); the group list updates to the selected source. Channels & groups appear after a source <b>ingest</b> (Sources page).</div>
+    el.innerHTML = `<div class="note">Channels are per source. Filter by source and by the provider's <b>group</b> (category); the group list updates to the selected source. <b>★</b> favourites a channel (sorts first everywhere); <b>Manage groups</b> (top right) hides whole groups you never use — hidden channels stay out of every list, but existing mappings &amp; recordings keep working. Channels &amp; groups appear after a source <b>ingest</b> (Sources page).</div>
       <div class="toolbar" style="margin-top:16px">
         <select id="chSrc"><option value="all">All sources</option>${sources.map(s => `<option value="${s.id}">${esc(s.label)}</option>`).join('')}</select>
         <input id="chGrpQ" placeholder="filter groups (e.g. uk sports)…" style="max-width:200px"/>
         <select id="chGrp"><option value="all">All groups</option></select>
         <input id="chQ" class="grow" placeholder="search channels (keyword)…" />
-      </div><div id="chWrap"></div>`;
+        <select id="chView" title="Which channels to show"><option value="all">All channels</option><option value="favorites">★ Favourites</option><option value="hidden">Hidden</option></select>
+      </div>
+      <div id="chWrap"></div>
+      <div class="pager" id="chPager" style="display:none">
+        <button class="ghost sm" id="chPrev">‹ prev</button>
+        <span class="muted" id="chPageInfo"></span>
+        <button class="ghost sm" id="chNext">next ›</button>
+        <span class="grow"></span>
+        <label class="muted" style="display:inline-flex;align-items:center;gap:6px;font-size:12px">per page
+          <select id="chPageSize"><option>50</option><option selected>100</option><option>250</option><option>500</option></select></label>
+      </div>`;
     let allGroups = [];
-    const renderGroups = () => {
-      const q = $('#chGrpQ').value;
-      const f = q ? allGroups.filter(g => tokensMatch(g, q)) : allGroups;
-      $('#chGrp').innerHTML = `<option value="all">All groups${f.length ? ` (${f.length})` : ''}</option>` + f.slice(0, 800).map(g => `<option value="${esc(g)}">${esc(g)}</option>`).join('');
-    };
-    const loadGroups = async () => { allGroups = await api.get(`/api/channels/groups?source=${$('#chSrc').value}`); renderGroups(); };
+    const state = { page: 0, pageSize: 100 };
+    const renderGroups = () => { $('#chGrp').innerHTML = groupOptions(allGroups, $('#chGrpQ').value, $('#chGrp').value); };
+    const loadGroups = async () => { const g = await api.get(`/api/channels/groups?source=${$('#chSrc').value}`); allGroups = Array.isArray(g) ? g : []; renderGroups(); };
     // Per-draw token: a slower earlier response must not overwrite a newer filter/search result (audit UI-ASYNC-03).
     let drawSeq = 0;
     const draw = async () => {
       const my = ++drawSeq;
-      const rows = await api.get(`/api/channels?source=${$('#chSrc').value}&group=${encodeURIComponent($('#chGrp').value)}&q=${encodeURIComponent($('#chQ').value)}&take=500`);
-      if (my !== drawSeq || !Array.isArray(rows)) return; // superseded by a newer draw, or a transient error
+      const r = await api.get(`/api/channels?source=${$('#chSrc').value}&group=${encodeURIComponent($('#chGrp').value)}&q=${encodeURIComponent($('#chQ').value)}&view=${$('#chView').value}&take=${state.pageSize}&skip=${state.page * state.pageSize}`);
+      if (my !== drawSeq || !r || !Array.isArray(r.items)) return; // superseded by a newer draw, or a transient error
+      // The data may have shrunk under a stale page (filter change, hide) — snap back to the last real page.
+      const pages = Math.max(1, Math.ceil(r.total / state.pageSize));
+      if (state.page >= pages && r.total > 0) { state.page = pages - 1; return draw(); }
+      const rows = r.items;
       window._chanRows = {}; rows.forEach(c => window._chanRows[c.id] = c);
-      $('#chWrap').innerHTML = rows.length ? `<table class="rtable"><thead><tr><th>Name</th><th>Group</th><th>Source</th><th>Quality</th><th></th></tr></thead><tbody>${rows.map(c => `
-        <tr><td data-label="">${esc(c.name)}</td><td data-label="Group" class="muted">${esc(c.group || '')}</td><td data-label="Source" class="muted">${esc(c.sourceLabel)}</td><td data-label="Quality" class="mono muted">${esc(c.quality || '')}</td>
+      const hiddenView = $('#chView').value === 'hidden';
+      $('#chWrap').innerHTML = rows.length ? `<table class="rtable"><thead><tr><th style="width:1%"></th><th>Name</th><th>Group</th><th>Source</th><th>Quality</th><th></th></tr></thead><tbody>${rows.map(c => {
+        // In the Hidden view a channel may be hidden only via its GROUP — per-channel Unhide can't help there,
+        // so offer to unhide the group instead.
+        const viaGroup = hiddenView && !c.hidden;
+        const hideBtn = viaGroup
+          ? `<button class="ghost sm" title="Hidden because its whole group is hidden — this unhides the group “${esc(c.group || '')}”" onclick="chanUnhideGroup('${jsq(c.group || '')}',${c.sourceId})">Unhide group</button>`
+          : `<button class="ghost sm" title="${c.hidden ? 'Show this channel in lists again' : 'Hide this channel from every list (mappings keep working)'}" onclick="chanHide(${c.id},${!c.hidden})">${c.hidden ? 'Unhide' : 'Hide'}</button>`;
+        return `
+        <tr><td data-label="" class="ch-fav"><button class="favbtn${c.favorite ? ' on' : ''}" title="${c.favorite ? 'Un-favourite' : 'Favourite — sorts first in every channel list'}" aria-label="${c.favorite ? 'Un-favourite' : 'Favourite'}" aria-pressed="${!!c.favorite}" onclick="chanFav(${c.id},${!c.favorite})">${c.favorite ? '★' : '☆'}</button></td>
+        <td data-label="">${esc(c.name)}</td><td data-label="Group" class="muted">${esc(c.group || '')}</td><td data-label="Source" class="muted">${esc(c.sourceLabel)}</td><td data-label="Quality" class="mono muted">${esc(c.quality || '')}</td>
         <td data-label="" class="row acts" style="gap:6px;flex-wrap:nowrap">
           <button class="play-btn sm" title="Watch live preview" onclick="openPreview(${c.id},'${jsq(c.name)}')">${I.play} Watch</button>
           <button class="ghost sm" onclick="scheduleFor(${c.id})">${I.plus} Schedule</button>
+          ${hideBtn}
           ${kebab([
             { label: `${I.play} Watch live preview`, fn: `openPreview(${c.id},'${jsq(c.name)}')` },
             { label: 'Schedule recording', fn: `scheduleFor(${c.id})` },
+            { label: c.favorite ? 'Un-favourite' : '★ Favourite', fn: `chanFav(${c.id},${!c.favorite})` },
+            viaGroup ? { label: 'Unhide group', fn: `chanUnhideGroup('${jsq(c.group || '')}',${c.sourceId})` }
+                     : { label: c.hidden ? 'Unhide channel' : 'Hide channel', fn: `chanHide(${c.id},${!c.hidden})` },
           ])}
-        </td></tr>`).join('')}</tbody></table>`
-        : emptyBox('No channels for this view. Run an ingest on the Sources page.');
+        </td></tr>`;
+      }).join('')}</tbody></table>`
+        : emptyBox(hiddenView ? 'No hidden channels.' : $('#chView').value === 'favorites' ? 'No favourites yet — tap ☆ on a channel.' : 'No channels for this view. Run an ingest on the Sources page.');
+      const pager = $('#chPager');
+      if (r.total > 0) {
+        pager.style.display = 'flex';
+        $('#chPageInfo').textContent = `page ${state.page + 1} of ${pages} · ${r.total.toLocaleString()} channel${r.total === 1 ? '' : 's'}`;
+        $('#chPrev').disabled = state.page <= 0;
+        $('#chNext').disabled = state.page >= pages - 1;
+      } else pager.style.display = 'none';
     };
-    $('#chSrc').addEventListener('change', async () => { await loadGroups(); $('#chGrp').value = 'all'; await draw(); });
+    window._chanDraw = draw; // chanFav/chanHide refresh the current page in place (no full page re-render)
+    const reset = () => { state.page = 0; return draw(); };
+    $('#chSrc').addEventListener('change', async () => { await loadGroups(); $('#chGrp').value = 'all'; await reset(); });
     let gt; $('#chGrpQ').addEventListener('input', () => { clearTimeout(gt); gt = setTimeout(renderGroups, 150); });
-    $('#chGrp').addEventListener('change', draw);
-    let t; $('#chQ').addEventListener('input', () => { clearTimeout(t); t = setTimeout(draw, 250); });
+    $('#chGrp').addEventListener('change', reset);
+    $('#chView').addEventListener('change', reset);
+    let t; $('#chQ').addEventListener('input', () => { clearTimeout(t); t = setTimeout(reset, 250); });
+    $('#chPrev').addEventListener('click', () => { if (state.page > 0) { state.page--; draw(); } });
+    $('#chNext').addEventListener('click', () => { state.page++; draw(); });
+    $('#chPageSize').addEventListener('change', () => { state.pageSize = parseInt($('#chPageSize').value) || 100; reset(); });
     await loadGroups();
     await draw();
   },
 };
+// Toggle a channel's favourite/hidden pref, then refresh whatever channel view is on screen.
+async function chanFav(id, on) {
+  const r = await api.put(`/api/channels/${id}/pref`, { favorite: on });
+  if (r.error) return toast(r.error, 'err');
+  if (window._chanDraw) window._chanDraw();
+}
+async function chanHide(id, hide) {
+  const r = await api.put(`/api/channels/${id}/pref`, { hidden: hide });
+  if (r.error) return toast(r.error, 'err');
+  toast(hide ? 'Channel hidden — find it again under the “Hidden” view' : 'Channel visible again', 'ok');
+  if (window._chanDraw) window._chanDraw();
+}
+// From the Hidden view: a channel that's hidden because its whole GROUP is hidden — unhide the group (this source).
+async function chanUnhideGroup(name, sourceId) {
+  const r = await api.put('/api/channels/groups/pref', { source: String(sourceId), group: name, hidden: false });
+  if (r.error) return toast(r.error, 'err');
+  toast(`Group “${name}” visible again`, 'ok');
+  if (window._chanDraw) window._chanDraw();
+}
+// "Manage groups" dialog: search + hide/favourite whole provider groups (650-group lineups are mostly noise for
+// a sports DVR). Prefs apply per source; with "All sources" selected they apply to every source carrying the group.
+async function openGroupManageModal() {
+  const gen = modalGen() + 1;
+  const sources = await api.get('/api/sources');
+  const srcSel = $('#chSrc') ? $('#chSrc').value : 'all';
+  modal(`<h2>Manage groups</h2>
+    <div class="muted" style="font-size:12.5px;line-height:1.5;margin-bottom:12px"><b>Hide</b> removes a group (and all its channels) from every list, dropdown and the Guide — DVarr stays focused on the sports you actually use. <b>★</b> favourites a group so it sorts first in the group dropdowns. Existing mappings and recordings are never affected.</div>
+    <div class="row" style="gap:8px;margin-bottom:10px">
+      <select id="gmSrc">${[`<option value="all" ${srcSel === 'all' ? 'selected' : ''}>All sources</option>`, ...sources.map(s => `<option value="${s.id}" ${String(s.id) === srcSel ? 'selected' : ''}>${esc(s.label)}</option>`)].join('')}</select>
+      <input id="gmQ" class="grow" placeholder="filter groups (e.g. uk sports)…"/>
+      <select id="gmView"><option value="all">All</option><option value="hidden">Hidden only</option><option value="favorites">★ Favourites</option></select>
+    </div>
+    <div id="gmList" class="picklist" style="max-height:min(52vh,460px)"></div>
+    <div class="foot"><button class="ghost" onclick="closeModals()">Close</button></div>`, 'min(620px,94vw)');
+  let groups = [];
+  const renderList = () => {
+    const q = $('#gmQ').value, view = $('#gmView').value;
+    let f = q ? groups.filter(g => tokensMatch(g.name, q)) : groups.slice();
+    if (view === 'hidden') f = f.filter(g => g.hidden);
+    else if (view === 'favorites') f = f.filter(g => g.favorite);
+    f.sort((a, b) => (b.favorite - a.favorite) || (a.hidden - b.hidden) || a.name.localeCompare(b.name));
+    $('#gmList').innerHTML = f.length ? f.slice(0, 1200).map(g => `
+      <div class="grp-row${g.hidden ? ' is-hidden' : ''}">
+        <button class="favbtn${g.favorite ? ' on' : ''}" title="${g.favorite ? 'Un-favourite group' : 'Favourite group — sorts first in dropdowns'}" aria-pressed="${!!g.favorite}" onclick="groupPref('${jsq(g.name)}',{favorite:${!g.favorite}})">${g.favorite ? '★' : '☆'}</button>
+        <span class="grp-name" title="${esc(g.name)}">${esc(g.name)}</span>
+        <span class="muted grp-count">${g.channels} ch</span>
+        <button class="ghost sm" onclick="groupPref('${jsq(g.name)}',{hidden:${!g.hidden}})">${g.hidden ? 'Unhide' : 'Hide'}</button>
+      </div>`).join('') : `<div class="muted" style="padding:10px 12px">(no groups match)</div>`;
+  };
+  const load = async () => {
+    const g = await api.get(`/api/channels/groups?source=${$('#gmSrc').value}`);
+    if (!modalAlive(gen)) return;
+    groups = Array.isArray(g) ? g : [];
+    renderList();
+  };
+  // groupPref needs the modal's current source + a reload hook; stash them for the inline onclick handlers.
+  window._gmReload = load; window._gmSrc = () => $('#gmSrc') ? $('#gmSrc').value : 'all';
+  $('#gmSrc').onchange = load;
+  let t; $('#gmQ').oninput = () => { clearTimeout(t); t = setTimeout(renderList, 150); };
+  $('#gmView').onchange = renderList;
+  await load();
+}
+async function groupPref(name, patch) {
+  const r = await api.put('/api/channels/groups/pref', Object.assign({ source: window._gmSrc ? window._gmSrc() : 'all', group: name }, patch));
+  if (r.error) return toast(r.error, 'err');
+  if (window._gmReload) window._gmReload();
+}
 
 // ---- Guide (timeline EPG) ----
 const GUIDE_PX_PER_HOUR = 200;
@@ -720,12 +838,8 @@ PAGES.guide = {
       <div class="guide-legend"><span class="lg lg-live">live now</span><span class="lg lg-rec">recording</span><span class="lg lg-pad">pre/post buffer</span><span class="lg lg-play">▶ click a channel name to watch · click a programme to schedule</span></div>
       <div id="gWrap" class="loading">…</div>`;
 
-    const renderGroups = () => {
-      const q = $('#gGrpQ').value;
-      const f = q ? state.groups.filter(g => tokensMatch(g, q)) : state.groups;
-      $('#gGrp').innerHTML = `<option value="all">All groups${f.length ? ` (${f.length})` : ''}</option>` + f.slice(0, 800).map(g => `<option value="${esc(g)}" ${g === state.group ? 'selected' : ''}>${esc(g)}</option>`).join('');
-    };
-    const loadGroups = async () => { state.groups = await api.get(`/api/channels/groups?source=${state.sourceId}`); renderGroups(); };
+    const renderGroups = () => { $('#gGrp').innerHTML = groupOptions(state.groups, $('#gGrpQ').value, state.group); };
+    const loadGroups = async () => { const g = await api.get(`/api/channels/groups?source=${state.sourceId}`); state.groups = Array.isArray(g) ? g : []; renderGroups(); };
 
     let drawSeq = 0; // per-draw token — a slow earlier guide response must not overwrite a newer one (audit UI-ASYNC-03)
     const draw = async () => {
@@ -846,8 +960,8 @@ PAGES.sources = {
 const _lgCollapsed = new Set();
 PAGES.leagues = {
   title: 'Leagues',
-  actions: () => `<button onclick="openLeagueModal(null)">${I.plus} Add league</button><button class="ghost" onclick="render()">${I.refresh} Refresh</button>`,
-  menuActions: [{ label: 'Refresh', fn: 'render()' }],
+  actions: () => `<button onclick="openLeagueModal(null)">${I.plus} Add league</button><button class="ghost" onclick="openPriorityModal()" title="Rank leagues & teams for recording conflicts">Priority</button><button class="ghost" onclick="render()">${I.refresh} Refresh</button>`,
+  menuActions: [{ label: 'Recording priority', fn: 'openPriorityModal()' }, { label: 'Refresh', fn: 'render()' }],
   async render(el) {
     const ls = await api.get('/api/leagues');
     // Distinguish a genuine load failure from "no leagues yet" (audit UI-LOAD-01) — otherwise a failed fetch reads
@@ -865,7 +979,8 @@ PAGES.leagues = {
       <div class="note" style="margin-top:12px">
         <b>How mappings &amp; ranks work.</b> Each channel is mapped to a league — or to one <b>team</b> in it. <b>Rank</b> is the order DVarr tries them — lowest first: <b>rank&nbsp;1</b> is the primary (first choice), rank&nbsp;2, 3… are fallbacks. When an event is due, DVarr records the best-ranked channel; if that channel <b>won't open or drops out</b>, it walks down the list to the next working channel. <b>Drag the grip</b> to reorder a channel's priority. Add a few channels that all carry the same event so there's always a backup.
         <div style="margin-top:6px"><b>Team mappings.</b> If each team airs on its own channel, pick the team in the Map dialog: that channel is then used <b>only for that team's games</b> and beats every whole-league mapping for them. Games are matched by team, so you don't need to map every channel in the league.</div>
-        <div style="margin-top:6px"><b>★ Pinned</b> means your pick wins over EPG guesswork — a similar-looking guide entry can't hijack the recording. Unpinned mappings still work but let a strong EPG title match reorder them.</div>
+        <div style="margin-top:6px"><b>★ Pinned</b> means your pick wins over EPG guesswork — a similar-looking guide entry can't hijack the recording. Unpinned mappings still work but let a strong EPG title match reorder them. Toggle it any time with the pin button on the row.</div>
+        <div style="margin-top:6px"><b>Recording priority.</b> When <b>both logins are busy</b> for the same window, the <b>Priority</b> button (top right) decides which league — and which of your followed teams — wins the slot; the loser waits in Conflicts.</div>
         <div style="margin-top:6px"><b>National broadcasts.</b> Also map the national channels (FOX, ESPN, …) to the league, unpinned. With <b>Guide-match channel pick</b> on (Settings → Scheduling &amp; EPG), DVarr re-checks each mapped channel's guide from 48 hours out and records from the channel that actually shows the game — the Scheduled list updates as soon as the guide lists it.</div>
         <div class="muted" style="margin-top:6px;font-size:12px;line-height:1.5">All fallbacks must be on the <b>same provider login</b> as the primary (one stream per login). With <b>content check</b> on (Settings), DVarr also fails over when a channel is alive but stuck on a dead <b>black or frozen</b> slate. It does <b>not</b> watch the picture to decide whether the “right” match is on — that relies on your ranks, the EPG, and pre/post-padding, which is exactly why a pre-show/intro is captured rather than skipped.</div>
       </div>
@@ -910,6 +1025,7 @@ function renderLeagueCard(l, lmaps) {
             <span class="chip">${esc(l.sport)}</span>
             <span class="chip">${l.events} event${l.events === 1 ? '' : 's'}</span>
             <span class="chip">${lmaps.length} map${lmaps.length === 1 ? '' : 's'}</span>
+            ${l.priority ? `<span class="chip" title="Recording priority — a higher-priority league wins when both logins are busy (set via the Priority button)">priority ${l.priority}</span>` : ''}
             ${l.monitoredSessions && l.monitoredSessions.length ? `<span class="chip">sessions: ${esc(l.monitoredSessions.join(', '))}</span>` : ''}
             ${l.autoStopMode === 'fixed' ? `<span class="chip">auto-stop: fixed</span>` : ''}
           </div>
@@ -951,7 +1067,8 @@ function renderTeamGroup(l, t, rows) {
   </div>`;
 }
 
-// A single channel row: grip handle (drag) + keyboard/touch move buttons, channel name + source, a RANK badge, remove.
+// A single channel row: grip handle (drag) + keyboard/touch move buttons, channel name + source, a RANK badge,
+// a pin toggle (edit the mapping in place — no more delete + re-add just to unpin), remove.
 function renderChRow(m) {
   return `<div class="lg-chrow" data-mapid="${m.id}" draggable="false">
     <span class="lg-grip" title="Drag to reorder priority" aria-hidden="true">${I.grip}</span>
@@ -961,14 +1078,25 @@ function renderChRow(m) {
     </span>
     <div class="lg-chrow-main">
       <b>${esc(m.channel || ('channel ' + m.channelId))}</b>
-      <div class="lg-chrow-sub">${esc(m.source || '')}${m.pinned ? ' · <span class="lg-pin" title="Pinned — beats EPG guessing">★ pinned</span>' : ''}</div>
+      <div class="lg-chrow-sub">${esc(m.source || '')}</div>
     </div>
     <span class="lg-rank" title="Rank / priority — 1 is tried first"><span class="lg-rank-cap">RANK</span><span class="lg-rank-n">${m.rank}</span></span>
     <span class="lg-chrow-acts acts-row">
+      <button type="button" class="ghost sm lg-pintog${m.pinned ? ' on' : ''}" aria-pressed="${!!m.pinned}" title="${m.pinned ? 'Pinned — your pick beats EPG guessing. Click to unpin.' : 'Unpinned — a strong EPG title match may reorder. Click to pin.'}" onclick="toggleMapPin(${m.id},${!m.pinned})">${m.pinned ? '★ pinned' : '☆ pin'}</button>
       <button class="danger sm" onclick="deleteMapping(${m.id})">Del</button>
-      ${kebab([{ label: 'Remove mapping', fn: `deleteMapping(${m.id})`, danger: true }])}
+      ${kebab([
+        { label: m.pinned ? 'Unpin (allow EPG re-pick)' : '★ Pin (beat EPG guessing)', fn: `toggleMapPin(${m.id},${!m.pinned})` },
+        { label: 'Remove mapping', fn: `deleteMapping(${m.id})`, danger: true },
+      ])}
     </span>
   </div>`;
+}
+// Edit one mapping in place (pin flag) — PUT /api/mappings/{id}.
+async function toggleMapPin(id, pinned) {
+  const r = await api.put('/api/mappings/' + id, { pinned });
+  if (r.error) return toast(r.error, 'err');
+  toast(pinned ? 'Pinned — this pick now beats EPG guessing' : 'Unpinned — a strong EPG match may reorder it', 'ok');
+  render();
 }
 // Keyboard/touch reorder (audit UI-LG-03): swap this row with its neighbour in the group and persist, mirroring the
 // drag path. Optimistic (no full re-render on success) so keyboard focus stays on the button for repeated presses.
@@ -1048,6 +1176,118 @@ async function commitGroupOrder(group) {
   [...group.querySelectorAll('.lg-chrow')].forEach((r, i) => { const b = r.querySelector('.lg-rank-n'); if (b) b.textContent = i + 1; });
   const res = await api.put('/api/mappings/reorder', { leagueId, teamId, orderedIds });
   if (res && res.error) { toast(res.error, 'err'); render(); }
+}
+
+// ---- Recording-priority dialog (leagues + teams) ----
+// Ranks what wins when demand exceeds every login for a window: top of the list records, the loser parks in
+// Conflict. League order is stored as League.Priority (higher wins); team order is the order of the league's
+// followed-teams list (first = most important). A per-recording "Can't-Miss" bump (Conflicts page) still beats both.
+async function openPriorityModal() {
+  const ls = await api.get('/api/leagues');
+  if (!Array.isArray(ls)) return toast("Couldn't load leagues", 'err');
+  if (!ls.length) { modal(`<h2>Recording priority</h2><div class="note">Add a league first (this page).</div><div class="foot"><button class="ghost" onclick="closeModals()">Close</button></div>`); return; }
+  // Ranked leagues (priority desc) first, un-ranked (0) after, alphabetical within each — a stable editable order.
+  const ordered = ls.slice().sort((a, b) => ((b.priority || 0) - (a.priority || 0)) || a.name.localeCompare(b.name));
+  const leagueRow = l => `
+    <div class="prio-row" data-id="${l.id}" draggable="false">
+      <span class="lg-grip" title="Drag to reorder" aria-hidden="true">${I.grip}</span>
+      <span class="lg-move">
+        <button type="button" class="lg-moveb" title="Move up (more important)" aria-label="Move up" onclick="movePrioRow(this,-1)">▲</button>
+        <button type="button" class="lg-moveb" title="Move down (less important)" aria-label="Move down" onclick="movePrioRow(this,1)">▼</button>
+      </span>
+      <span class="prio-n"></span>
+      <div class="prio-main"><b>${esc(l.name)}</b><span class="muted" style="font-size:11.5px"> · ${esc(l.sport)}</span></div>
+    </div>`;
+  const teamRow = t => `
+    <div class="prio-row" data-tid="${esc(String(t.id))}" data-tname="${esc(t.name || '')}" draggable="false">
+      <span class="lg-grip" title="Drag to reorder" aria-hidden="true">${I.grip}</span>
+      <span class="lg-move">
+        <button type="button" class="lg-moveb" title="Move up (more important)" aria-label="Move up" onclick="movePrioRow(this,-1)">▲</button>
+        <button type="button" class="lg-moveb" title="Move down (less important)" aria-label="Move down" onclick="movePrioRow(this,1)">▼</button>
+      </span>
+      <span class="prio-n"></span>
+      <div class="prio-main"><b>${esc(t.name || t.id)}</b></div>
+    </div>`;
+  const teamSections = ls.filter(l => (l.monitoredTeams || []).length >= 2)
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map(l => `
+      <div class="lg-group-cap" style="margin-top:16px">Team priority — ${esc(l.name)}</div>
+      <div class="prio-list" data-league="${l.id}">${l.monitoredTeams.map(teamRow).join('')}</div>`).join('');
+  modal(`<h2>Recording priority</h2>
+    <div class="muted" style="font-size:12.5px;line-height:1.55;margin-bottom:12px">When <b>both logins are busy</b> for the same window, the <b>higher item on this list records</b> and the other waits in Conflicts. Within one league, its followed-team order breaks the tie (top team wins). A per-recording <b>Can't-Miss</b> bump (Conflicts page) still beats everything here. Drag or use ▲▼, then Save.</div>
+    <div class="lg-group-cap">Leagues — most important first</div>
+    <div class="prio-list" id="prioLeagues">${ordered.map(leagueRow).join('')}</div>
+    ${teamSections}
+    <div class="foot"><button class="ghost" onclick="closeModals()">Cancel</button><button id="prioSave" onclick="saveLeaguePriority()">Save priority</button></div>`, 'min(560px,94vw)');
+  document.querySelectorAll('.prio-list').forEach(wirePrioDnd);
+  renumberPrioLists();
+}
+// Live 1..N badges so the current standing is always visible while reordering.
+function renumberPrioLists() {
+  document.querySelectorAll('.prio-list').forEach(list =>
+    [...list.querySelectorAll('.prio-row')].forEach((r, i) => { const n = r.querySelector('.prio-n'); if (n) n.textContent = i + 1; }));
+}
+function movePrioRow(btn, dir) {
+  const row = btn.closest('.prio-row'); if (!row) return;
+  const list = row.closest('.prio-list'); if (!list) return;
+  const rows = [...list.querySelectorAll('.prio-row')];
+  const i = rows.indexOf(row), j = i + dir;
+  if (j < 0 || j >= rows.length) return;
+  if (dir < 0) list.insertBefore(row, rows[j]); else list.insertBefore(rows[j], row);
+  renumberPrioLists();
+  btn.focus(); // keep keyboard focus on the moved row for repeated presses
+}
+// Drag-reorder for the priority dialog lists — same grip-held HTML5 pattern as the league channel groups,
+// constrained to within one list; a cancelled drag restores the snapshot.
+function wirePrioDnd(root) {
+  if (!root || root._prioWired) return;
+  root._prioWired = true;
+  let dragEl = null, orig = null, dropped = false;
+  root.addEventListener('mousedown', e => {
+    const row = e.target.closest('.prio-row'); if (!row) return;
+    row.setAttribute('draggable', e.target.closest('.lg-grip') ? 'true' : 'false');
+  });
+  root.addEventListener('dragstart', e => {
+    const row = e.target.closest('.prio-row'); if (!row) return;
+    dragEl = row; dropped = false; orig = [...root.querySelectorAll('.prio-row')];
+    row.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    try { e.dataTransfer.setData('text/plain', ''); } catch { /* older WebView */ }
+  });
+  root.addEventListener('dragover', e => {
+    if (!dragEl) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const over = e.target.closest('.prio-row');
+    if (!over || over === dragEl) return;
+    const r = over.getBoundingClientRect();
+    root.insertBefore(dragEl, (e.clientY - r.top) > r.height / 2 ? over.nextSibling : over);
+  });
+  root.addEventListener('drop', e => { if (!dragEl) return; e.preventDefault(); dropped = true; renumberPrioLists(); });
+  root.addEventListener('dragend', () => {
+    if (!dropped && orig) { orig.forEach(r => root.appendChild(r)); renumberPrioLists(); }
+    if (dragEl) { dragEl.classList.remove('dragging'); dragEl.setAttribute('draggable', 'false'); }
+    dragEl = null; orig = null; dropped = false;
+  });
+}
+async function saveLeaguePriority() {
+  const orderedIds = [...document.querySelectorAll('#prioLeagues .prio-row')].map(r => parseInt(r.dataset.id));
+  if (!orderedIds.length) return;
+  const btn = $('#prioSave'); if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  const restore = () => { if (btn) { btn.disabled = false; btn.textContent = 'Save priority'; } };
+  let r; try { r = await api.put('/api/leagues/priority', { orderedIds }); }
+  catch { restore(); return toast('Network error — try again', 'err'); }
+  if (r.error) { restore(); return toast(r.error, 'err'); }
+  // Team order per league — the followed-teams list order IS the team priority (PUT preserves it).
+  for (const list of document.querySelectorAll('.prio-list[data-league]')) {
+    const leagueId = parseInt(list.dataset.league);
+    const monitoredTeams = [...list.querySelectorAll('.prio-row')].map(row => ({ id: row.dataset.tid, name: row.dataset.tname || null }));
+    const tr = await api.put('/api/leagues/' + leagueId, { monitoredTeams });
+    if (tr.error) { restore(); return toast(`Couldn't save team order: ${tr.error}`, 'err'); }
+  }
+  closeModals();
+  toast('Recording priority saved', 'ok');
+  render();
 }
 
 // ---- Calendar (monthly grid; events per day, colour-coded by league) ----
@@ -1425,11 +1665,7 @@ async function buildChannelCascade(host, prefill = {}, opts = {}) {
       <div id="cascChList" class="picklist" role="listbox" tabindex="0"></div>
       <input type="hidden" id="cascCh"/></label>`;
   let groups = [], chans = [];
-  const renderGroups = () => {
-    const q = $('#cascGrpQ').value;
-    const f = q ? groups.filter(g => tokensMatch(g, q)) : groups;
-    $('#cascGrp').innerHTML = `<option value="all">All groups${f.length ? ` (${f.length})` : ''}</option>` + f.slice(0, 3000).map(g => `<option value="${esc(g)}" ${g === prefill.group ? 'selected' : ''}>${esc(g)}</option>`).join('');
-  };
+  const renderGroups = () => { $('#cascGrp').innerHTML = groupOptions(groups, $('#cascGrpQ').value, prefill.group, 3000); };
   const renderChannels = () => {
     const q = $('#cascChQ').value;
     const f = q ? chans.filter(c => tokensMatch(c.name + ' ' + (c.group || ''), q)) : chans;
@@ -1447,7 +1683,7 @@ async function buildChannelCascade(host, prefill = {}, opts = {}) {
     }).join('');
   };
   const loadGroups = async () => { const g = await api.get(`/api/channels/groups?source=${$('#cascSrc').value}`); if (!host.isConnected) return; groups = Array.isArray(g) ? g : []; renderGroups(); };
-  const loadChannels = async () => { const c = await api.get(`/api/channels?source=${$('#cascSrc').value}&group=${encodeURIComponent($('#cascGrp').value)}&take=1000`); if (!host.isConnected) return; chans = Array.isArray(c) ? c : []; renderChannels(); };
+  const loadChannels = async () => { const c = await api.get(`/api/channels?source=${$('#cascSrc').value}&group=${encodeURIComponent($('#cascGrp').value)}&take=1000`); if (!host.isConnected) return; chans = (c && Array.isArray(c.items)) ? c.items : []; renderChannels(); };
   // Click a row → single-select: record its id in the hidden input + move the highlight; multi-select: toggle it in
   // the selection Map (which persists across source/group switches) and let the modal re-render its chip list.
   $('#cascChList').onclick = (e) => {
@@ -2290,7 +2526,9 @@ window.ingest = ingest; window.doIngest = doIngest; window.saveSettings = saveSe
 window.toggleKebab = toggleKebab; window.closeKebabs = closeKebabs;
 window.syncEpg = syncEpg; window.doSyncEpg = doSyncEpg; window.openSourceModal = openSourceModal; window.submitSource = submitSource; window.deleteSource = deleteSource; window.refreshAccount = refreshAccount;
 window.openLeagueModal = openLeagueModal; window.submitLeague = submitLeague; window.deleteLeague = deleteLeague; window.syncLeague = syncLeague;
-window.openMapModal = openMapModal; window.submitMap = submitMap; window.deleteMapping = deleteMapping; window.moveMapping = moveMapping;
+window.openMapModal = openMapModal; window.submitMap = submitMap; window.deleteMapping = deleteMapping; window.moveMapping = moveMapping; window.toggleMapPin = toggleMapPin;
+window.openPriorityModal = openPriorityModal; window.movePrioRow = movePrioRow; window.saveLeaguePriority = saveLeaguePriority;
+window.chanFav = chanFav; window.chanHide = chanHide; window.chanUnhideGroup = chanUnhideGroup; window.openGroupManageModal = openGroupManageModal; window.groupPref = groupPref;
 window.toggleLeagueCard = toggleLeagueCard; window.clearMapSel = clearMapSel; window.removeMapSel = removeMapSel; window.chanTap = chanTap;
 window.openEventModal = openEventModal; window.submitEvent = submitEvent; window.monitorEvent = monitorEvent; window.resolvePreview = resolvePreview; window.openCalEvent = openCalEvent;
 window.copyText = copyText; window.openCalendarFeedModal = openCalendarFeedModal; window.saveCalendarPublicBase = saveCalendarPublicBase; window.editCalendarPublicBase = editCalendarPublicBase;

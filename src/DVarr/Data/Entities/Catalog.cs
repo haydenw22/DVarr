@@ -46,8 +46,33 @@ public class Channel
     public string? DetectedQuality { get; set; }
 
     public bool Enabled { get; set; } = true;
+
+    /// <summary>User pref: favourite channels sort to the top of every channel list/picker. Survives re-ingest
+    /// (ingest upserts existing rows by (SourceId, StreamId) and never touches this flag).</summary>
+    public bool Favorite { get; set; }
+
+    /// <summary>User pref: hidden channels are excluded from the Channels page, Guide and channel pickers by default
+    /// (a provider lineup can be 35k channels — most irrelevant for sports). Explicit league mappings and existing
+    /// recordings still work — this is a browse-time filter only. Survives re-ingest like <see cref="Favorite"/>.</summary>
+    public bool Hidden { get; set; }
+
     public long CreatedUtc { get; set; }
     public long UpdatedUtc { get; set; }
+}
+
+/// <summary>
+/// Per-source user preference for one provider group/category: hide it from every group list and channel view
+/// (a 650-group lineup is mostly noise for a sports DVR) or favourite it (sorts first in group dropdowns).
+/// Keyed by (SourceId, GroupName) so prefs survive channel re-ingests (group rows are re-upserted, prefs are not
+/// touched). Rows exist only for groups the user has actually marked — absence = normal visibility.
+/// </summary>
+public class ChannelGroupPref
+{
+    public int Id { get; set; }
+    public int SourceId { get; set; }
+    public string GroupName { get; set; } = "";
+    public bool Hidden { get; set; }
+    public bool Favorite { get; set; }
 }
 
 /// <summary>

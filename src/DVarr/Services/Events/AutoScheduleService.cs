@@ -65,9 +65,15 @@ public sealed class AutoScheduleService : BackgroundService
     /// <summary>Parse League.MonitoredTeamsJson (a JSON array of {id,name}, or a plain ["id",...] array) into a set of
     /// TheSportsDB team ids. Empty / invalid / absent → empty set (= follow ALL teams).</summary>
     public static HashSet<string> ParseMonitoredTeamIds(string? json)
+        => ParseMonitoredTeamIdList(json).ToHashSet(StringComparer.Ordinal);
+
+    /// <summary>Ordered variant of <see cref="ParseMonitoredTeamIds"/>: the stored list order IS the user's team
+    /// recording priority (first = most important — see the Leagues page priority dialog), so the conflict ladder
+    /// needs the sequence, not just the set.</summary>
+    public static List<string> ParseMonitoredTeamIdList(string? json)
     {
-        var set = new HashSet<string>(StringComparer.Ordinal);
-        if (string.IsNullOrWhiteSpace(json)) return set;
+        var list = new List<string>();
+        if (string.IsNullOrWhiteSpace(json)) return list;
         try
         {
             using var doc = System.Text.Json.JsonDocument.Parse(json!);
@@ -81,11 +87,24 @@ public sealed class AutoScheduleService : BackgroundService
                         System.Text.Json.JsonValueKind.String => el.GetString(),
                         _ => null,
                     };
-                    if (!string.IsNullOrWhiteSpace(id)) set.Add(id!.Trim()); // trim to match SerializeTeams (stored trimmed)
+                    // trim to match SerializeTeams (stored trimmed); dedupe so a doubled id can't skew priority scores
+                    if (!string.IsNullOrWhiteSpace(id) && !list.Contains(id!.Trim())) list.Add(id!.Trim());
                 }
         }
         catch { /* malformed → treat as "all teams" */ }
-        return set;
+        return list;
+    }
+
+    /// <summary>Team-priority score for the conflict ladder: the higher-priority side of the event, scored so the
+    /// FIRST team in the league's followed list gets the biggest number (n), the last gets 1, and an event whose
+    /// teams aren't in the list (or a league with no list) gets 0.</summary>
+    public static int TeamPriorityScore(List<string>? orderedTeamIds, string? homeTeamId, string? awayTeamId)
+    {
+        if (orderedTeamIds is null || orderedTeamIds.Count == 0) return 0;
+        var best = 0;
+        if (homeTeamId is not null) { var i = orderedTeamIds.IndexOf(homeTeamId); if (i >= 0) best = Math.Max(best, orderedTeamIds.Count - i); }
+        if (awayTeamId is not null) { var i = orderedTeamIds.IndexOf(awayTeamId); if (i >= 0) best = Math.Max(best, orderedTeamIds.Count - i); }
+        return best;
     }
 
     /// <summary>Parse League.MonitoredSessionsJson (a JSON array of session-kind strings, e.g. ["Race","Qualifying"])
@@ -228,12 +247,19 @@ public sealed class AutoScheduleService : BackgroundService
             .GroupBy(r => r.EventId!.Value)
             .ToDictionary(g => g.Key, g => g.First());
 
-        // League priority for ranking existing recordings (their event's league) — for the conflict ladder.
+        // League + team priority for ranking existing recordings (their event's league/teams) — for the conflict ladder.
         var rankEventIds = committed.Concat(conflicts).Where(r => r.EventId != null).Select(r => r.EventId!.Value).Distinct().ToList();
-        var evLeague = await db.Events.Where(e => rankEventIds.Contains(e.Id)).ToDictionaryAsync(e => e.Id, e => e.LeagueId, ct);
-        var leaguePrio = await db.Leagues.ToDictionaryAsync(l => l.Id, l => l.Priority, ct);
-        int LeaguePrioOf(int? eventId) => eventId is { } eid && evLeague.TryGetValue(eid, out var lid) && leaguePrio.TryGetValue(lid, out var p) ? p : 0;
-        CreditAwarePlanner.PRank RankOf(RecordingEntity r) => CreditAwarePlanner.MakeRank(r.Priority, LeaguePrioOf(r.EventId), r.StartUtc, r.Id);
+        var evInfo = await db.Events.Where(e => rankEventIds.Contains(e.Id))
+            .Select(e => new { e.Id, e.LeagueId, e.HomeTeamId, e.AwayTeamId })
+            .ToDictionaryAsync(e => e.Id, ct);
+        var leagueRank = await db.Leagues.Select(l => new { l.Id, l.Priority, l.MonitoredTeamsJson }).ToListAsync(ct);
+        var leaguePrio = leagueRank.ToDictionary(l => l.Id, l => l.Priority);
+        // Followed-team ORDER per league (first = highest team priority) — parsed once per tick.
+        var leagueTeamOrder = leagueRank.ToDictionary(l => l.Id, l => ParseMonitoredTeamIdList(l.MonitoredTeamsJson));
+        int LeaguePrioOf(int? eventId) => eventId is { } eid && evInfo.TryGetValue(eid, out var x) && leaguePrio.TryGetValue(x.LeagueId, out var p) ? p : 0;
+        int TeamPrioOf(int? eventId) => eventId is { } eid && evInfo.TryGetValue(eid, out var x) && leagueTeamOrder.TryGetValue(x.LeagueId, out var order)
+            ? TeamPriorityScore(order, x.HomeTeamId, x.AwayTeamId) : 0;
+        CreditAwarePlanner.PRank RankOf(RecordingEntity r) => CreditAwarePlanner.MakeRank(r.Priority, LeaguePrioOf(r.EventId), TeamPrioOf(r.EventId), r.StartUtc, r.Id);
 
         var slots = committed
             .Select(r => new CreditAwarePlanner.Slot(r.SourceId, r.StartUtc - r.PrePadS, r.EndUtc + r.PostPadS, r.Id, r.State, RankOf(r)))
@@ -509,7 +535,8 @@ public sealed class AutoScheduleService : BackgroundService
                 // Defensive: events are given a per-sport EndUtc at ingest, but a legacy/manual row may have none.
                 var endUtc = e.EndUtc ?? e.StartUtc + await settings.GetEventDurationSecondsAsync(l.Sport, l.EventDurationOverrideS, l.SessionDurationsJson, e.Title);
                 var winStart = e.StartUtc - pre; var winEnd = endUtc + post;
-                var rank = CreditAwarePlanner.MakeRank(RecordingPriority.Normal, l.Priority, e.StartUtc, e.Id);
+                var rank = CreditAwarePlanner.MakeRank(RecordingPriority.Normal, l.Priority,
+                    TeamPriorityScore(leagueTeamOrder.GetValueOrDefault(e.LeagueId), e.HomeTeamId, e.AwayTeamId), e.StartUtc, e.Id);
                 var decision = planner.Decide(opts, winStart, winEnd, rank, slots);
                 var chosen = decision.Option ?? opts[0]; // for a conflict, file it against the primary credential for display
 

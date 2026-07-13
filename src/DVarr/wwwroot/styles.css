@@ -269,6 +269,30 @@ label.field { display:flex; flex-direction:column; gap:5px; font-size:12px; colo
 .lg-rank-n { font-family:ui-monospace,Consolas,"Courier New",monospace; font-size:15px; font-weight:700; color:var(--txt); }
 .lg-chrow-acts { flex:0 0 auto; display:flex; align-items:center; gap:6px; }
 
+/* Pin toggle on a mapping row — amber when pinned, quiet ghost when not. */
+.lg-pintog.on { color:var(--warn); border-color:rgba(245,158,11,.4); background:rgba(245,158,11,.08); }
+.lg-pintog.on:hover { background:rgba(245,158,11,.16); color:#fbbf24; }
+
+/* Reorder affordances: on mouse/trackpad devices the drag grip is the primary control and the ▲▼ buttons only
+   fade in on row hover (or keyboard focus — width:0 clipping keeps them tabbable, unlike display:none), so rows
+   aren't cluttered with two controls for the same job. Touch devices get the opposite: ▲▼ always (HTML5 drag
+   doesn't fire on touch) and no grip. */
+@media (hover:hover) and (pointer:fine){
+  .lg-move { width:0; opacity:0; overflow:hidden; margin-left:-11px; transition:opacity .12s ease; }
+  .lg-chrow:hover .lg-move, .lg-chrow:focus-within .lg-move,
+  .prio-row:hover .lg-move, .prio-row:focus-within .lg-move { width:auto; opacity:1; margin-left:0; }
+}
+@media (hover:none){
+  .lg-grip { display:none; }
+}
+
+/* ---- Recording-priority dialog (Leagues page → Priority) ---- */
+.prio-list { display:flex; flex-direction:column; gap:7px; margin-top:8px; }
+.prio-row { display:flex; align-items:center; gap:11px; padding:7px 11px; background:var(--chip-bg); border:1px solid var(--line2); border-radius:10px; }
+.prio-row.dragging { opacity:.55; outline:1px dashed var(--acc); }
+.prio-n { flex:0 0 auto; min-width:22px; text-align:center; font-family:ui-monospace,Consolas,"Courier New",monospace; font-weight:700; font-size:13px; color:var(--dim); }
+.prio-main { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
 .lg-teamgrp { border-left:2px solid var(--line2); padding-left:12px; }
 .lg-team-head { display:flex; align-items:center; gap:9px; flex-wrap:wrap; margin-bottom:8px; }
 .lg-team-badge { width:24px; height:24px; border-radius:50%; flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center; background:var(--panel2); border:1px solid var(--line2); font-size:12px; font-weight:700; color:var(--txt); }
@@ -315,6 +339,31 @@ label.field { display:flex; flex-direction:column; gap:5px; font-size:12px; colo
 .copy-row button { flex:0 0 auto; }
 .plex-steps { margin:8px 0 0; padding-left:22px; font-size:12.5px; line-height:1.6; }
 .plex-steps li { margin-bottom:6px; }
+
+/* ---- Channels page: pager + favourite star + group management ---- */
+.pager { display:flex; align-items:center; gap:10px; margin-top:14px; flex-wrap:wrap; }
+.pager button[disabled] { opacity:.45; cursor:default; box-shadow:none; }
+.pager #chPageInfo { font-size:12.5px; font-variant-numeric:tabular-nums; }
+.favbtn { min-height:0; width:30px; height:30px; padding:0; display:inline-flex; align-items:center; justify-content:center; background:transparent; border:1px solid var(--line2); border-radius:8px; color:var(--dim2); font-size:15px; line-height:1; flex:0 0 auto; }
+.favbtn:hover { color:var(--warn); border-color:rgba(245,158,11,.5); background:rgba(245,158,11,.08); box-shadow:none; }
+.favbtn.on { color:var(--warn); border-color:rgba(245,158,11,.4); background:rgba(245,158,11,.08); }
+.grp-row { display:flex; align-items:center; gap:10px; padding:7px 11px; border-bottom:1px solid var(--line); }
+.grp-row:last-child { border-bottom:0; }
+.grp-row.is-hidden .grp-name { color:var(--dim2); text-decoration:line-through; }
+.grp-name { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
+.grp-count { flex:0 0 auto; font-size:11.5px; white-space:nowrap; }
+
+/* ---- Library tables: identical column widths across every league/season section (each is its own <table>),
+   so the watch/delete cluster lines up down the whole page instead of drifting per section. The title column
+   absorbs the remaining width; actions right-align. Phones are untouched (the ≤640 stacked-card reflow wins). ---- */
+.lib-rtable { table-layout:fixed; }
+.lib-rtable col.c-aired { width:140px; }
+.lib-rtable col.c-qual { width:112px; }
+.lib-rtable col.c-dur { width:84px; }
+.lib-rtable col.c-size { width:92px; }
+.lib-rtable col.c-acts { width:196px; }
+.lib-rtable td { overflow:hidden; }
+.lib-rtable td.acts { overflow:visible; justify-content:flex-end; flex-wrap:nowrap; }
 
 /* ---- guide timeline ---- */
 .guide-legend { display:flex; align-items:center; gap:14px; margin:12px 0 10px; font-size:12px; color:var(--dim); flex-wrap:wrap; }
