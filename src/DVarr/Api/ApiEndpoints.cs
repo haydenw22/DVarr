@@ -460,7 +460,7 @@ public static class ApiEndpoints
             return ok ? Results.Json(new { ok = true, path }) : Results.Json(new { error }, statusCode: 400);
         });
 
-        app.MapDelete("/api/recordings/{id:int}", async (int id, RecorderService rec, DVarrDbContext db, DbWriteGate gate) =>
+        app.MapDelete("/api/recordings/{id:int}", async (int id, bool? keepFile, RecorderService rec, DVarrDbContext db, DbWriteGate gate, ILoggerFactory lf) =>
         {
             var r = await db.Recordings.FindAsync(id);
             if (r is null) return Results.NotFound();
@@ -472,7 +472,14 @@ public static class ApiEndpoints
                 if (!settled)
                     return Results.Json(new { deleted = false, finalizing = true, error = "recording is still finalizing — try delete again in a moment" }, statusCode: 409);
             }
+            // Snapshot the disk artifacts before the row is gone (defaults to deleting them — that's what "delete a
+            // recording" means to users; ?keepFile=true removes just the DVarr entry).
+            var outputPath = r.OutputPath;
+            var segDir = r.SegmentDir;
             await gate.WriteAsync(async () => { db.Recordings.Remove(r); await db.SaveChangesAsync(); });
+            // File deletion happens AFTER the row commit so a disk error can never strand a half-deleted entry; a
+            // failed artifact delete is logged, not surfaced (the entry the user acted on is gone either way).
+            if (keepFile != true) DeleteRecordingArtifacts(outputPath, segDir, lf.CreateLogger("Recordings"));
             return Results.Json(new { deleted = true });
         });
 
@@ -701,6 +708,47 @@ public static class ApiEndpoints
             catch (OperationCanceledException) { }
             finally { bus.Unsubscribe(id); }
         });
+    }
+
+    /// <summary>
+    /// Remove a deleted recording's disk artifacts: the output file plus its same-basename sidecars (the .nfo and
+    /// thumbnail the media import wrote next to it), the per-game folder IF the delete emptied it (show-level
+    /// artwork lives a level up and is shared, so it's never touched), and the per-recording segment scratch.
+    /// Every step is best-effort — a locked/missing file logs a warning and never fails the API delete.
+    /// </summary>
+    private static void DeleteRecordingArtifacts(string? outputPath, string? segDir, ILogger log)
+    {
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(outputPath) && File.Exists(outputPath))
+            {
+                var dir = Path.GetDirectoryName(outputPath);
+                var baseName = Path.GetFileNameWithoutExtension(outputPath);
+                File.Delete(outputPath);
+                if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
+                {
+                    // String-prefix match rather than a glob: the basename contains bracketed stamps ("[2026-07-12_1400]")
+                    // that are glob-hostile, and only metadata extensions are eligible so a neighbouring video is safe.
+                    foreach (var side in Directory.EnumerateFiles(dir)
+                                 .Where(f => Path.GetFileName(f).StartsWith(baseName + ".", StringComparison.OrdinalIgnoreCase)
+                                             && Path.GetExtension(f).ToLowerInvariant() is ".nfo" or ".jpg" or ".jpeg" or ".png"))
+                        File.Delete(side);
+                    if (!Directory.EnumerateFileSystemEntries(dir).Any()) Directory.Delete(dir);
+                }
+                log.LogInformation("[Recordings] deleted file + sidecars for {Path}", outputPath);
+            }
+        }
+        catch (Exception ex) { log.LogWarning(ex, "[Recordings] file cleanup failed for {Path} (entry already deleted)", outputPath); }
+        try
+        {
+            // segDir = /segments/{id}/A — remove the whole per-recording scratch dir, mirroring finalize's cleanup.
+            if (!string.IsNullOrWhiteSpace(segDir))
+            {
+                var recScratch = Path.GetDirectoryName(segDir) ?? segDir;
+                if (Directory.Exists(recScratch)) Directory.Delete(recScratch, recursive: true);
+            }
+        }
+        catch (Exception ex) { log.LogWarning(ex, "[Recordings] segment scratch cleanup failed for {Dir}", segDir); }
     }
 
     private static string Mask(string? s) => string.IsNullOrEmpty(s) ? "" : "***";

@@ -411,7 +411,7 @@ function recTable(rows, withActions) {
     const importable = r.state === 'Done' && (r.outputPath || '').includes('.unsorted');
     return `
     <tr>${withActions ? `<td data-label="" class="rec-cb"><input type="checkbox" class="rec-row-cb" data-id="${r.id}" onclick="recToggle(${r.id}, this)" ${recSel.has(r.id) ? 'checked' : ''} aria-label="Select recording"></td>` : ''}<td data-label="">${esc(r.title)}</td>
-      <td data-label="State"><span class="pill ${sc(r.state)}">${r.state}</span>${r.attemptCount ? ` <span class="muted" title="relaunch/failover attempts">↻${r.attemptCount}</span>` : ''}</td>
+      <td data-label="State"><span class="pill ${sc(r.state)}">${r.state}</span>${r.attemptCount ? ` <span class="muted" title="relaunch/failover attempts">↻${r.attemptCount}</span>` : ''}${r.failureReason && ['NeedsAttention', 'Conflict', 'Missed', 'Cancelled', 'Degraded', 'FinalizeRetry'].includes(r.state) ? `<div class="muted" style="font-size:11px;max-width:280px;line-height:1.35;margin-top:2px">${esc(r.failureReason)}</div>` : ''}</td>
       <td data-label="Channel">${esc(r.channel)}</td><td data-label="Source" class="muted">${esc(r.source)}</td>
       <td data-label="Size" class="mono">${mb(r.bytesWritten)}</td>
       <td data-label="Window" class="mono muted">${dtime(r.startUtc)} – ${dtime(r.endUtc)}</td>
@@ -1467,12 +1467,35 @@ async function submitImport(id) {
 const startRecReq = id => api.post(`/api/recordings/${id}/start`);
 const stopRecReq = id => api.post(`/api/recordings/${id}/stop`);
 const reresolveRecReq = id => api.post(`/api/recordings/${id}/resolve`);
-const delRecReq = id => api.del(`/api/recordings/${id}`);
+const delRecReq = (id, keepFile) => api.del(`/api/recordings/${id}${keepFile ? '?keepFile=true' : ''}`);
 async function startRec(id) { const r = await startRecReq(id); if (r.error) toast(r.error, 'err'); else toast(r.started ? 'Starting…' : 'Already running', 'ok'); render(); }
 async function stopRec(id) { const r = await stopRecReq(id); toast(r.cancelled ? 'Cancelled' : r.stopping ? 'Stopping…' : 'No change', r.error ? 'err' : 'ok'); render(); }
 async function reresolveRec(id) { const r = await reresolveRecReq(id); if (r.error) toast(r.error, 'err'); else toast(r.changed ? `Re-resolved → ${r.channel}` : `Already on ${r.channel}`, 'ok'); render(); }
 async function reresolveLeague(id) { const r = await api.post(`/api/leagues/${id}/reresolve`); if (r.error) toast(r.error, 'err'); else toast(`Re-resolved ${r.updated} scheduled recording${r.updated === 1 ? '' : 's'}${r.changed ? ` (${r.changed} changed channel)` : ''}`, 'ok'); render(); }
-async function delRec(id) { if (!confirm('Delete this recording?')) return; const r = await delRecReq(id); if (r.error) return toast(r.error, 'err'); toast('Deleted'); render(); }
+// Delete confirmation with the "also delete file" choice (single + bulk share it). The pending callback pattern
+// avoids serialising a closure into the modal's inline onclick.
+let _pendingDelete = null;
+function confirmRecDelete(n, go) {
+  _pendingDelete = go;
+  modal(`<h2>Delete ${n === 1 ? 'recording' : n + ' recordings'}</h2>
+    <div class="note warn">This removes ${n === 1 ? 'it' : 'them'} from DVarr and cannot be undone.</div>
+    <label class="field" style="flex-direction:row;align-items:center;gap:8px;margin-top:12px"><input id="delFiles" type="checkbox" checked style="width:auto"/> Also delete the recorded file${n === 1 ? '' : 's'} from disk</label>
+    <div class="foot"><button class="ghost" onclick="closeModals()">Cancel</button><button class="danger" onclick="runPendingDelete()">Delete</button></div>`, 'min(440px,94vw)');
+}
+function runPendingDelete() {
+  const keepFile = !$('#delFiles')?.checked;
+  const go = _pendingDelete; _pendingDelete = null;
+  closeModals();
+  if (go) go(keepFile);
+}
+function delRec(id) {
+  confirmRecDelete(1, async keepFile => {
+    const r = await delRecReq(id, keepFile);
+    if (r.error) return toast(r.error, 'err');
+    toast(keepFile ? 'Deleted (file kept on disk)' : 'Deleted');
+    render();
+  });
+}
 
 // ---- Recordings bulk selection + actions ----
 // Toggle one row's selection (per-row checkbox), then refresh the toolbar/select-all without a full table redraw.
@@ -1517,7 +1540,7 @@ async function bulkAction(op, verb, confirmMsg) {
 const bulkStart = () => bulkAction(startRecReq, 'Started');
 const bulkResolve = () => bulkAction(reresolveRecReq, 'Re-resolved');
 const bulkStop = () => bulkAction(stopRecReq, 'Stopped');
-const bulkDelete = () => bulkAction(delRecReq, 'Deleted', n => `Delete ${n} recording${n === 1 ? '' : 's'}? This cannot be undone.`);
+const bulkDelete = () => { if (recSel.size) confirmRecDelete(recSel.size, keepFile => bulkAction(id => delRecReq(id, keepFile), 'Deleted')); };
 function ingest(id, label) {
   modal(`<h2>Ingest channels — ${esc(label)}</h2>
     <div class="note warn">This contacts your IPTV provider and uses <b>${esc(label)}</b>'s single stream slot. Only proceed if you're not using that stream right now.</div>
@@ -1900,7 +1923,7 @@ window.addEventListener('keydown', e => {
 window.render = render; window.openTestModal = openTestModal; window.submitTest = submitTest;
 window.openScheduleModal = openScheduleModal; window.submitSchedule = submitSchedule; window.scheduleFor = scheduleFor; window.scheduleFromGuide = scheduleFromGuide;
 window.openPreview = openPreview; window.stopRec = stopRec; window.startRec = startRec; window.delRec = delRec; window.reresolveRec = reresolveRec; window.reresolveLeague = reresolveLeague;
-window.recToggle = recToggle; window.recToggleAll = recToggleAll; window.bulkStart = bulkStart; window.bulkResolve = bulkResolve; window.bulkStop = bulkStop; window.bulkDelete = bulkDelete;
+window.recToggle = recToggle; window.recToggleAll = recToggleAll; window.bulkStart = bulkStart; window.bulkResolve = bulkResolve; window.bulkStop = bulkStop; window.bulkDelete = bulkDelete; window.runPendingDelete = runPendingDelete;
 window.openImportModal = openImportModal; window.submitImport = submitImport;
 window.ingest = ingest; window.doIngest = doIngest; window.saveSettings = saveSettings; window.closeModals = closeModals;
 window.toggleKebab = toggleKebab; window.closeKebabs = closeKebabs;

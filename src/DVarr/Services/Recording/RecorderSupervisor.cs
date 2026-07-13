@@ -78,7 +78,23 @@ public sealed class RecorderSupervisor
         var attempt = 0;
         var launchSeq = 0; // per-ffmpeg-launch counter baked into segment names (see CaptureUntilStopOrStallAsync)
         var fallbacksUsed = 0;
+        var fastVerifyCrashes = 0; // consecutive near-instant crashes while the verify chain is on (bad hwaccel heals here)
         var cleanEofWindow = new Queue<long>(); // wall-clock marks of recent clean EOFs (flap detector)
+
+        // Original placement, for the zero-capture revert at finalize: each failover writes the fallback's ChannelId
+        // onto the row, so a purely LOCAL failure that captured nothing would otherwise display the last-tried
+        // channel and masquerade as a wrong-channel pick (support case: `cuda` with no NVIDIA GPU killed every
+        // launch, walked the whole fallback ladder, and the row ended up showing a channel it never recorded from).
+        int? originalChannelId = null, originalStreamId = null;
+        try
+        {
+            using var s0 = _d.Scopes.CreateScope();
+            var db0 = s0.ServiceProvider.GetRequiredService<DVarrDbContext>();
+            var row0 = await db0.Recordings.AsNoTracking().Where(r => r.Id == recordingId)
+                .Select(r => new { r.ChannelId, r.StreamId }).FirstOrDefaultAsync(stopToken);
+            if (row0 is not null) { originalChannelId = row0.ChannelId; originalStreamId = row0.StreamId; }
+        }
+        catch { /* purely cosmetic on failure — the revert just won't happen */ }
 
         // ---- Live window end (Phase 21 smart auto-stop) ----
         // AutoStopService may EXTEND Recording.EndUtc mid-capture (extra time / penalties) or trim an unused
@@ -109,6 +125,7 @@ public sealed class RecorderSupervisor
             {
                 try
                 {
+                    var launchedAt = EpochTime.Now();
                     var exit = await CaptureUntilStopOrStallAsync(recordingId, url, segDir, CurrentWindowEndAsync, stallTimeoutS, nativeRate, contentVerify, contentDeadTimeoutS, contentVerifyHwaccel, contentVerifyFps, userAgent, lease, ++launchSeq, stopToken);
 
                     // Normal end of window or explicit stop → leave the capture loop and finalize.
@@ -116,6 +133,20 @@ public sealed class RecorderSupervisor
                         break;
                     if (exit.Kind is ExitKind.WindowClosed or ExitKind.StopRequested)
                         break;
+
+                    // Self-heal a capture the VERIFY chain is killing: the dead-feed check rides the SAME ffmpeg as
+                    // the recording, so a bad decode setting (e.g. content_verify_hwaccel=cuda with no NVIDIA GPU)
+                    // makes ffmpeg die at launch — every launch, forever, recording nothing while the fallback ladder
+                    // churns. Two consecutive near-instant crashes with verification on → drop the verify chain for
+                    // the REST of this recording (the capture itself is -c copy and unaffected) and say so loudly.
+                    fastVerifyCrashes = exit.Kind == ExitKind.Crashed && EpochTime.Now() - launchedAt <= 5 ? fastVerifyCrashes + 1 : 0;
+                    if (contentVerify && fastVerifyCrashes >= 2)
+                    {
+                        contentVerify = false;
+                        _log.LogWarning("[Recorder] Recording {Id}: ffmpeg died instantly twice with content verification on — disabling the verify chain for this recording (check content_verify_hwaccel)", recordingId);
+                        await AddNotificationAsync(recordingId, NotificationKind.Degraded, Severity.Warn,
+                            "content check couldn't start (ffmpeg died instantly twice) — continuing WITHOUT dead-feed detection for this recording; check Settings → Reliability → Dead-feed GPU decode");
+                    }
 
                     // A CLEAN end-of-file (rc=0) mid-window is a momentary line drop, not a fault: relaunch
                     // IMMEDIATELY, stay in Recording, and don't emit Recovering churn. The finalize de-overlap
@@ -201,7 +232,7 @@ public sealed class RecorderSupervisor
         // transient fault never abandons a captured window. NeedsAttention only if there is truly nothing.
         try
         {
-            await FinalizeToTerminalAsync(recordingId, segDir, outputPath, fallbacksUsed);
+            await FinalizeToTerminalAsync(recordingId, segDir, outputPath, fallbacksUsed, originalChannelId, originalStreamId);
         }
         catch (Exception exFin)
         {
@@ -224,7 +255,8 @@ public sealed class RecorderSupervisor
     /// Stopping → Finalizing → concat → DONE (or NEEDS_ATTENTION only if no playable output exists).
     /// Public so catch-up-on-boot can re-finalize a window whose segments survived a crash (docs/05 §3.4).
     /// </summary>
-    public async Task FinalizeToTerminalAsync(int recordingId, string segDir, string outputPath, int fallbacksUsed = 0)
+    public async Task FinalizeToTerminalAsync(int recordingId, string segDir, string outputPath, int fallbacksUsed = 0,
+        int? revertChannelId = null, int? revertStreamId = null)
     {
         await SetStateAsync(recordingId, RecordingState.Stopping);
         await SetStateAsync(recordingId, RecordingState.Finalizing);
@@ -265,8 +297,24 @@ public sealed class RecorderSupervisor
         }
         else
         {
+            // When NOTHING was captured and the ladder was walked, restore the originally scheduled channel: the
+            // failover loop wrote each fallback's ChannelId onto the row, so the row would display the LAST channel
+            // it tried — which looks like a wrong channel pick even though no channel was ever recorded from. Only
+            // when there is truly no footage (a failed concat of real segments keeps the channel that captured them);
+            // the notification trail keeps the full failover history. ChannelId/StreamId are non-key columns (the
+            // alternate key is (Id, SourceId), and failover never crosses credentials), so a tracked write is safe.
+            var anyFootage = Directory.Exists(segDir)
+                && Directory.EnumerateFiles(segDir, "seg-*.ts").Any(f => { try { return new FileInfo(f).Length > 0; } catch { return false; } });
             await SetStateAsync(recordingId, RecordingState.NeedsAttention,
-                r => r.FailureReason = "finalize produced no playable output",
+                r =>
+                {
+                    r.FailureReason = "finalize produced no playable output";
+                    if (!anyFootage && fallbacksUsed > 0 && revertChannelId is { } rc)
+                    {
+                        r.ChannelId = rc;
+                        if (revertStreamId is { } rs) r.StreamId = rs;
+                    }
+                },
                 NotificationKind.NeedsAttention, Severity.Critical, "finalize failed (no playable output)");
         }
     }

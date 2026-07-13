@@ -12,6 +12,15 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.37.0] — 2026-07-13
+Deleting a recording now deletes the file, and a broken dead-feed setting can no longer wreck recordings.
+
+### Fixed
+- **Deleting a recording removes its file from disk** (Discord report). Delete previously removed only DVarr's entry — the .mkv, its .nfo/thumbnail sidecars and any leftover capture scratch stayed behind. The delete dialog (single and bulk) now has an "also delete the recorded file from disk" option, ticked by default; the per-game folder is pruned when the delete empties it, while shared show-level artwork is never touched.
+- **A bad dead-feed decode setting can no longer kill recordings** (support case: `content_verify_hwaccel=cuda` on a machine with no NVIDIA GPU). The dead-feed check rides the same ffmpeg process as the capture, so a broken decode flag made every launch die instantly — recording nothing while the failover ladder churned through every mapped channel. The recorder now detects two consecutive instant crashes with verification on, drops the verify chain for the rest of that recording (capture itself is unaffected `-c copy`), and posts a warning pointing at the setting.
+- **Needs Attention finally says why.** The failure reason was stored and returned by the API but never rendered — the Recordings table now shows it under the state for NeedsAttention / Conflict / Missed / Cancelled / Degraded rows.
+- **A failed recording no longer displays the wrong channel.** Failover writes each tried fallback's channel onto the recording, so a purely local failure that captured nothing ended up showing the last channel it tried — which looks exactly like a wrong channel pick (the same support case burned an evening on this). When nothing was captured, the originally scheduled channel is restored; the notification trail keeps the full failover history.
+
 ## [1.36.0] — 2026-07-13
 Service expiry, a redesigned Leagues page, and bulk actions for mapping and recordings.
 
@@ -30,6 +39,8 @@ Bug-audit batch: five fixes from an external code audit, all verified against a 
 - **Segment filename collisions on instant relaunch.** A relaunched capture within the same wall-clock second (clean-EOF instant relaunch, or the 0s first retry) reused the previous process's segment filename and truncated it, losing up to 8s of already-captured footage on a flappy line. Segment names now carry a per-launch counter.
 - **Xtream API calls honour the source's custom User-Agent.** Auth, channel ingest, categories and short-EPG always sent the default VLC UA even when a custom one was configured — providers that gate every call on UA would fail discovery while streams worked.
 - **Patched a High-severity vulnerability in the bundled SQLite native library** (GHSA-2m69-gcr7-jv3q, `SQLitePCLRaw.lib.e_sqlite3` 2.1.6). Every 2.x release is affected, so the native library is overridden to the patched 3.53.x line (SQLite 3.53); the managed data stack is unchanged apart from EF Core 8.0.10 → 8.0.28. Migrations, WAL mode and reads/writes verified on the new native build.
+
+## [1.35.0] — 2026-07-12
 Preview fix, unwatchable-recording fix, and channel picks that show up days ahead. (GitHub issues #7, #8 and #9.)
 
 ### Fixed
