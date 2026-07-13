@@ -162,33 +162,28 @@ public static class AuthEndpoints
     // ---- rate limiter --------------------------------------------------------------------------
 
     /// <summary>
-    /// Best-effort client IP for the limiter. The public path is Cloudflare → SWAG/nginx → here, and Cloudflare sets
-    /// <c>CF-Connecting-IP</c> to the real client on every proxied request, OVERWRITING any client-supplied value — so
-    /// it's the one hop an external attacker can't forge. Prefer it. (The X-Forwarded-For chain is unusable here: nginx
-    /// has no Cloudflare real-IP restoration, so XFF's first hop is the raw client-controlled value — rotating it gave
-    /// every brute-force attempt its own limiter bucket and defeated the 8/10-min cap; XFF's last hop / X-Real-IP is the
-    /// shared CF edge IP, which would instead collapse all external users into one bucket.) Fall back to the
-    /// appended-XFF-first-hop only for a direct private/LAN peer (no Cloudflare in that path), then the raw peer. Not
-    /// bulletproof against a caller reaching the origin directly, bypassing Cloudflare — that's a separate
-    /// origin-exposure concern — but for normal public traffic this rate-limits per real client.
+    /// Best-effort client IP for the limiter. The public path is Cloudflare → SWAG/nginx → here, so legitimate
+    /// proxied traffic always arrives from a PRIVATE peer — forwarded headers (CF-Connecting-IP, then XFF's first
+    /// hop) are trusted only in that case, must parse as real IPs, and are canonicalised. A caller reaching the
+    /// origin directly from a public address is bucketed by their raw peer IP no matter what headers they send.
     /// </summary>
     private static string ClientIp(HttpContext ctx)
     {
-        // Cloudflare-authoritative real client IP: present on every CF-proxied request, and CF replaces any value a
-        // client tries to send, so it can't be spoofed from the outside to dodge or frame a bucket.
-        var cf = ctx.Request.Headers["CF-Connecting-IP"].FirstOrDefault();
-        if (!string.IsNullOrWhiteSpace(cf)) return cf.Trim();
-
         var peer = ctx.Connection.RemoteIpAddress;
         var peerStr = peer?.ToString() ?? "unknown";
+        // Forwarded headers are trusted ONLY when the immediate peer is the local proxy chain (private/loopback —
+        // Cloudflare → SWAG/nginx → here). A caller who reaches the origin DIRECTLY from a public address gets
+        // bucketed by their real peer IP, however many CF-Connecting-IP / X-Forwarded-For values they invent
+        // (audit AUTH-02: previously CF-Connecting-IP was trusted from ANY peer, so a direct attacker minted a
+        // fresh limiter bucket per request). Candidates must also PARSE as an IP — a junk header can't mint
+        // arbitrary-string buckets — and are canonicalised so equivalent spellings share one bucket.
         if (peer is not null && IsPrivate(peer))
         {
+            var cf = ctx.Request.Headers["CF-Connecting-IP"].FirstOrDefault();
+            if (System.Net.IPAddress.TryParse(cf?.Trim(), out var cfIp)) return cfIp.ToString();
             var xff = ctx.Request.Headers["X-Forwarded-For"].FirstOrDefault();
-            if (!string.IsNullOrWhiteSpace(xff))
-            {
-                var first = xff.Split(',')[0].Trim();
-                if (first.Length > 0) return first;
-            }
+            var first = xff?.Split(',')[0].Trim();
+            if (System.Net.IPAddress.TryParse(first, out var xffIp)) return xffIp.ToString();
         }
         return peerStr;
     }
@@ -223,6 +218,15 @@ public static class AuthEndpoints
     private static void RecordFailure(string ip)
     {
         var now = EpochTime.Now();
+        // Bounded store (audit AUTH-02): expired buckets were never evicted, so rotating keys grew process memory
+        // without limit. Sweep stale windows once the table is large; under a genuinely distributed flood that
+        // leaves >50k LIVE buckets, drop the table — losing throttle history is safer than unbounded growth.
+        if (_failures.Count > 10_000)
+        {
+            foreach (var kv in _failures)
+                if (now - kv.Value.WindowStart >= WindowSeconds) _failures.TryRemove(kv.Key, out _);
+            if (_failures.Count > 50_000) _failures.Clear();
+        }
         _failures.AddOrUpdate(ip,
             _ => (1, now),
             (_, e) => (now - e.WindowStart >= WindowSeconds) ? (1, now) : (e.Count + 1, e.WindowStart));

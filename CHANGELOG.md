@@ -12,6 +12,29 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.37.1] — 2026-07-13
+Integrity batch: nineteen fixes from a full-application audit, every finding verified against the code before fixing.
+
+### Fixed
+- **Deleting an active recording now deletes the real file.** The delete endpoint snapshotted the file path from a stale entity read before finalize + media import had moved the file, so "also delete the file" silently orphaned the imported MKV. The path is now re-read fresh after the stop settles. Cleanup failures are also reported in the delete response and toast instead of being silently logged, the emptied-folder prune can never remove the media root itself, and the segment-scratch prune can never remove the segments root.
+- **Two recordings with the same title and start minute can no longer overwrite each other** — the immutable recording id is now part of the working filename (the media import renames on filing, so library names are unchanged).
+- **A timed-out finalize now kills its ffmpeg** instead of leaving it running against the output file after DVarr reported failure.
+- **Capture maps exactly the first video stream** (`0:v:0`) — a multi-programme mux or attached picture can no longer be pulled into the recording.
+- **Double-triggered channel ingest can no longer duplicate channels and wedge a source.** Ingest is serialized per source, the channel snapshot is taken inside the write section, and historical duplicate rows are tolerated (lowest id wins) instead of permanently failing every later ingest.
+- **Cross-login spreading no longer trusts stream numbers across different providers.** Numeric stream ids are only comparable between credentials of the same provider (same host); across providers a real name/key match is required — previously a recording could be spread to a completely unrelated channel whose number happened to coincide.
+- **Reordering a league's channels now validates the list** — a stale drag can no longer half-apply and corrupt the fallback order with duplicate ranks.
+- **The scheduler no longer caps candidates before filtering.** The 500-event work cap now applies after the team/session filters, so a block of early non-followed events can't starve later followed ones (a generous 5000-row query cap remains, logged if ever hit).
+- **An explicit zero pre/post padding is honoured** instead of being silently replaced by the 5/30-minute defaults.
+- **Settings saves are atomic** — the whole Settings page commits in one transaction instead of key-by-key.
+- **An over-cap EPG sync now reports the truth**: the run was discarded and the previous guide kept, instead of claiming success with the attempted row count.
+- **Login rate limiting is no longer spoofable** — forwarded IP headers are only trusted from the local proxy chain and must parse as real addresses, so a direct attacker can't mint a fresh bucket per request; the bucket store is also bounded now instead of growing forever.
+- **The recordings list can't hide imminent recordings** — live/upcoming rows are always returned in full, with the 200-row window applying only to finished history.
+- **The health endpoint degrades instead of crashing** when the database fails mid-request, and reports unhealthy when its own queries fail rather than only when a connection can't open.
+- **Startup takes a safety copy of the database before applying pending migrations** (kept in `/config/backups`, last three retained).
+- **Windows source runs honour configured storage paths** (`DVarr__ConfigDir` etc.) instead of always using the local scratch folder.
+- **The preview proxy no longer returns an empty success response** when the provider accepts the request but sends no data, and a mid-stream provider failure aborts the connection instead of ending it cleanly.
+- **Activity notifications and scheduler-tick diagnostics are pruned** (30 and 7 days respectively) instead of accumulating forever.
+
 ## [1.37.0] — 2026-07-13
 Deleting a recording now deletes the file, and a broken dead-feed setting can no longer wreck recordings.
 

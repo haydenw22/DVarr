@@ -26,27 +26,36 @@ public static class HealthEndpoints
         {
             var now = EpochTime.Now();
 
+            // Readiness = the queries this page actually needs succeed, not just "a connection can open" — and a
+            // locked/corrupt database must degrade the payload rather than throw an unhandled 500 out of the one
+            // endpoint that's supposed to report exactly that state (audit HEALTH-01).
             bool dbOk;
             string? dbErr = null;
-            try { dbOk = await db.Database.CanConnectAsync(); }
+            int sources = 0, busyCredentials = 0, active = 0, pending = 0;
+            long? lastTick = null;
+            try
+            {
+                dbOk = await db.Database.CanConnectAsync();
+                if (dbOk)
+                {
+                    // Only ENABLED sources count toward the concurrency ceiling — a disabled source can never hold a
+                    // lease, so it must not inflate total/free_credentials.
+                    sources = await db.Sources.CountAsync(s => s.Enabled);
+                    busyCredentials = await db.TunerLeases
+                        .Where(l => l.State == LeaseState.Active)
+                        .Select(l => l.SourceId)
+                        .Distinct()
+                        .CountAsync();
+                    active = await db.Recordings.CountAsync(r => activeStates.Contains(r.State));
+                    pending = await db.Recordings.CountAsync(r => r.State == DVarr.Data.RecordingState.Pending);
+                    lastTick = await db.ScheduleTicks
+                        .OrderByDescending(t => t.TickUtc)
+                        .Select(t => (long?)t.TickUtc)
+                        .FirstOrDefaultAsync();
+                }
+            }
             catch (Exception ex) { dbOk = false; dbErr = ex.Message; }
-
-            // Only ENABLED sources count toward the concurrency ceiling — a disabled source can never hold a lease,
-            // so it must not inflate total/free_credentials (the off-limits Source 1 was over-counting before).
-            var sources = await db.Sources.CountAsync(s => s.Enabled);
-            var busyCredentials = await db.TunerLeases
-                .Where(l => l.State == LeaseState.Active)
-                .Select(l => l.SourceId)
-                .Distinct()
-                .CountAsync();
             var freeCredentials = Math.Max(0, sources - busyCredentials);
-            var active = await db.Recordings.CountAsync(r => activeStates.Contains(r.State));
-            var pending = await db.Recordings.CountAsync(r => r.State == DVarr.Data.RecordingState.Pending);
-
-            var lastTick = await db.ScheduleTicks
-                .OrderByDescending(t => t.TickUtc)
-                .Select(t => (long?)t.TickUtc)
-                .FirstOrDefaultAsync();
 
             return Results.Json(new
             {

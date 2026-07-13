@@ -212,17 +212,27 @@ public sealed class SettingsService
     }
 
     public async Task SetAsync(string key, string value, CancellationToken ct = default)
+        => await SetManyAsync(new Dictionary<string, string> { [key] = value }, ct);
+
+    /// <summary>Persist a batch of settings in ONE write-gate transaction (single SaveChanges), so a DB error,
+    /// cancellation, or shutdown mid-save can never leave a half-applied Settings page (audit SET-03).</summary>
+    public async Task SetManyAsync(IReadOnlyDictionary<string, string> values, CancellationToken ct = default)
     {
+        if (values.Count == 0) return;
         await _gate.WriteAsync(async () =>
         {
-            var row = await _db.Settings.FindAsync(key);
-            if (row == null)
+            var now = EpochTime.Now();
+            foreach (var kv in values)
             {
-                row = new Setting { Key = key };
-                _db.Settings.Add(row);
+                var row = await _db.Settings.FindAsync(kv.Key);
+                if (row == null)
+                {
+                    row = new Setting { Key = kv.Key };
+                    _db.Settings.Add(row);
+                }
+                row.Value = kv.Value;
+                row.UpdatedUtc = now;
             }
-            row.Value = value;
-            row.UpdatedUtc = EpochTime.Now();
             await _db.SaveChangesAsync(ct);
         }, ct);
     }

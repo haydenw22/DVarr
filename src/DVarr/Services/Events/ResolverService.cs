@@ -98,29 +98,44 @@ public sealed class ResolverService
 
     /// <summary>
     /// The SAME logical channel as <paramref name="channelId"/> but on the OTHER enabled credentials, for
-    /// cross-login spreading (docs/06 conflict planning). Matched by StreamId (the two provider logins carry the
-    /// same stream ids), then LogicalKey, then normalised name — best match first, one row per credential.
-    /// Disabled sources (e.g. the off-limits Source 1) are never returned. Score/Rank are 0 (placement, not scoring).
+    /// cross-login spreading (docs/06 conflict planning). Matched by StreamId — but ONLY between credentials of
+    /// the SAME provider (same normalised host: numeric stream ids are catalogue-local, and unrelated providers
+    /// reuse the same small integers, audit RES-01) — then LogicalKey, then normalised name. Best match first,
+    /// one row per credential. Disabled sources are never returned. Score/Rank are 0 (placement, not scoring).
     /// </summary>
     public async Task<List<ResolvedChannel>> EquivalentChannelsAsync(int channelId, CancellationToken ct = default)
     {
         var ch = await _db.Channels.FindAsync(new object?[] { channelId }, ct);
         if (ch is null) return new();
-        var disabled = (await _db.Sources.Where(s => !s.Enabled).Select(s => s.Id).ToListAsync(ct)).ToHashSet();
+        var sources = await _db.Sources.ToListAsync(ct);
+        var disabled = sources.Where(s => !s.Enabled).Select(s => s.Id).ToHashSet();
+
+        // Provider family = same normalised host. Two logins with the SAME provider share a catalogue, so their
+        // stream ids are directly comparable; any other provider's id 501 is a different channel entirely.
+        static string HostOf(Data.Entities.ProviderSource s) =>
+            (s.BaseUrl ?? "").Trim().ToLowerInvariant()
+                .Replace("https://", "", StringComparison.Ordinal).Replace("http://", "", StringComparison.Ordinal)
+                .TrimEnd('/');
+        var myHost = sources.FirstOrDefault(s => s.Id == ch.SourceId) is { } mine ? HostOf(mine) : "";
+        var familySourceIds = string.IsNullOrEmpty(myHost)
+            ? new HashSet<int>()
+            : sources.Where(s => HostOf(s) == myHost).Select(s => s.Id).ToHashSet();
 
         // An empty normalised key/name must NOT act as a wildcard (junk channels like "||" or "UK:" normalise to ""),
         // or an empty-named target would cross-match arbitrary other-source channels and re-home a recording to the
-        // wrong channel. Only match LogicalKey/NameNorm when they're non-empty; StreamId equality always stands.
+        // wrong channel. Only match LogicalKey/NameNorm when they're non-empty; StreamId equality stands only
+        // within the provider family.
         var hasKey = !string.IsNullOrEmpty(ch.LogicalKey);
         var hasName = !string.IsNullOrEmpty(ch.NameNorm);
         var rows = await _db.Channels
             .Where(c => c.Enabled && c.SourceId != ch.SourceId &&
-                        (c.StreamId == ch.StreamId
+                        ((familySourceIds.Contains(c.SourceId) && c.StreamId == ch.StreamId)
                          || (hasKey && c.LogicalKey == ch.LogicalKey)
                          || (hasName && c.NameNorm == ch.NameNorm)))
             .ToListAsync(ct);
 
-        int Quality(Channel c) => c.StreamId == ch.StreamId ? 3 : (hasKey && c.LogicalKey == ch.LogicalKey ? 2 : 1);
+        int Quality(Channel c) => familySourceIds.Contains(c.SourceId) && c.StreamId == ch.StreamId ? 3
+            : (hasKey && c.LogicalKey == ch.LogicalKey ? 2 : 1);
 
         return rows.Where(c => !disabled.Contains(c.SourceId))
             .GroupBy(c => c.SourceId)

@@ -31,12 +31,20 @@ public sealed class IngestService
         _log = log;
     }
 
+    // One ingest per source at a time (audit ING-01): two concurrent ingests of the SAME source each read the
+    // channel snapshot before the write gate, so the loser upserts against a stale dictionary and inserts duplicate
+    // (SourceId, StreamId) rows — there is deliberately NO unique DB index (see DVarrDbContext), and the NEXT
+    // ingest's ToDictionaryAsync(StreamId) then throws forever. Serialize per source; a second click just waits.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, SemaphoreSlim> _ingestLocks = new();
+
     public async Task<IngestResult> IngestSourceAsync(int sourceId, CancellationToken ct = default)
     {
         var s = await _db.Sources.FindAsync(new object?[] { sourceId }, ct);
         if (s is null) return new IngestResult(sourceId, false, 0, 0, 0, "source not found");
         if (!s.Enabled) return new IngestResult(sourceId, false, 0, 0, 0, "source is disabled — refusing to contact the provider");
 
+        var gate = _ingestLocks.GetOrAdd(sourceId, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(ct);
         try
         {
             var auth = await _xtream.AuthAsync(s, ct);
@@ -47,15 +55,18 @@ public sealed class IngestService
             string? Group(XtreamLiveStream st) =>
                 st.CategoryId != null && catMap.TryGetValue(st.CategoryId, out var g) && !string.IsNullOrWhiteSpace(g) ? g : null;
 
-            var existing = await _db.Channels
-                .Where(c => c.SourceId == sourceId)
-                .ToDictionaryAsync(c => c.StreamId, ct);
-
             int added = 0, updated = 0;
             var now = EpochTime.Now();
 
             await _gate.WriteAsync(async () =>
             {
+                // Snapshot INSIDE the serialized section so it can never be stale against another writer. Tolerate
+                // historical duplicate rows (pre-fix databases): keep the lowest-Id row per StreamId rather than
+                // letting ToDictionary throw and permanently wedge every future ingest of this source.
+                var existing = new Dictionary<int, Channel>();
+                foreach (var c in await _db.Channels.Where(c => c.SourceId == sourceId).OrderBy(c => c.Id).ToListAsync(ct))
+                    existing.TryAdd(c.StreamId, c);
+
                 if (auth?.UserInfo is { } ui)
                     ApplyUserInfo(s, ui, now);
 
@@ -97,7 +108,8 @@ public sealed class IngestService
                         };
                         _db.Channels.Add(newCh);
                         // Register it so a duplicate stream_id later in the SAME provider response updates this row
-                        // instead of inserting a second one (the (SourceId, StreamId) unique index would otherwise abort the batch).
+                        // instead of inserting a second one. (There is intentionally no unique DB index — this
+                        // dictionary plus the per-source ingest lock IS the uniqueness guarantee.)
                         existing[st.StreamId] = newCh;
                         added++;
                     }
@@ -113,6 +125,10 @@ public sealed class IngestService
         {
             _log.LogError(ex, "[Ingest] Source {Id} failed", sourceId);
             return new IngestResult(sourceId, false, 0, 0, 0, ex.Message);
+        }
+        finally
+        {
+            gate.Release();
         }
     }
 

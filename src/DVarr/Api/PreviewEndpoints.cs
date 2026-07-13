@@ -75,17 +75,38 @@ public static class PreviewEndpoints
                     return;
                 }
 
+                // Commit the 200 only after the FIRST bytes actually arrive (audit PREVIEW-01): a provider that
+                // accepts the request but dies before sending data previously produced an empty 200 the player
+                // can't tell from a valid-but-silent stream. While no byte has been written we can still answer
+                // with a real error status.
+                await using var upstream = await resp.Content.ReadAsStreamAsync(ct);
+                var first = new byte[64 * 1024];
+                var n = await upstream.ReadAsync(first.AsMemory(0, first.Length), ct);
+                if (n <= 0)
+                {
+                    ctx.Response.StatusCode = 502;
+                    log.LogInformation("[Preview] upstream closed before sending any data for channel {Id}", channelId);
+                    await ctx.Response.WriteAsJsonAsync(new { error = "upstream", message = "the provider accepted the request but closed the stream before sending any data" });
+                    return;
+                }
+
                 ctx.Response.StatusCode = 200;
                 ctx.Response.Headers.ContentType = "video/mp2t";
                 ctx.Response.Headers.CacheControl = "no-store";
                 ctx.Response.Headers.Append("X-Accel-Buffering", "no"); // don't let any reverse proxy buffer a live stream
                 ctx.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
 
-                await using var upstream = await resp.Content.ReadAsStreamAsync(ct);
+                await ctx.Response.Body.WriteAsync(first.AsMemory(0, n), ct);
                 await upstream.CopyToAsync(ctx.Response.Body, 64 * 1024, ct);
             }
             catch (OperationCanceledException) { /* client closed the player, or the safety cap elapsed */ }
-            catch (Exception ex) { log.LogDebug(ex, "[Preview] stream error for channel {Id}", channelId); }
+            catch (Exception ex)
+            {
+                log.LogDebug(ex, "[Preview] stream error for channel {Id}", channelId);
+                // Mid-stream upstream failure after the 200 committed: ABORT the connection so the player sees a
+                // network error and can react, instead of a clean end-of-stream that looks like the feed finished.
+                try { ctx.Abort(); } catch { }
+            }
             finally
             {
                 if (lease is not null) await tuner.ReleaseAsync(lease, CancellationToken.None);

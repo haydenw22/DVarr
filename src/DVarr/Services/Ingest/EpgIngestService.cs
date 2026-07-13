@@ -200,7 +200,12 @@ public sealed class EpgIngestService
             sourceId, s.Label, total, channels.Count,
             s.EpgOverride && !string.IsNullOrWhiteSpace(s.EpgUrl) ? "external" : "provider",
             truncated ? " [TRUNCATED at safety cap]" : "");
-        return new EpgResult(sourceId, true, total, channels.Count, truncated, null);
+        // A truncated run committed NOTHING (its partial rows were discarded above) — reporting Ok=true with the
+        // attempted count told the user a sync succeeded that actually kept the old guide (audit EPG-01). Say so.
+        if (truncated)
+            return new EpgResult(sourceId, false, total, channels.Count, true,
+                $"guide exceeded the programme safety cap (epg_max_programmes) at {total:N0} rows — this run was discarded and the previous guide kept; raise the cap or point this source at a smaller external EPG");
+        return new EpgResult(sourceId, true, total, channels.Count, false, null);
     }
 
     private static readonly HashSet<string> QualityTokens = new(StringComparer.Ordinal)

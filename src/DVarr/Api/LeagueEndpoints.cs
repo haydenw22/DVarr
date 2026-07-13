@@ -447,19 +447,23 @@ public static class LeagueEndpoints
         });
 
         // Persist a drag-reorder within ONE league+team group (teamId null = whole-league): ranks become 1..N following
-        // orderedIds. Only mappings that belong to the group are touched; stray ids are ignored, so a drop can't renumber
-        // a different league's or team's mappings. One gate write.
+        // orderedIds. The list must be a COMPLETE unique permutation of the group (audit MAP-01) — a partial or
+        // duplicated list would assign duplicate/gapped ranks and silently corrupt the fallback order; stray ids from
+        // another group are rejected rather than ignored so a stale client can't half-apply. One gate write.
         app.MapPut("/api/mappings/reorder", async (MappingReorder req, DVarrDbContext db, DbWriteGate gate) =>
         {
             var teamId = string.IsNullOrWhiteSpace(req.TeamId) ? null : req.TeamId!.Trim();
             var group = await db.LeagueChannelMaps.Where(m => m.LeagueId == req.LeagueId && m.TeamId == teamId).ToListAsync();
             if (group.Count == 0) return Results.Json(new { ok = true });
+            var ordered = req.OrderedIds ?? Array.Empty<int>();
+            var groupIds = group.Select(m => m.Id).ToHashSet();
+            if (ordered.Length != group.Count || ordered.Distinct().Count() != ordered.Length || !ordered.All(groupIds.Contains))
+                return Results.Json(new { error = "reorder rejected: the list no longer matches this league's mappings — refresh the page and try again" }, statusCode: 409);
             var byId = group.ToDictionary(m => m.Id);
             await gate.WriteAsync(async () =>
             {
                 var rank = 1;
-                foreach (var id in (req.OrderedIds ?? Array.Empty<int>()))
-                    if (byId.TryGetValue(id, out var m)) m.Rank = rank++; // only ids in this group; ignore strays
+                foreach (var id in ordered) byId[id].Rank = rank++;
                 await db.SaveChangesAsync();
             });
             return Results.Json(new { ok = true });

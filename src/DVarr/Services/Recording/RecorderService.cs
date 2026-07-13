@@ -310,7 +310,11 @@ public sealed class RecorderService
     {
         var title = !string.IsNullOrWhiteSpace(rec.Title) ? rec.Title! : $"Recording {rec.Id}";
         var stamp = EpochTime.ToDisplay(rec.StartUtc).ToString("yyyy-MM-dd_HHmm");
-        var name = $"{Sanitize(title)} [{stamp}].mkv";
+        // The immutable recording id is part of the name (audit REC-02): two recordings with the same title and
+        // start minute (duplicate manual schedules, equivalent feeds on two credentials) previously resolved to the
+        // SAME flat path and their finalizers overwrote each other with -y. The media import renames on filing, so
+        // the id never reaches the library name.
+        var name = $"{Sanitize(title)} [{stamp}] [#{rec.Id}].mkv";
         return Path.Combine(_paths.MediaDir, name);
     }
 

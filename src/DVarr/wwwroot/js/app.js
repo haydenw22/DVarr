@@ -1492,7 +1492,9 @@ function delRec(id) {
   confirmRecDelete(1, async keepFile => {
     const r = await delRecReq(id, keepFile);
     if (r.error) return toast(r.error, 'err');
-    toast(keepFile ? 'Deleted (file kept on disk)' : 'Deleted');
+    // The entry is gone either way, but a failed FILE cleanup must not masquerade as a clean delete.
+    if (r.fileCleanupError) toast(`Deleted from DVarr, but ${r.fileCleanupError}`, 'err');
+    else toast(keepFile ? 'Deleted (file kept on disk)' : 'Deleted');
     render();
   });
 }

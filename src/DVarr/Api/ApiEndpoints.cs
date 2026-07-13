@@ -262,20 +262,26 @@ public static class ApiEndpoints
         // ---- Recordings ----
         app.MapGet("/api/recordings", async (DVarrDbContext db) =>
         {
-            var rows = await (from r in db.Recordings
-                              join ch in db.Channels on r.ChannelId equals ch.Id into chj
-                              from ch in chj.DefaultIfEmpty()
-                              join s in db.Sources on r.SourceId equals s.Id into sj
-                              from s in sj.DefaultIfEmpty()
-                              orderby r.StartUtc descending
-                              select new
-                              {
-                                  r.Id, r.Title, state = r.State.ToString(),
-                                  channel = ch != null ? ch.Name : null, source = s != null ? s.Label : null,
-                                  r.StartUtc, r.EndUtc, r.PrePadS, r.PostPadS,
-                                  r.BytesWritten, r.AttemptCount, r.OutputPath, r.FailureReason,
-                                  r.EventId,
-                              }).Take(200).ToListAsync();
+            // LIVE/UPCOMING rows are returned uncapped (they're naturally few and are exactly what must never fall
+            // off the list); the 200-row window applies only to TERMINAL history. Previously one descending
+            // Take(200) meant >200 far-future schedules pushed imminent/active rows out entirely (audit API-REC-01).
+            var terminal = new[] { RecordingState.Done, RecordingState.NeedsAttention, RecordingState.Missed, RecordingState.Cancelled };
+            var q = from r in db.Recordings
+                    join ch in db.Channels on r.ChannelId equals ch.Id into chj
+                    from ch in chj.DefaultIfEmpty()
+                    join s in db.Sources on r.SourceId equals s.Id into sj
+                    from s in sj.DefaultIfEmpty()
+                    select new
+                    {
+                        r.Id, r.Title, StateEnum = r.State,
+                        channel = ch != null ? ch.Name : null, source = s != null ? s.Label : null,
+                        r.StartUtc, r.EndUtc, r.PrePadS, r.PostPadS,
+                        r.BytesWritten, r.AttemptCount, r.OutputPath, r.FailureReason,
+                        r.EventId,
+                    };
+            var live = await q.Where(x => !terminal.Contains(x.StateEnum)).OrderByDescending(x => x.StartUtc).ToListAsync();
+            var history = await q.Where(x => terminal.Contains(x.StateEnum)).OrderByDescending(x => x.StartUtc).Take(200).ToListAsync();
+            var rows = live.Concat(history).OrderByDescending(x => x.StartUtc).ToList();
 
             // League per row (EventId → Event.LeagueId → League.Name), batched as two small IN lookups over the ≤200
             // returned rows and stitched in memory — no per-row query. Manual recordings (no EventId) get nulls.
@@ -293,7 +299,7 @@ public static class ApiEndpoints
                 int? leagueId = r.EventId is { } eid && evLeague.TryGetValue(eid, out var lid) ? lid : null;
                 return new
                 {
-                    r.Id, r.Title, r.state, r.channel, r.source,
+                    r.Id, r.Title, state = r.StateEnum.ToString(), r.channel, r.source,
                     r.StartUtc, r.EndUtc, r.PrePadS, r.PostPadS,
                     r.BytesWritten, r.AttemptCount, r.OutputPath, r.FailureReason,
                     leagueId,
@@ -460,7 +466,7 @@ public static class ApiEndpoints
             return ok ? Results.Json(new { ok = true, path }) : Results.Json(new { error }, statusCode: 400);
         });
 
-        app.MapDelete("/api/recordings/{id:int}", async (int id, bool? keepFile, RecorderService rec, DVarrDbContext db, DbWriteGate gate, ILoggerFactory lf) =>
+        app.MapDelete("/api/recordings/{id:int}", async (int id, bool? keepFile, RecorderService rec, DVarrDbContext db, DbWriteGate gate, RuntimePaths paths, ILoggerFactory lf) =>
         {
             var r = await db.Recordings.FindAsync(id);
             if (r is null) return Results.NotFound();
@@ -472,15 +478,21 @@ public static class ApiEndpoints
                 if (!settled)
                     return Results.Json(new { deleted = false, finalizing = true, error = "recording is still finalizing — try delete again in a moment" }, statusCode: 409);
             }
-            // Snapshot the disk artifacts before the row is gone (defaults to deleting them — that's what "delete a
-            // recording" means to users; ?keepFile=true removes just the DVarr entry).
-            var outputPath = r.OutputPath;
-            var segDir = r.SegmentDir;
+            // Snapshot the disk artifacts from a FRESH read, not the entity tracked above (audit REC-01): StopAsync
+            // settles only after finalize + media import, and the import MOVES the file and rewrites OutputPath in a
+            // different scope — the tracked row still holds the pre-import flat path, so cleaning up from it would
+            // silently orphan the real imported MKV. (Defaults to deleting the files — that's what "delete a
+            // recording" means to users; ?keepFile=true removes just the DVarr entry.)
+            var fresh = await db.Recordings.AsNoTracking().Where(x => x.Id == id)
+                .Select(x => new { x.OutputPath, x.SegmentDir }).FirstOrDefaultAsync();
+            var outputPath = fresh?.OutputPath ?? r.OutputPath;
+            var segDir = fresh?.SegmentDir ?? r.SegmentDir;
             await gate.WriteAsync(async () => { db.Recordings.Remove(r); await db.SaveChangesAsync(); });
-            // File deletion happens AFTER the row commit so a disk error can never strand a half-deleted entry; a
-            // failed artifact delete is logged, not surfaced (the entry the user acted on is gone either way).
-            if (keepFile != true) DeleteRecordingArtifacts(outputPath, segDir, lf.CreateLogger("Recordings"));
-            return Results.Json(new { deleted = true });
+            // File deletion happens AFTER the row commit so a disk error can never strand a half-deleted entry;
+            // cleanup problems are reported in the response (audit REC-04) instead of silently logged.
+            string? cleanupError = null;
+            if (keepFile != true) cleanupError = DeleteRecordingArtifacts(outputPath, segDir, paths, lf.CreateLogger("Recordings"));
+            return Results.Json(new { deleted = true, fileCleanupError = cleanupError });
         });
 
         // ---- Conflict planning ----
@@ -661,7 +673,7 @@ public static class ApiEndpoints
                 if (kv.Key == "timezone_display" && EpochTime.ResolveZone(kv.Value) is null)
                     return Results.Json(new { error = $"'{kv.Value}' is not a recognised timezone — use an IANA name like Australia/Brisbane or America/New_York" }, statusCode: 400);
             }
-            foreach (var kv in values) await settings.SetAsync(kv.Key, kv.Value);
+            await settings.SetManyAsync(values); // one transaction — all keys commit or none do (audit SET-03)
             // Apply a timezone change immediately (UI clock, filenames, Plex air dates) — no restart needed.
             if (values.TryGetValue("timezone_display", out var tzId)) EpochTime.SetDisplayZone(tzId);
             return Results.Json(await settings.GetAllAsync());
@@ -713,11 +725,15 @@ public static class ApiEndpoints
     /// <summary>
     /// Remove a deleted recording's disk artifacts: the output file plus its same-basename sidecars (the .nfo and
     /// thumbnail the media import wrote next to it), the per-game folder IF the delete emptied it (show-level
-    /// artwork lives a level up and is shared, so it's never touched), and the per-recording segment scratch.
-    /// Every step is best-effort — a locked/missing file logs a warning and never fails the API delete.
+    /// artwork lives a level up and is shared, so it's never touched — and the media/segment ROOTS themselves are
+    /// never deleted, however empty), and the per-recording segment scratch. Every step is best-effort — a
+    /// locked/missing file never fails the API delete — but failures are RETURNED so the UI can say the entry was
+    /// removed while the file wasn't (audit REC-04). Returns null when everything cleaned up.
     /// </summary>
-    private static void DeleteRecordingArtifacts(string? outputPath, string? segDir, ILogger log)
+    private static string? DeleteRecordingArtifacts(string? outputPath, string? segDir, RuntimePaths paths, ILogger log)
     {
+        static string Norm(string p) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(p));
+        var errors = new List<string>();
         try
         {
             if (!string.IsNullOrWhiteSpace(outputPath) && File.Exists(outputPath))
@@ -733,22 +749,38 @@ public static class ApiEndpoints
                                  .Where(f => Path.GetFileName(f).StartsWith(baseName + ".", StringComparison.OrdinalIgnoreCase)
                                              && Path.GetExtension(f).ToLowerInvariant() is ".nfo" or ".jpg" or ".jpeg" or ".png"))
                         File.Delete(side);
-                    if (!Directory.EnumerateFileSystemEntries(dir).Any()) Directory.Delete(dir);
+                    // Prune the emptied per-game folder — but NEVER the media root itself (a flat layout would
+                    // otherwise let an emptied library delete the mount point's directory).
+                    if (!string.Equals(Norm(dir), Norm(paths.MediaDir), StringComparison.OrdinalIgnoreCase)
+                        && !Directory.EnumerateFileSystemEntries(dir).Any())
+                        Directory.Delete(dir);
                 }
                 log.LogInformation("[Recordings] deleted file + sidecars for {Path}", outputPath);
             }
         }
-        catch (Exception ex) { log.LogWarning(ex, "[Recordings] file cleanup failed for {Path} (entry already deleted)", outputPath); }
+        catch (Exception ex)
+        {
+            log.LogWarning(ex, "[Recordings] file cleanup failed for {Path} (entry already deleted)", outputPath);
+            errors.Add($"the recorded file couldn't be removed ({ex.Message})");
+        }
         try
         {
             // segDir = /segments/{id}/A — remove the whole per-recording scratch dir, mirroring finalize's cleanup.
+            // Same root guard: only ever delete a strict subdirectory of the segment root.
             if (!string.IsNullOrWhiteSpace(segDir))
             {
                 var recScratch = Path.GetDirectoryName(segDir) ?? segDir;
-                if (Directory.Exists(recScratch)) Directory.Delete(recScratch, recursive: true);
+                if (!string.Equals(Norm(recScratch), Norm(paths.SegmentDir), StringComparison.OrdinalIgnoreCase)
+                    && Directory.Exists(recScratch))
+                    Directory.Delete(recScratch, recursive: true);
             }
         }
-        catch (Exception ex) { log.LogWarning(ex, "[Recordings] segment scratch cleanup failed for {Dir}", segDir); }
+        catch (Exception ex)
+        {
+            log.LogWarning(ex, "[Recordings] segment scratch cleanup failed for {Dir}", segDir);
+            errors.Add($"capture scratch couldn't be removed ({ex.Message})");
+        }
+        return errors.Count == 0 ? null : string.Join("; ", errors);
     }
 
     private static string Mask(string? s) => string.IsNullOrEmpty(s) ? "" : "***";

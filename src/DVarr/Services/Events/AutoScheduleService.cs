@@ -39,6 +39,11 @@ public sealed class AutoScheduleService : BackgroundService
     // hosted service but keep it instance-independent for safety).
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, long> _lastNoMapWarn = new();
 
+    // Last operational-data retention prune (audit DB-01): Notifications and ScheduleTicks are append-only and grew
+    // forever; everything else high-frequency is already bounded (Programmes swap per sync, RecordingSegments delete
+    // per finalize). Runs at most once a day, piggybacked on the schedule tick.
+    private static long _lastRetentionPruneUtc;
+
     public AutoScheduleService(IServiceScopeFactory scopes, DbWriteGate gate, ILogger<AutoScheduleService> log)
     { _scopes = scopes; _gate = gate; _log = log; }
 
@@ -116,8 +121,27 @@ public sealed class AutoScheduleService : BackgroundService
         var now = EpochTime.Now();
         var interval = await settings.GetIntAsync("auto_schedule_interval_s"); if (interval <= 0) interval = 300;
         var syncInterval = await settings.GetIntAsync("event_sync_interval_s"); if (syncInterval <= 0) syncInterval = 21600;
-        var pre = await settings.GetIntAsync("default_pre_pad_s"); if (pre <= 0) pre = 300;
-        var post = await settings.GetIntAsync("default_post_pad_s"); if (post <= 0) post = 1800;
+        // Pads: an EXPLICIT 0 is a legitimate "no padding" choice and must survive (audit SET-02 — the old `<= 0`
+        // guard silently rewrote a saved 0 back to 5/30 minutes). Only an unparseable/negative value falls back.
+        var pre = int.TryParse(await settings.GetAsync("default_pre_pad_s"), out var preRaw) && preRaw >= 0 ? preRaw : 300;
+        var post = int.TryParse(await settings.GetAsync("default_post_pad_s"), out var postRaw) && postRaw >= 0 ? postRaw : 1800;
+
+        // 0) Daily retention prune (audit DB-01): keep 30 days of Notifications (the Activity feed) and 7 days of
+        //    ScheduleTicks (per-tick diagnostics). Both are pure observability data — nothing joins them.
+        if (now - Interlocked.Read(ref _lastRetentionPruneUtc) > 86400)
+        {
+            Interlocked.Exchange(ref _lastRetentionPruneUtc, now);
+            try
+            {
+                await _gate.WriteAsync(async () =>
+                {
+                    var n = await db.Notifications.Where(x => x.TsUtc < now - 30L * 86400).ExecuteDeleteAsync(ct);
+                    var t = await db.ScheduleTicks.Where(x => x.TickUtc < now - 7L * 86400).ExecuteDeleteAsync(ct);
+                    if (n > 0 || t > 0) _log.LogInformation("[AutoSchedule] retention prune: {N} notification(s), {T} schedule tick(s) removed", n, t);
+                }, ct);
+            }
+            catch (Exception ex) { _log.LogWarning(ex, "[AutoSchedule] retention prune failed (will retry tomorrow)"); }
+        }
 
         // 1) Refresh events for monitored, non-manual leagues whose data is stale.
         var dueLeagues = await db.Leagues
@@ -135,11 +159,16 @@ public sealed class AutoScheduleService : BackgroundService
         if (monitoredLeagues.Count == 0) return interval;
         var maxLookahead = now + 60L * 86400; // hard ceiling; per-league horizon applied below
 
+        // Generous SQL cap only (bounded memory) — the ELIGIBILITY cap is applied AFTER the team/session filters
+        // below (audit SCH-01: capping before the filters let 500 early non-followed events starve later valid
+        // ones). 5000 rows is far beyond any real 60-day monitored-league window; log if it's ever hit.
         var candidates = await db.Events.AsNoTracking()
             .Where(e => e.Monitored && monitoredLeagues.Keys.Contains(e.LeagueId)
                         && e.StartUtc > now - 3600 && e.StartUtc < maxLookahead
                         && (e.Status == EventStatus.Scheduled || e.Status == EventStatus.Live || e.Status == EventStatus.Unknown))
-            .OrderBy(e => e.StartUtc).Take(500).ToListAsync(ct);
+            .OrderBy(e => e.StartUtc).Take(5000).ToListAsync(ct);
+        if (candidates.Count == 5000)
+            _log.LogWarning("[AutoSchedule] candidate query hit the 5000-row safety cap — events beyond it are deferred to later ticks");
 
         // Team-follow: a league with MonitoredTeamsJson set records ONLY those teams' matches. (The full schedule is
         // still ingested so episode numbers stay correct — this filters only what the scheduler arms.) Keep an event
@@ -175,6 +204,11 @@ public sealed class AutoScheduleService : BackgroundService
                 || !followedSessions.TryGetValue(e.LeagueId, out var kinds)
                 || MotorsportSession.Classify(e.Title) is not { } k
                 || kinds.Contains(k)).ToList();
+
+        // Per-tick work cap on the ELIGIBLE set (soonest first — the list is StartUtc-ordered). Applied after the
+        // filters so followed events can never be starved by early non-followed ones (audit SCH-01); anything past
+        // the cap is simply picked up by a later tick.
+        if (candidates.Count > 500) candidates = candidates.Take(500).ToList();
 
         var handledEventIds = (await db.Recordings
             .Where(r => r.EventId != null && Handled.Contains(r.State))

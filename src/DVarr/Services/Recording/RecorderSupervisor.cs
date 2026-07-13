@@ -371,11 +371,13 @@ public sealed class RecorderSupervisor
             // packets. Larger probe so HE-AAC/SBR audio + the PMT are fully detected before -c copy begins.
             "-fflags", "+genpts", "-analyzeduration", "10M", "-probesize", "10M",
             "-i", url,
-            // Explicit 1 video + 1 audio. NOT -map 0 — on a multi-variant HLS master that would pull every
-            // bitrate rendition at once and choke startup. Explicit mapping is also deterministic if the
-            // provider emits a transient extra stream/PMT mid-feed. Audio is OPTIONAL (0:a?) so a video-only or
-            // delayed-audio feed records instead of ffmpeg exiting "Stream map '0:a' matches no streams".
-            "-map", "0:v", "-map", "0:a?", "-c", "copy", "-max_muxing_queue_size", "4096",
+            // Explicit FIRST video stream (0:v:0, audit REC-05 — bare 0:v selects EVERY video stream, so a
+            // multi-programme mux or attached picture would be pulled in too). NOT -map 0 — on a multi-variant
+            // HLS master that would pull every bitrate rendition at once and choke startup. Explicit mapping is
+            // also deterministic if the provider emits a transient extra stream/PMT mid-feed. Audio is OPTIONAL
+            // (0:a?) so a video-only or delayed-audio feed records instead of ffmpeg exiting "Stream map '0:a'
+            // matches no streams"; all audio tracks are kept (finalize picks the first) so language options survive.
+            "-map", "0:v:0", "-map", "0:a?", "-c", "copy", "-max_muxing_queue_size", "4096",
             // Self-heal a corrupt source PTS AT CAPTURE: rewrite PTS from the (good) DTS only when they diverge
             // by >10s (900000 ticks). Real B-frame reorder is <0.15s, so this is a pure no-op on healthy frames
             // (a ~700x safety margin) and preserves legitimate PTS ordering — but a single rogue source PTS can
@@ -698,9 +700,11 @@ public sealed class RecorderSupervisor
             outputPath,
         }) psi.ArgumentList.Add(a);
 
+        Process? proc = null;
         try
         {
-            using var p = Process.Start(psi)!;
+            proc = Process.Start(psi)!;
+            var p = proc;
             _ = Task.Run(async () => { try { while (await p.StandardError.ReadLineAsync() is not null) { } } catch { } });
             _ = Task.Run(async () => { try { while (await p.StandardOutput.ReadLineAsync() is not null) { } } catch { } });
             // Scale the hang-guard by footage length (≈75 8s-segments per 10 min) so a long motorsport finalize
@@ -718,6 +722,14 @@ public sealed class RecorderSupervisor
         {
             _log.LogError(ex, "[Recorder] Finalize concat failed for {Id}", recordingId);
             return (false, 0, 0, null);
+        }
+        finally
+        {
+            // A timed-out/failed finalize must not orphan ffmpeg (audit REC-03): Dispose alone releases handles but
+            // leaves the OS process running against the output file — kill the whole tree and reap it first.
+            try { if (proc is { HasExited: false }) { proc.Kill(entireProcessTree: true); proc.WaitForExit(10_000); } }
+            catch { /* already gone / access race — nothing to reap */ }
+            proc?.Dispose();
         }
     }
 

@@ -22,10 +22,13 @@ var builder = WebApplication.CreateBuilder(new WebApplicationOptions
 // ---------------------------------------------------------------------------
 string ResolveDir(string key, string linuxDefault)
 {
-    if (OperatingSystem.IsWindows())
-        return Path.Combine(AppContext.BaseDirectory, "_localdata", key.Replace("Dir", "").ToLowerInvariant());
+    // One precedence chain on every platform: explicit config/env first, then the OS default (audit WIN-01 — the
+    // Windows branch used to ignore a configured path entirely, so DVarr__MediaDir etc. silently did nothing there).
     var configured = builder.Configuration[$"DVarr:{key}"];
-    return !string.IsNullOrWhiteSpace(configured) ? configured! : linuxDefault;
+    if (!string.IsNullOrWhiteSpace(configured)) return configured!;
+    return OperatingSystem.IsWindows()
+        ? Path.Combine(AppContext.BaseDirectory, "_localdata", key.Replace("Dir", "").ToLowerInvariant())
+        : linuxDefault;
 }
 
 var configDir = ResolveDir("ConfigDir", "/config");
@@ -90,6 +93,32 @@ app.Logger.LogInformation("DVarr starting. config={Config} media={Media} segment
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<DVarrDbContext>();
+
+    // Pre-migration safety copy (audit MIG-01): before applying PENDING migrations to an existing database, snapshot
+    // the SQLite file (+ WAL/SHM sidecars) so a failed/interrupted migration is recoverable by copying the backup
+    // back. Keeps the last 3 snapshots. A fresh database (no file yet) or an up-to-date one skips this entirely.
+    try
+    {
+        if (File.Exists(dbPath) && (await db.Database.GetPendingMigrationsAsync()).Any())
+        {
+            var backupDir = Path.Combine(configDir, "backups");
+            Directory.CreateDirectory(backupDir);
+            var stamp = DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss");
+            foreach (var suffix in new[] { "", "-wal", "-shm" })
+            {
+                var src = dbPath + suffix;
+                if (File.Exists(src)) File.Copy(src, Path.Combine(backupDir, $"pre-migrate-{stamp}.db{suffix}"), overwrite: true);
+            }
+            foreach (var old in Directory.GetFiles(backupDir, "pre-migrate-*")
+                         .Where(f => f.EndsWith(".db", StringComparison.OrdinalIgnoreCase)) // exact .db (the 3-char pattern quirk would sweep -wal names into the ordering)
+                         .OrderByDescending(f => f, StringComparer.Ordinal).Skip(3))
+                foreach (var suffix in new[] { "", "-wal", "-shm" })
+                    { var p = old + suffix; if (File.Exists(p)) File.Delete(p); }
+            app.Logger.LogInformation("Pre-migration database backup written to {Dir} (pre-migrate-{Stamp}.db)", backupDir, stamp);
+        }
+    }
+    catch (Exception ex) { app.Logger.LogWarning(ex, "Pre-migration backup failed — continuing with migration"); }
+
     await db.Database.MigrateAsync();
 
     var settingsSvc = scope.ServiceProvider.GetRequiredService<SettingsService>();
