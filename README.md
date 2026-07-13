@@ -12,8 +12,6 @@
 
 DVarr watches the leagues you follow on [TheSportsDB](https://www.thesportsdb.com/), maps them to your IPTV channels, and records every event automatically — with a recorder built to survive feed drops, a scheduler that plans around your provider's stream limits, and guide intelligence that picks the channel actually showing each game.
 
-> **New in v1.36** — provider **expiry dates** in Sources, a redesigned **Leagues page** (League → Team → Channels, with drag-to-reorder priority), **multi-select channel mapping** (tick several and add them all at once), and **bulk actions on Recordings** (start / re-resolve / stop / delete together). Full history in the [changelog](CHANGELOG.md).
-
 ---
 
 ## Highlights
@@ -28,16 +26,6 @@ DVarr watches the leagues you follow on [TheSportsDB](https://www.thesportsdb.co
 - **Mobile PWA** — install it on your phone; drawer navigation, card layouts and touch-sized controls, with zero functionality lost.
 - **Login with trusted devices** — HTTP Basic for scripts and automations, a cookie login page for browsers (180-day trusted devices), credentials set via Docker env vars, and a rate-limited login endpoint. Machine-to-machine surfaces (Plex, Home Assistant, IPTV export, health) carry their own tokens and stay reachable.
 - **Integrations** — Plex custom metadata provider, Jellyfin/Emby-ready NFO + artwork on every filed recording, Sonarr-v3-compatible API, Home Assistant status endpoint, credential-free M3U/XMLTV export for LAN IPTV players.
-
----
-
-## What's new
-
-- **v1.37** — deleting a recording now deletes the file from disk too (with a keep-file option); a broken dead-feed decode setting can no longer kill recordings (the recorder self-heals and tells you which setting to fix); the Recordings page shows *why* something needs attention; a failed recording no longer displays the wrong channel.
-- **v1.36** — IPTV service expiry on the Sources page, a redesigned Leagues page with drag-to-reorder channel priority, multi-select channel mapping, and bulk actions on Recordings.
-- **v1.35** — per-game guide-match channel picks up to 48h ahead, the preview User-Agent fix, and protection against timestamp-corrupted recordings.
-
-The full story for every release is in the [CHANGELOG](CHANGELOG.md) and on the [releases page](https://github.com/haydenw22/DVarr/releases).
 
 ---
 
