@@ -58,7 +58,7 @@ public sealed class RecorderService
         {
         string url, segDir, outputPath;
         long windowEnd;
-        int stall, contentDeadTimeout, contentVerifyFps;
+        int stall, contentDeadTimeout, contentVerifyFps, bitrateFloor;
         bool nativeRate, contentVerify, cleanEof;
         string contentVerifyHwaccel;
         TunerLease lease;
@@ -86,6 +86,14 @@ public sealed class RecorderService
             // HARD GUARD: a disabled source is off-limits — never contact the provider for it, even from the
             // background auto-record pipeline. This is the structural enforcement of the "don't touch Source 1" rule.
             if (!src.Enabled) return $"source '{src.Label}' is disabled — refusing to contact it";
+
+            // Global concurrency cap: DVarr won't run more than max_global_concurrent_recordings at once across ALL
+            // logins (bounds CPU/disk/network beyond the per-credential 1-stream limit). _active already holds this
+            // recording's own reservation (added above), so subtract it. Over the cap → stay Pending and retry next
+            // tick, exactly like a busy credential — never a hard failure. 0/blank = no global cap.
+            var maxConcurrent = await settings.GetIntAsync("max_global_concurrent_recordings");
+            if (maxConcurrent > 0 && _active.Count - 1 >= maxConcurrent)
+                return $"at the global limit of {maxConcurrent} simultaneous recording(s) — will start when one frees";
 
             // Acquire the credential's single slot. If THIS recording's credential is busy, SPREAD to the same
             // logical channel on another enabled login that has a free slot (conflict planning, bug #7). This is what
@@ -163,6 +171,19 @@ public sealed class RecorderService
                 // them like any other recoverable fault (back-off + failover ladder).
                 cleanEof = await settings.GetBoolAsync("clean_eof_instant_relaunch");
 
+                // Bitrate-floor placeholder detection (opt-in): resolve THIS channel's floor from its quality tier.
+                // 0 = disabled (feature off, or an unknown tier we choose not to police). Passed to the supervisor,
+                // which fails over when the rolling stream bitrate stays below it — a provider slate feeds bytes but
+                // far too few for real content, which the picture-based dead-feed check needs a GPU to catch.
+                bitrateFloor = 0;
+                if (await settings.GetBoolAsync("bitrate_floor_enabled"))
+                {
+                    var sd = await settings.GetIntAsync("bitrate_floor_kbps_sd"); if (sd <= 0) sd = 400;
+                    var hd = await settings.GetIntAsync("bitrate_floor_kbps_hd"); if (hd <= 0) hd = 800;
+                    var uhd = await settings.GetIntAsync("bitrate_floor_kbps_uhd"); if (uhd <= 0) uhd = 2000;
+                    bitrateFloor = ch.DetectedQuality switch { "2160p" => uhd, "1080p" or "720p" => hd, _ => sd };
+                }
+
                 // Pre-load same-credential fallbacks (rank 2..N; rank 1 is the primary on Recording.ChannelId) and
                 // resolve their URLs. The supervisor walks this ladder in order when the primary dies or goes dead.
                 var fbRows = await db.RecordingFallbacks.Where(f => f.RecordingId == recordingId && f.Rank >= 2).OrderBy(f => f.Rank).ToListAsync(stoppingToken);
@@ -182,7 +203,7 @@ public sealed class RecorderService
                         : Task.FromResult<(int, int, string)?>(null);
 
                 var sup = new RecorderSupervisor(new RecorderSupervisor.Deps(_scopes, _gate, _ffmpeg, _tuner, _bus, _lf));
-                var task = Task.Run(() => sup.RunAsync(recordingId, url, segDir, outputPath, windowEnd, stall, nativeRate, contentVerify, contentDeadTimeout, contentVerifyHwaccel, contentVerifyFps, cleanEof, src?.UserAgent, lease, next, cts.Token), CancellationToken.None);
+                var task = Task.Run(() => sup.RunAsync(recordingId, url, segDir, outputPath, windowEnd, stall, nativeRate, contentVerify, contentDeadTimeout, contentVerifyHwaccel, contentVerifyFps, cleanEof, bitrateFloor, src?.UserAgent, lease, next, cts.Token), CancellationToken.None);
                 _active[recordingId] = (task, cts); // swap the reservation placeholder for the running task (same cts)
                 _ = task.ContinueWith(t => { _active.TryRemove(recordingId, out _); cts.Dispose(); }, TaskScheduler.Default);
                 started = true;

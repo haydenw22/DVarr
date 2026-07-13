@@ -216,7 +216,6 @@ All fallbacks for a league must be on the **same provider login** — one stream
 - **Home Assistant** — set a webhook URL under **Settings → Data Sources** to push recording state changes; a status endpoint is also available for polling.
 - **IPTV players on your LAN** — credential-free M3U + XMLTV export endpoints let players tune channels without ever seeing your provider login.
 - **Live preview GPU accel** — recording never needs a GPU, but the in-browser live preview transcodes; on an NVIDIA box enable the commented `runtime: nvidia` block in the compose file and set **Settings → Reliability → content_verify_hwaccel** to `cuda` for GPU dead-feed checks too.
-- **Continuous DB backup** — point **Settings → Data Sources → litestream_target** at an S3-compatible bucket.
 
 ---
 

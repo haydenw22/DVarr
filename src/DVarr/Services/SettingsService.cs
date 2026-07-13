@@ -41,10 +41,16 @@ public sealed class SettingsService
         // per-league override). Keys = lowercased TheSportsDB strSport; matching is case-insensitive. Auto-stop
         // extends past these when the event genuinely runs long.
         ["event_duration_overrides_json"] = "{\"motorsport\":10800,\"fighting\":18000,\"golf\":21600,\"cricket\":14400,\"tennis\":14400}",
+        // Bitrate-floor placeholder detection (opt-in, like dead-feed detection): when bitrate_floor_enabled is on, a
+        // recording whose rolling stream bitrate stays below the floor for its channel's quality tier for a sustained
+        // window is treated as a provider placeholder/slate (bytes flow, but far too few for real content) and fails
+        // over down the same ladder as a stall/dead-picture. Floors are per tier — SD, HD (720p/1080p), UHD (4K/2160p);
+        // an unclassified channel uses the SD floor (the most permissive) so real streams aren't wrongly dropped.
+        ["bitrate_floor_enabled"] = "false",
         ["bitrate_floor_kbps_sd"] = "400",
         ["bitrate_floor_kbps_hd"] = "800",
+        ["bitrate_floor_kbps_uhd"] = "2000",
         ["segment_no_progress_timeout_s"] = "25",
-        ["content_probe_interval_s"] = "45",
         // Content verification (docs/04 §dead-feed). When ON, a second decode-only output of the SAME ffmpeg
         // connection (no extra login) watches for a black/frozen/silent slate; sustained dead picture for
         // content_dead_timeout_s routes into the normal relaunch→failover ladder. OFF by default — opt-in after soak.
@@ -90,7 +96,6 @@ public sealed class SettingsService
         // Arm-window EPG re-pick: when ON, a Pending recording within ~24h of start is re-resolved against the live
         // guide and moved (same credential only) to whichever mapped channel's EPG actually shows the event.
         ["epg_repick_enabled"] = "true",
-        ["recorder_input_mode"] = "direct_ts",
         // When a recording's pre-roll attempt captures nothing (e.g. the channel isn't live yet), make ONE guaranteed
         // fresh attempt at the event's real start time. Never interrupts a recording that's already capturing.
         ["retry_at_event_start"] = "true",
@@ -98,14 +103,12 @@ public sealed class SettingsService
         // scheduled end and EXTENDS the window while the event is still in play (extra time / penalties), closing it
         // once the guide reports a terminal status. Never shortens below the scheduled window. OFF = fixed windows only.
         ["auto_stop_enabled"] = "true",
-        ["default_channel_source_filter"] = "all",
         ["timezone_display"] = "Australia/Brisbane",
         ["ha_webhook_url"] = "",
         // Public base URL of this DVarr instance (e.g. https://dvr.example.com), used to build the externally-reachable
         // calendar-feed link shown in the "Subscribe" modal. Empty by default — the UI prompts for it there. A text
         // setting whose default must NOT look numeric, or the /api/settings int-guard would reject a real URL.
         ["public_base_url"] = "",
-        ["litestream_target"] = "",
     };
 
     public async Task EnsureDefaultsAsync(CancellationToken ct = default)

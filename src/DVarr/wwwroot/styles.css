@@ -41,6 +41,9 @@ nav.menu { padding:12px 10px; flex:1; overflow:auto; }
 .sidebar-foot { border-top:1px solid var(--line); padding:12px 14px; font-size:11px; color:var(--dim); }
 .sidebar-foot .foot-donate { display:block; text-align:center; margin-bottom:8px; background:var(--chip-bg); border:1px solid var(--line2); border-radius:14px; padding:6px 12px; font-size:11.5px; font-weight:600; color:var(--dim); line-height:1.45; }
 .sidebar-foot .foot-donate:hover { color:var(--warn); border-color:rgba(245,158,11,.5); background:rgba(245,158,11,.08); }
+.sidebar-foot .foot-discord { display:flex; align-items:center; justify-content:center; gap:7px; margin-bottom:8px; background:var(--chip-bg); border:1px solid var(--line2); border-radius:14px; padding:6px 12px; font-size:11.5px; font-weight:600; color:var(--dim); }
+.sidebar-foot .foot-discord svg { width:16px; height:16px; flex:none; }
+.sidebar-foot .foot-discord:hover { color:#5865F2; border-color:rgba(88,101,242,.55); background:rgba(88,101,242,.1); }
 .kofi-frame { display:block; width:100%; height:min(620px, 66vh); border:0; border-radius:10px; background:#f9f9f9; }
 .sidebar-foot .foot-chip { display:inline-flex; align-items:center; gap:7px; width:100%; background:var(--chip-bg); border:1px solid var(--line); border-radius:20px; padding:6px 12px; }
 .sidebar-foot .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--dim2); flex:none; vertical-align:middle; }

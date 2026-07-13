@@ -12,6 +12,17 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.38.1] — 2026-07-14
+Placeholder-stream detection, an enforced recording cap, a Discord link, and a Settings tidy-up.
+
+### Added
+- **Bitrate-floor placeholder detection.** Some providers keep a "channel offline" slate playing at a trickle of data — the stream stays technically alive so it never trips a stall, but nothing real is recording. DVarr can now spot this from the bitrate alone (no GPU needed, unlike the picture-based dead-feed check): turn on **Settings → Reliability → Bitrate-floor placeholder detection** and set a floor per quality tier — **SD**, **HD** (720p/1080p) and **4K** (2160p). If a channel's stream stays below its tier's floor for a sustained window, DVarr treats it as a placeholder and fails over down the same ladder as a dead feed. Opt-in and off by default; an unclassified channel uses the SD floor so genuinely low-bitrate streams aren't wrongly dropped.
+- **A Discord link** in the sidebar, next to the Ko-fi button — [join the DVarr community](https://discord.gg/Nb59pEzGb6).
+
+### Changed
+- **The "Max simultaneous recordings" setting is now enforced.** DVarr won't start more than that many recordings at once across all logins; an event that would exceed the cap waits and starts when a slot frees, rather than the setting being ignored.
+- **Settings tidy-up:** removed three settings that never did anything (recorder input mode, dead-feed check interval, default channel filter) and the Litestream backup field, which was never implemented — its presence implied a backup was running when none was. (Startup already snapshots the database before applying any migration.)
+
 ## [1.38.0] — 2026-07-14
 The Library: DVarr now tracks what's physically on the drive. Finished recordings graduate off the Recordings page into a Plex-style Library, and everything — including a recording still in progress — can be watched in the browser.
 

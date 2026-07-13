@@ -1276,21 +1276,21 @@ window.bumpRec = async (id) => { const r = await api.post(`/api/recordings/${id}
 // ---- Settings ----
 // Per-setting metadata: clear title (t), one-sentence help (h), group (g), and input type (ty). Keys not listed here
 // still render (under "Advanced") so a new backend setting is never hidden. The flat PUT payload is unchanged.
-const SETTINGS_GROUPS = ['Recording', 'Reliability', 'Scheduling', 'Guide', 'TheSportsDB', 'Integrations', 'Display', 'Backups'];
+const SETTINGS_GROUPS = ['Recording', 'Reliability', 'Scheduling', 'Guide', 'TheSportsDB', 'Integrations', 'Display'];
 // v1.20.0: the functional groups roll up into 5 top-level Settings tabs (laid out in columns/rows, not one long scroll).
 const SETTINGS_TABS = ['Recording', 'Reliability', 'Scheduling & EPG', 'Data sources', 'Advanced'];
-const GROUP_TAB = { Recording: 'Recording', Reliability: 'Reliability', Scheduling: 'Scheduling & EPG', Guide: 'Scheduling & EPG', TheSportsDB: 'Data sources', Integrations: 'Data sources', Display: 'Data sources', Backups: 'Data sources', Advanced: 'Advanced' };
+const GROUP_TAB = { Recording: 'Recording', Reliability: 'Reliability', Scheduling: 'Scheduling & EPG', Guide: 'Scheduling & EPG', TheSportsDB: 'Data sources', Integrations: 'Data sources', Display: 'Data sources', Advanced: 'Advanced' };
 const SETTINGS_META = {
   max_global_concurrent_recordings: { g: 'Recording', t: 'Max simultaneous recordings', h: 'The most recordings DVarr will run at once across all logins.', ty: 'int' },
   default_pre_pad_s: { g: 'Recording', t: 'Pre-roll padding (seconds)', h: 'How long before an event starts to begin recording.', ty: 'int' },
   default_post_pad_s: { g: 'Recording', t: 'Post-roll padding (seconds)', h: 'How long after an event ends to keep recording.', ty: 'int' },
   retry_at_event_start: { g: 'Recording', t: 'Retry at event start', h: 'If a recording captures nothing during pre-roll (the channel isn’t live yet), make one fresh attempt at the real start time.', ty: 'bool' },
-  recorder_input_mode: { g: 'Recording', t: 'Recorder input mode', h: 'How the stream is ingested. Leave as “direct_ts”.', ty: 'text' },
-  bitrate_floor_kbps_sd: { g: 'Reliability', t: 'SD bitrate floor (kbps)', h: 'Below this, an SD stream is treated as bad and fails over.', ty: 'int' },
-  bitrate_floor_kbps_hd: { g: 'Reliability', t: 'HD bitrate floor (kbps)', h: 'Below this, an HD stream is treated as bad and fails over.', ty: 'int' },
+  bitrate_floor_enabled: { g: 'Reliability', t: 'Bitrate-floor placeholder detection', h: 'Fail over when a stream keeps feeding data but far too little for real content — a provider “channel offline” slate. Uses the per-tier floors below. Opt-in; needs no GPU.', ty: 'bool' },
+  bitrate_floor_kbps_sd: { g: 'Reliability', t: 'SD bitrate floor (kbps)', h: 'When placeholder detection is on: an SD channel steadily below this looks like a slate and fails over. Keep it well under a real SD stream (~1 Mbps+).', ty: 'int' },
+  bitrate_floor_kbps_hd: { g: 'Reliability', t: 'HD bitrate floor (kbps)', h: 'Floor for HD channels (720p/1080p) when placeholder detection is on. Real HD is several Mbps, so a low value only catches slates.', ty: 'int' },
+  bitrate_floor_kbps_uhd: { g: 'Reliability', t: '4K bitrate floor (kbps)', h: 'Floor for 4K/UHD channels (2160p) when placeholder detection is on. Real 4K is 15 Mbps+, so this only catches slates.', ty: 'int' },
   segment_no_progress_timeout_s: { g: 'Reliability', t: 'Stall timeout (seconds)', h: 'Seconds with no data written before the recorder relaunches / fails over.', ty: 'int' },
   content_verify_enabled: { g: 'Reliability', t: 'Dead-feed detection', h: 'Watch for a black / frozen / silent slate and fail over when the feed is dead. Opt-in.', ty: 'bool' },
-  content_probe_interval_s: { g: 'Reliability', t: 'Dead-feed check interval (seconds)', h: 'How often to check for a dead feed when detection is on.', ty: 'int' },
   content_dead_timeout_s: { g: 'Reliability', t: 'Dead-feed timeout (seconds)', h: 'Seconds of dead feed before failing over.', ty: 'int' },
   content_verify_hwaccel: { g: 'Reliability', t: 'Dead-feed GPU decode', h: 'Decode the dead-feed check on the GPU (“cuda” = Nvidia NVDEC). Blank or “none” = CPU. Keeps detection near-free.', ty: 'text' },
   content_verify_fps: { g: 'Reliability', t: 'Dead-feed sample rate (fps)', h: 'Frames/second the black & freeze check samples — 1 is ample; 0 = every frame (much higher CPU/GPU).', ty: 'int' },
@@ -1319,9 +1319,7 @@ const SETTINGS_META = {
   thesportsdb_api_key: { g: 'TheSportsDB', t: 'TheSportsDB API key', h: 'Optional — DVarr ships with a built-in key, used while this is blank. Paste your own premium TheSportsDB (v2) key to use it instead.', ty: 'text' },
   ha_webhook_url: { g: 'Integrations', t: 'Home Assistant webhook', h: 'Webhook URL to push recording state changes to Home Assistant. Blank = off.', ty: 'url' },
   public_base_url: { g: 'Integrations', t: 'Public base URL', h: 'Externally-reachable URL of this DVarr (e.g. https://dvr.example.com), used to build the away-from-home calendar-feed link. Blank = off.', ty: 'url' },
-  default_channel_source_filter: { g: 'Display', t: 'Default channel filter', h: 'Which source’s channels to show by default (“all” or a source id).', ty: 'text' },
   timezone_display: { g: 'Display', t: 'Display timezone', h: 'Timezone used to show every time in the app and to date recording files (IANA name, e.g. Australia/Brisbane or America/New_York).', ty: 'text' },
-  litestream_target: { g: 'Backups', t: 'Litestream backup target', h: 'Continuous database backup destination (e.g. s3://bucket/path). Blank = off.', ty: 'url' },
 };
 function settingField(k, v) {
   const m = SETTINGS_META[k] || { t: k, h: '', ty: (v === 'true' || v === 'false') ? 'bool' : 'text' };

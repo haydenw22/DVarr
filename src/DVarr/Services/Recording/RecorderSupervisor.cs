@@ -45,9 +45,15 @@ public sealed class RecorderSupervisor
     // otherwise-instant relaunch with a short back-off so we don't spin.
     private const int MaxCleanEofPer30s = 8;
 
+    // Bitrate-floor placeholder detection: measure the stream rate over a rolling window, and only fail over once it
+    // has stayed below the floor continuously for the sustain period — so the earliest a placeholder trips is roughly
+    // (window fill + sustain) ≈ 45s in, never on a cold-open buffer.
+    private const int BitrateWindowS = 15;   // rolling measurement window for the smoothed kbps
+    private const int BitrateSustainS = 30;  // must stay sub-floor this long before treating it as a placeholder
+
     /// <summary>How one ffmpeg capture pass ended — drives whether RunAsync relaunches instantly (clean EOF) or
     /// walks the back-off + failover ladder (a real fault).</summary>
-    private enum ExitKind { WindowClosed, StopRequested, CleanEof, Crashed, Stalled, DeadPicture }
+    private enum ExitKind { WindowClosed, StopRequested, CleanEof, Crashed, Stalled, DeadPicture, LowBitrate }
     private sealed record CaptureExit(ExitKind Kind, string Detail);
 
     /// <summary>
@@ -68,6 +74,7 @@ public sealed class RecorderSupervisor
         string? contentVerifyHwaccel,
         int contentVerifyFps,
         bool cleanEofInstantRelaunch,
+        int bitrateFloorKbps,
         string? userAgent,
         TunerLease lease,
         Func<int, Task<(int channelId, int streamId, string url)?>> getNextFallbackUrl,
@@ -126,7 +133,7 @@ public sealed class RecorderSupervisor
                 try
                 {
                     var launchedAt = EpochTime.Now();
-                    var exit = await CaptureUntilStopOrStallAsync(recordingId, url, segDir, CurrentWindowEndAsync, stallTimeoutS, nativeRate, contentVerify, contentDeadTimeoutS, contentVerifyHwaccel, contentVerifyFps, userAgent, lease, ++launchSeq, stopToken);
+                    var exit = await CaptureUntilStopOrStallAsync(recordingId, url, segDir, CurrentWindowEndAsync, stallTimeoutS, nativeRate, contentVerify, contentDeadTimeoutS, contentVerifyHwaccel, contentVerifyFps, bitrateFloorKbps, userAgent, lease, ++launchSeq, stopToken);
 
                     // Normal end of window or explicit stop → leave the capture loop and finalize.
                     if (stopToken.IsCancellationRequested || EpochTime.Now() >= await CurrentWindowEndAsync())
@@ -337,7 +344,7 @@ public sealed class RecorderSupervisor
     private async Task<CaptureExit> CaptureUntilStopOrStallAsync(
         int recordingId, string url, string segDir, Func<Task<long>> windowEndAsync, int stallTimeoutS, bool nativeRate,
         bool contentVerify, int contentDeadTimeoutS, string? contentVerifyHwaccel, int contentVerifyFps,
-        string? userAgent, TunerLease lease, int launchSeq, CancellationToken stopToken)
+        int bitrateFloorKbps, string? userAgent, TunerLease lease, int launchSeq, CancellationToken stopToken)
     {
         // The per-launch counter keeps names unique across relaunches: an instant relaunch (clean-EOF path or the
         // 0s first backoff) within the SAME wall-clock second would otherwise reuse the previous process's last
@@ -477,6 +484,11 @@ public sealed class RecorderSupervisor
         var lastGrowth = EpochTime.Now();
         var promoted = false;
         var placeholderNotified = false;
+        // Bitrate-floor placeholder detection state (only used when bitrateFloorKbps > 0). Rolling (time, totalBytes)
+        // samples over BitrateWindowS give a smoothed kbps; the sub-floor condition must hold for BitrateSustainS
+        // before failing over, so cold-open buffering and brief dips don't trip it.
+        var brSamples = new Queue<(long t, long bytes)>();
+        long lowBitrateSince = 0;
 
         while (true)
         {
@@ -553,6 +565,37 @@ public sealed class RecorderSupervisor
                     _log.LogWarning("[Recorder] Recording {Id} DEAD PICTURE ({Sec}s {What}); killing ffmpeg to fail over", recordingId, deadSecs, what);
                     await GracefulStopAsync(proc, hardKill: true);
                     return new CaptureExit(ExitKind.DeadPicture, $"dead picture ({deadSecs}s {what})");
+                }
+            }
+
+            // Bitrate-floor placeholder check (opt-in; bitrateFloorKbps>0): the transport is alive (bytes flowing) but
+            // at a rate far below real content for this channel's quality tier — a provider "channel offline" slate,
+            // which the picture-based dead-feed check would need a GPU to catch. Only evaluated once capture is live
+            // and enough window has accrued; routes into the SAME relaunch→failover ladder as a stall/dead-picture.
+            if (bitrateFloorKbps > 0 && promoted)
+            {
+                var nowB = EpochTime.Now();
+                brSamples.Enqueue((nowB, bytes));
+                while (brSamples.Count > 1 && nowB - brSamples.Peek().t > BitrateWindowS) brSamples.Dequeue();
+                var oldest = brSamples.Peek();
+                var span = nowB - oldest.t;
+                if (span >= 10) // enough window to compute a stable rate
+                {
+                    var kbps = (bytes - oldest.bytes) * 8.0 / 1000.0 / span;
+                    if (kbps < bitrateFloorKbps) { if (lowBitrateSince == 0) lowBitrateSince = nowB; }
+                    else lowBitrateSince = 0; // recovered above the floor → reset the sustain timer
+                    if (lowBitrateSince != 0 && nowB - lowBitrateSince >= BitrateSustainS)
+                    {
+                        if (!placeholderNotified)
+                        {
+                            placeholderNotified = true;
+                            await AddNotificationAsync(recordingId, NotificationKind.PlaceholderDetected, Severity.Warn,
+                                $"stream bitrate ~{kbps:0} kbps stayed below the {bitrateFloorKbps} kbps floor — likely a placeholder; failing over");
+                        }
+                        _log.LogWarning("[Recorder] Recording {Id} LOW BITRATE (~{Kbps:0} kbps < {Floor} floor for {Sus}s); killing ffmpeg to fail over", recordingId, kbps, bitrateFloorKbps, BitrateSustainS);
+                        await GracefulStopAsync(proc, hardKill: true);
+                        return new CaptureExit(ExitKind.LowBitrate, $"low bitrate (~{kbps:0} kbps < {bitrateFloorKbps} kbps)");
+                    }
                 }
             }
 
