@@ -265,8 +265,12 @@ public static class ApiEndpoints
             // LIVE/UPCOMING rows are returned uncapped (they're naturally few and are exactly what must never fall
             // off the list); the 200-row window applies only to TERMINAL history. Previously one descending
             // Take(200) meant >200 far-future schedules pushed imminent/active rows out entirely (audit API-REC-01).
-            var terminal = new[] { RecordingState.Done, RecordingState.NeedsAttention, RecordingState.Missed, RecordingState.Cancelled };
-            var q = from r in db.Recordings
+            // DONE rows are not returned at all: a finished recording graduates to the Library (/api/library),
+            // which tracks the actual files — the Recordings page is the request/capture pipeline only. The Done
+            // rows themselves stay in the DB as the scheduler's dedupe history.
+            var terminal = new[] { RecordingState.NeedsAttention, RecordingState.Missed, RecordingState.Cancelled };
+            var q0 = db.Recordings.Where(r => r.State != RecordingState.Done);
+            var q = from r in q0
                     join ch in db.Channels on r.ChannelId equals ch.Id into chj
                     from ch in chj.DefaultIfEmpty()
                     join s in db.Sources on r.SourceId equals s.Id into sj
@@ -491,7 +495,17 @@ public static class ApiEndpoints
             // File deletion happens AFTER the row commit so a disk error can never strand a half-deleted entry;
             // cleanup problems are reported in the response (audit REC-04) instead of silently logged.
             string? cleanupError = null;
-            if (keepFile != true) cleanupError = DeleteRecordingArtifacts(outputPath, segDir, paths, lf.CreateLogger("Recordings"));
+            if (keepFile != true)
+            {
+                cleanupError = DeleteRecordingArtifacts(outputPath, segDir, paths, lf.CreateLogger("Recordings"));
+                // Keep the library truthful: the file is gone, so its library row goes too. (keepFile=true keeps
+                // the row — the FK just severed to null and the file lives on as a library item.)
+                if (!string.IsNullOrWhiteSpace(outputPath))
+                    await gate.WriteAsync(async () =>
+                    {
+                        await db.LibraryItems.Where(i => i.FilePath == outputPath).ExecuteDeleteAsync();
+                    });
+            }
             return Results.Json(new { deleted = true, fileCleanupError = cleanupError });
         });
 

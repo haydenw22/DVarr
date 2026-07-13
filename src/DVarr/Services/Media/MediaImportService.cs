@@ -23,11 +23,12 @@ public sealed class MediaImportService
     private readonly DbWriteGate _gate;
     private readonly TheSportsDbClient _tsdb;
     private readonly IHttpClientFactory _httpFactory;
+    private readonly LibraryService _library;
     private readonly ILogger<MediaImportService> _log;
 
     public MediaImportService(DVarrDbContext db, FfmpegLocator ffmpeg, RuntimePaths paths, DbWriteGate gate,
-        TheSportsDbClient tsdb, IHttpClientFactory httpFactory, ILogger<MediaImportService> log)
-    { _db = db; _ffmpeg = ffmpeg; _paths = paths; _gate = gate; _tsdb = tsdb; _httpFactory = httpFactory; _log = log; }
+        TheSportsDbClient tsdb, IHttpClientFactory httpFactory, LibraryService library, ILogger<MediaImportService> log)
+    { _db = db; _ffmpeg = ffmpeg; _paths = paths; _gate = gate; _tsdb = tsdb; _httpFactory = httpFactory; _library = library; _log = log; }
 
     private sealed record Filing(string ShowName, string? Sport, int Year, int Episode, string Title,
         string AiredDate, string? PosterUrl, string? ThumbUrl, string ShowKey, int? EventId);
@@ -91,18 +92,7 @@ public sealed class MediaImportService
         var league = await _db.Leagues.FirstOrDefaultAsync(l => l.ExternalLeagueId == resolvedLeagueId, ct);
         if (league is not null)
         {
-            var localEv = await _db.Events.FirstOrDefaultAsync(e => e.LeagueId == league.Id && e.TsdbEventId == eventId, ct);
-            if (localEv is null && ev.StartUtc is { } su)
-            {
-                // No TheSportsDB-id match (id drift / older ingest) → nearest start in the same league, but ONLY if it
-                // also looks like the SAME fixture (tight window + title match), so a doubleheader or a date-only tie
-                // can't silently link the wrong game. Deterministic Id tiebreak for equidistant candidates.
-                var cands = await _db.Events.Where(e => e.LeagueId == league.Id)
-                    .Select(e => new { e.Id, e.StartUtc, e.Title }).ToListAsync(ct);
-                var near = cands.OrderBy(e => Math.Abs(e.StartUtc - su)).ThenBy(e => e.Id).FirstOrDefault();
-                if (near is not null && Math.Abs(near.StartUtc - su) <= 30 * 60 && TitlesSimilar(near.Title, ev.Title))
-                    localEv = await _db.Events.FindAsync(new object?[] { near.Id }, ct);
-            }
+            var localEv = await FindLocalEventAsync(league.Id, eventId, ev, ct);
             if (localEv is not null)
             {
                 // Link the recording to the event so BuildFilingAsync takes the event-linked branch (SeasonOrdinalAsync,
@@ -117,7 +107,9 @@ public sealed class MediaImportService
                 if (ef is not null)
                 {
                     _log.LogInformation("[Media] Manual import {Rid} linked to event {Eid} ({Title}) → E{Ep:D2}", recordingId, localEv.Id, localEv.Title, ef.Episode);
-                    return (true, await FileRecordingAsync(rec, current!, ef, ct), null);
+                    var filed = await FileRecordingAsync(rec, current!, ef, ct);
+                    await _library.UpsertForRecordingAsync(recordingId, filed, ct); // moves out of the Unsorted group
+                    return (true, filed, null);
                 }
             }
         }
@@ -132,7 +124,69 @@ public sealed class MediaImportService
             ev.League ?? lk?.Name ?? "Sports", ev.Sport ?? lk?.Sport, local.Year, ordinal, ev.Title, local.ToString("yyyy-MM-dd"),
             lk?.Poster ?? ev.Poster, ev.Thumb ?? ev.Poster ?? lk?.Poster, $"tsdb-league-{resolvedLeagueId}", null);
         var path = await FileRecordingAsync(rec, current!, f, ct);
+        await _library.UpsertForRecordingAsync(recordingId, path, ct); // moves out of the Unsorted group
         return (true, path, null);
+    }
+
+    /// <summary>Manual import for a library file with NO Recording row behind it (a scan-adopted file whose
+    /// recording was deleted, or media dropped in from outside). Identical filing engine to AssignAsync, driven
+    /// by a transient un-persisted Recording carrier (Id=0 → every "persist onto the row" step no-ops safely).
+    /// The caller re-points the LibraryItem at the returned path (LibraryService.RefileItemAsync).</summary>
+    public async Task<(bool ok, string? path, string? error)> AssignFileAsync(string currentPath, long startUtcHint, string leagueId, string eventId, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(currentPath) || !File.Exists(currentPath)) return (false, null, "file not found on disk");
+
+        var ev = await _tsdb.GetEventByIdAsync(eventId, ct);
+        if (ev is null) return (false, null, "TheSportsDB event not found");
+        var resolvedLeagueId = string.IsNullOrWhiteSpace(ev.LeagueId) ? leagueId : ev.LeagueId!;
+        var carrier = new Data.Entities.Recording
+        {
+            Id = 0, // never persisted: FileRecordingAsync's row update FindAsync(0) misses by design
+            StartUtc = startUtcHint > 0 ? startUtcHint : ev.StartUtc ?? EpochTime.Now(),
+            OutputPath = currentPath,
+            Title = Path.GetFileNameWithoutExtension(currentPath),
+        };
+
+        var league = await _db.Leagues.FirstOrDefaultAsync(l => l.ExternalLeagueId == resolvedLeagueId, ct);
+        if (league is not null)
+        {
+            var localEv = await FindLocalEventAsync(league.Id, eventId, ev, ct);
+            if (localEv is not null)
+            {
+                carrier.EventId = localEv.Id;
+                var ef = await BuildFilingAsync(carrier, ct);
+                if (ef is not null)
+                {
+                    _log.LogInformation("[Media] Adopted-file import linked to event {Eid} ({Title}) → E{Ep:D2}", localEv.Id, localEv.Title, ef.Episode);
+                    return (true, await FileRecordingAsync(carrier, currentPath, ef, ct), null);
+                }
+            }
+        }
+
+        var lk = await _tsdb.LookupLeagueAsync(resolvedLeagueId, ct);
+        var local = EpochTime.ToDisplay(ev.StartUtc ?? carrier.StartUtc);
+        var ordinal = await TsdbSeasonOrdinalAsync(resolvedLeagueId, ev, local.Year, ct);
+        var f = new Filing(
+            ev.League ?? lk?.Name ?? "Sports", ev.Sport ?? lk?.Sport, local.Year, ordinal, ev.Title, local.ToString("yyyy-MM-dd"),
+            lk?.Poster ?? ev.Poster, ev.Thumb ?? ev.Poster ?? lk?.Poster, $"tsdb-league-{resolvedLeagueId}", null);
+        return (true, await FileRecordingAsync(carrier, currentPath, f, ct), null);
+    }
+
+    /// <summary>Local Event for a chosen TheSportsDB game: by TheSportsDB id, else the nearest start in the same
+    /// league — but ONLY if it also looks like the SAME fixture (tight window + title match), so a doubleheader or
+    /// a date-only tie can't silently link the wrong game. Deterministic Id tiebreak for equidistant candidates.</summary>
+    private async Task<Data.Entities.Event?> FindLocalEventAsync(int leagueId, string tsdbEventId, TsdbEvent ev, CancellationToken ct)
+    {
+        var localEv = await _db.Events.FirstOrDefaultAsync(e => e.LeagueId == leagueId && e.TsdbEventId == tsdbEventId, ct);
+        if (localEv is null && ev.StartUtc is { } su)
+        {
+            var cands = await _db.Events.Where(e => e.LeagueId == leagueId)
+                .Select(e => new { e.Id, e.StartUtc, e.Title }).ToListAsync(ct);
+            var near = cands.OrderBy(e => Math.Abs(e.StartUtc - su)).ThenBy(e => e.Id).FirstOrDefault();
+            if (near is not null && Math.Abs(near.StartUtc - su) <= 30 * 60 && TitlesSimilar(near.Title, ev.Title))
+                localEv = await _db.Events.FindAsync(new object?[] { near.Id }, ct);
+        }
+        return localEv;
     }
 
     /// <summary>Chronological 1-based position of a TheSportsDB event within its season's events (the manual-import

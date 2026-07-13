@@ -49,7 +49,12 @@ builder.Services.AddSingleton<RecordingEventBus>();
 builder.Services.AddSingleton<TunerLeaseManager>();
 builder.Services.AddSingleton<RecorderService>();
 builder.Services.AddSingleton<DVarr.Services.Recording.PreviewTranscodeManager>();
+builder.Services.AddSingleton<DVarr.Services.Media.LibraryPlaybackManager>();
+builder.Services.AddSingleton<DVarr.Services.Recording.RecordingPreviewManager>();
 builder.Services.AddHostedService<DVarr.Services.Recording.PreviewSweeper>();
+// The library reconciler is both injectable (on-demand scans from the API) and hosted (startup backfill + interval).
+builder.Services.AddSingleton<DVarr.Services.Media.LibraryScanService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<DVarr.Services.Media.LibraryScanService>());
 
 builder.Services.AddDbContext<DVarrDbContext>((sp, opt) =>
     opt.UseSqlite($"Data Source={dbPath}")
@@ -64,6 +69,7 @@ builder.Services.AddScoped<ResolverService>();
 builder.Services.AddScoped<EpgRepickService>();
 builder.Services.AddScoped<CreditAwarePlanner>();
 builder.Services.AddScoped<DVarr.Services.Media.MediaImportService>();
+builder.Services.AddScoped<DVarr.Services.Media.LibraryService>();
 builder.Services.AddHttpClient<XtreamClient>()
     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AutomaticDecompression = System.Net.DecompressionMethods.All });
 builder.Services.AddHttpClient<EventFetcher>()
@@ -176,6 +182,7 @@ app.MapLeagueApi();
 app.MapParityApi();
 app.MapCalendarApi();
 app.MapPreviewApi();
+app.MapLibraryApi();
 app.MapPlexApi();
 app.MapFallbackToFile("index.html");
 

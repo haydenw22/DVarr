@@ -281,6 +281,17 @@ public sealed class RecorderSupervisor
             }, NotificationKind.Completed, Severity.Info,
                 $"completed: {bytes / 1_000_000} MB, ~{durationS}s" + (fallbacksUsed > 0 ? $", {fallbacksUsed} failover(s)" : ""));
 
+            // Register the finished file in the library — this is what makes a Done recording appear on the
+            // Library page (whether the import filed it into the Plex layout or left it flat/unsorted).
+            // Best-effort: a library bookkeeping failure must not disturb the terminal Done above, and the
+            // reconciling disk scan adopts anything missed here.
+            try
+            {
+                using var libScope = _d.Scopes.CreateScope();
+                await libScope.ServiceProvider.GetRequiredService<LibraryService>().UpsertForRecordingAsync(recordingId, finalPath);
+            }
+            catch (Exception ex) { _log.LogWarning(ex, "[Recorder] library registration failed for {Id} (the scan will adopt it)", recordingId); }
+
             // The recording is safely finalized + imported (terminal Done). The 8s TS segments were pure scratch —
             // delete them so they don't accumulate (each recording is 6GB+, which would otherwise double its storage
             // forever). Safe because boot-recovery only re-finalizes NON-terminal rows; a Done recording is never

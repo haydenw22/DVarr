@@ -66,13 +66,17 @@ const tzCellKey = (y, m, d) => Math.floor(Date.UTC(y, m, d) / 86400000);        
 const tzMonthStart = (y, m) => { const g = Math.floor(Date.UTC(y, m, 1) / 1000); return g - tzOffsetSec(g - tzOffsetSec(g)); }; // epoch of 00:00 on the 1st in the display zone
 
 const ACTIVE = ['Starting', 'Recording', 'Recovering', 'FailingOver', 'Degraded', 'Stopping', 'Finalizing'];
-// Terminal/finished states for the dashboard "Recently completed" panel (newest first).
-const DASH_TERMINAL = ['Done', 'NeedsAttention', 'Missed', 'Cancelled'];
+// Terminal FAILURE states for the dashboard "Recently finished" panel — Done rows aren't in /api/recordings
+// any more (a finished recording graduates to the Library), so the panel merges these with library items.
+const DASH_TERMINAL = ['NeedsAttention', 'Missed', 'Cancelled'];
+const gb = b => b > 0 ? (b >= 1e9 ? (b / 1e9).toFixed(1) + ' GB' : (b / 1e6).toFixed(0) + ' MB') : '—';
+const durFmt = s => s > 0 ? (s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m` : `${Math.round(s / 60)}m`) : '—';
 
 // ---- icons (feather-style) ----
 const I = {
   dashboard: '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>',
   recordings: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/></svg>',
+  library: '<svg viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M7 4v16M17 4v16M2 9h5M2 15h5M17 9h5M17 15h5M7 12h10"/></svg>',
   channels: '<svg viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M7 7l5-4 5 4"/></svg>',
   guide: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>',
   calendar: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01"/></svg>',
@@ -95,6 +99,7 @@ const I = {
 const NAV = [
   { id: 'dashboard', label: 'Dashboard' },
   { id: 'recordings', label: 'Recordings' },
+  { id: 'library', label: 'Library' },
   { id: 'conflicts', label: 'Conflicts' },
   { id: 'calendar', label: 'Calendar' },
   { id: 'leagues', label: 'Leagues' },
@@ -289,19 +294,25 @@ PAGES.dashboard = {
     const gen = render._seq; // navigation generation — a late SSE draw must not repaint after the user navigates away
     const draw = async () => {
       const now = Math.floor(Date.now() / 1000);
-      const [health, recs, leagues, events, sources] = await Promise.all([
+      const [health, recs, leagues, events, sources, libData] = await Promise.all([
         api.get('/api/health').catch(() => null),
         api.get('/api/recordings'),
         api.get('/api/leagues'),
         api.get(`/api/events?from=${now}`),
         api.get('/api/sources').catch(() => []),
+        api.get('/api/library').catch(() => null),
       ]);
       if (gen !== render._seq) return; // navigated away mid-fetch (audit UI-ASYNC-01)
       if (!Array.isArray(recs) || !Array.isArray(leagues) || !Array.isArray(events)) return; // transient API error — keep the current view, retry next tick
       const live = recs.filter(r => ACTIVE.includes(r.state));
       const scheduled = recs.filter(r => r.state === 'Pending' && r.startUtc <= now + 86400).sort((a, b) => a.startUtc - b.startUtc); // next 24h only
       const upcoming = events.filter(e => e.start <= now + 86400).sort((a, b) => a.start - b.start); // next 24h only
-      const completed = recs.filter(r => DASH_TERMINAL.includes(r.state)).sort((a, b) => (b.endUtc || b.startUtc) - (a.endUtc || a.startUtc)).slice(0, 6);
+      // "Recently finished" merges the library (files that landed) with terminal failures (still recordings).
+      const libItems = libData && Array.isArray(libData.items) ? libData.items : [];
+      const completed = [
+        ...libItems.map(i => ({ lib: true, id: i.id, title: i.title, leagueId: i.leagueId, league: i.show, when: i.addedUtc || i.startUtc, bytes: i.bytes, state: 'In library' })),
+        ...recs.filter(r => DASH_TERMINAL.includes(r.state)).map(r => ({ lib: false, id: r.id, title: r.title, leagueId: r.leagueId, league: r.league, when: r.endUtc || r.startUtc, bytes: r.bytesWritten, state: r.state })),
+      ].sort((a, b) => (b.when || 0) - (a.when || 0)).slice(0, 6);
       const srcList = Array.isArray(sources) ? sources : [];
       // openCalEvent (row click in "Next 24 hours") reads window._calEvents — populate it from this fetch too.
       window._calEvents = window._calEvents || {}; events.forEach(e => { window._calEvents[e.id] = e; });
@@ -311,7 +322,7 @@ PAGES.dashboard = {
         <div class="dash-grid">
           ${dashPanel({ icon: I.recordings, title: 'Recording now', count: live.length, link: '#/recordings', body: live.length ? dashRecList(live, leagues) : radarEmpty() })}
           ${dashPanel({ icon: I.clock, title: 'Scheduled — next 24h', count: scheduled.length, link: '#/recordings', body: scheduled.length ? dashRecList(scheduled, leagues) : emptyBox('Nothing scheduled in the next 24 hours.') })}
-          ${dashPanel({ icon: I.check, title: 'Recently completed', count: completed.length, link: '#/recordings', body: completed.length ? completedTable(completed, leagues) : emptyBox('No finished recordings yet.') })}
+          ${dashPanel({ icon: I.check, title: 'Recently finished', count: completed.length, link: '#/library', body: completed.length ? completedTable(completed, leagues) : emptyBox('No finished recordings yet.') })}
           ${dashPanel({ icon: I.sources, title: 'Sources', count: srcList.length, body: srcList.length ? sourcesPanel(srcList) : emptyBox('No sources yet — add one on the Sources page.'), foot: { href: '#/sources', label: 'Manage sources' } })}
           ${dashPanel({ icon: I.calendar, title: 'Next 24 hours', count: upcoming.length, body: upcoming.length ? upcomingEvents(upcoming, leagues) : emptyBox('No monitored events in the next 24 hours.'), foot: { href: '#/calendar', label: 'View full schedule' } })}
           ${dashPanel({ icon: I.leagues, title: 'Leagues', count: leagues.length, body: leagues.length ? leagueChips(leagues) : emptyBox('No leagues yet — add one on the Leagues page.'), foot: { href: '#/leagues', label: 'Browse all leagues' } })}
@@ -360,17 +371,18 @@ function dashRecList(rows, leagues) {
     return `<div class="prow clickrow" onclick="location.hash='#/recordings'">
       ${rowChip(r, leagues)}
       <div class="prow-main"><b>${esc(r.title)}</b><div class="prow-sub">${dtime(r.startUtc)}${r.channel ? ' · ' + esc(r.channel) : ''}</div></div>
-      <div class="prow-side"><span class="pill ${sc(r.state)}">${r.state}</span>${active ? `<button class="ghost sm" onclick="event.stopPropagation();stopRec(${r.id})">stop</button>` : ''}</div>
+      <div class="prow-side"><span class="pill ${sc(r.state)}">${r.state}</span>${active ? `<button class="ghost sm" onclick="event.stopPropagation();recPreview(${r.id}, '${jsq(r.title || '')}')" title="Watch what's been captured so far (no provider slot)">watch</button><button class="ghost sm" onclick="event.stopPropagation();stopRec(${r.id})">stop</button>` : ''}</div>
     </div>`;
   }).join('')}</div>`;
 }
-// Recently-finished recordings (Done/Missed/NeedsAttention/Cancelled) — size in MB + state pill; tap → Recordings page.
+// Recently-finished panel: library items (files that landed → tap opens the Library) merged with terminal
+// failures (Missed/NeedsAttention/Cancelled → tap opens Recordings, where the reason is shown).
 function completedTable(rows, leagues) {
   return `<div class="dash-rec">${rows.map(r => `
-    <div class="prow clickrow" onclick="location.hash='#/recordings'">
+    <div class="prow clickrow" onclick="location.hash='${r.lib ? '#/library' : '#/recordings'}'">
       ${rowChip(r, leagues)}
-      <div class="prow-main"><b>${esc(r.title)}</b><div class="prow-sub">${dtime(r.endUtc || r.startUtc)} · ${mb(r.bytesWritten)}</div></div>
-      <div class="prow-side"><span class="pill ${sc(r.state)}">${r.state}</span></div>
+      <div class="prow-main"><b>${esc(r.title)}</b><div class="prow-sub">${dtime(r.when)} · ${mb(r.bytes)}</div></div>
+      <div class="prow-side"><span class="pill ${r.lib ? 's-done' : sc(r.state)}">${esc(r.state)}</span></div>
     </div>`).join('')}</div>`;
 }
 // Available sources with one-tap EPG refresh + ingest, right on the dashboard.
@@ -399,9 +411,10 @@ PAGES.recordings = {
   menuActions: [{ label: 'Test recording', fn: 'openTestModal()' }], // phone topbar ⋯ (mirrors the ghost button above)
   async render(el) {
     el.innerHTML = `<div class="toolbar">
-        <select id="recFilter"><option value="">All states</option><option>Recording</option><option>Pending</option><option>Done</option><option>NeedsAttention</option><option>Missed</option></select>
+        <select id="recFilter"><option value="">All states</option><option>Recording</option><option>Pending</option><option>NeedsAttention</option><option>Missed</option><option>Cancelled</option></select>
         <select id="recLeague"><option value="">All leagues</option></select>
         <span class="muted" id="recCount"></span>
+        <a class="muted" href="#/library" style="font-size:12px" title="Finished recordings live in the Library">finished → Library</a>
         <span id="recBulk" style="margin-left:auto;display:none;align-items:center;gap:8px;flex-wrap:wrap">
           <span class="muted" id="recBulkN"></span>
           <button class="sm" onclick="bulkStart()">Start</button>
@@ -452,18 +465,21 @@ function recTable(rows, withActions) {
     // Same conditions as the inline desktop buttons — the phone kebab mirrors them 1:1 so no action is lost.
     const pendingish = r.state === 'Pending' || r.state === 'Conflict';
     const stoppable = ACTIVE.includes(r.state) || pendingish;
-    const importable = r.state === 'Done' && (r.outputPath || '').includes('.unsorted');
+    const live = ACTIVE.includes(r.state) && r.state !== 'Stopping' && r.state !== 'Finalizing';
+    // A failed recording keeps its capture segments on disk — the same preview player shows the forensics.
+    const footage = r.state === 'NeedsAttention';
     return `
     <tr>${withActions ? `<td data-label="" class="rec-cb"><input type="checkbox" class="rec-row-cb" data-id="${r.id}" onclick="recToggle(${r.id}, this)" ${recSel.has(r.id) ? 'checked' : ''} aria-label="Select recording"></td>` : ''}<td data-label="">${esc(r.title)}</td>
       <td data-label="State"><span class="pill ${sc(r.state)}">${r.state}</span>${r.attemptCount ? ` <span class="muted" title="relaunch/failover attempts">↻${r.attemptCount}</span>` : ''}${r.failureReason && ['NeedsAttention', 'Conflict', 'Missed', 'Cancelled', 'Degraded', 'FinalizeRetry'].includes(r.state) ? `<div class="muted" style="font-size:11px;max-width:280px;line-height:1.35;margin-top:2px">${esc(r.failureReason)}</div>` : ''}</td>
       <td data-label="Channel">${esc(r.channel)}</td><td data-label="Source" class="muted">${esc(r.source)}</td>
       <td data-label="Size" class="mono">${mb(r.bytesWritten)}</td>
       <td data-label="Window" class="mono muted">${dtime(r.startUtc)} – ${dtime(r.endUtc)}</td>
-      ${withActions ? `<td data-label="" class="row acts" style="gap:6px">${pendingish ? `<button class="sm" onclick="startRec(${r.id})" title="Start this recording now (early/manual)">start</button><button class="ghost sm" onclick="reresolveRec(${r.id})" title="Re-resolve the channel from the league's current mapping">re-resolve</button>` : ''}${stoppable ? `<button class="ghost sm" onclick="stopRec(${r.id})">stop</button>` : ''}${importable ? `<button class="sm" onclick="openImportModal(${r.id}, ${r.startUtc}, '${jsq(r.title || '')}')" title="Sort this manual recording into the library">import</button>` : ''}<button class="danger sm" onclick="delRec(${r.id})">delete</button>${kebab([
+      ${withActions ? `<td data-label="" class="row acts" style="gap:6px">${live ? `<button class="sm" onclick="recPreview(${r.id}, '${jsq(r.title || '')}')" title="Watch what's been captured so far — plays from disk, no provider slot">${I.play} watch</button>` : ''}${pendingish ? `<button class="sm" onclick="startRec(${r.id})" title="Start this recording now (early/manual)">start</button><button class="ghost sm" onclick="reresolveRec(${r.id})" title="Re-resolve the channel from the league's current mapping">re-resolve</button>` : ''}${stoppable ? `<button class="ghost sm" onclick="stopRec(${r.id})">stop</button>` : ''}${footage ? `<button class="ghost sm" onclick="recPreview(${r.id}, '${jsq(r.title || '')}')" title="Play whatever footage was captured before it failed">footage</button>` : ''}<button class="danger sm" onclick="delRec(${r.id})">delete</button>${kebab([
+        live && { label: 'Watch live capture', fn: `recPreview(${r.id}, '${jsq(r.title || '')}')` },
         pendingish && { label: 'Start now', fn: `startRec(${r.id})` },
         pendingish && { label: 'Re-resolve channel', fn: `reresolveRec(${r.id})` },
         stoppable && { label: 'Stop', fn: `stopRec(${r.id})` },
-        importable && { label: 'Import into library', fn: `openImportModal(${r.id}, ${r.startUtc}, '${jsq(r.title || '')}')` },
+        footage && { label: 'Play captured footage', fn: `recPreview(${r.id}, '${jsq(r.title || '')}')` },
         { label: 'Delete', fn: `delRec(${r.id})`, danger: true },
       ])}</td>` : ''}
     </tr>`;
@@ -492,6 +508,137 @@ function leagueChips(leagues) {
       ${l.poster ? `<img src="${esc(l.poster)}" alt="" loading="lazy"/>` : `<span class="lchip-dot" style="background:${leagueColor(l)}"></span>`}
       <div class="lchip-meta"><b>${esc(l.name)}</b><small>${esc(l.sport)} · ${l.events} event${l.events === 1 ? '' : 's'}</small></div>
     </div>`).join('')}</div>`;
+}
+
+// ---- Library (what's physically on the drive: league → season → game, mirroring Plex/Jellyfin) ----
+PAGES.library = {
+  title: 'Library',
+  actions: () => `<button class="ghost" onclick="libScan()">${I.refresh} Rescan disk</button>`,
+  menuActions: [{ label: 'Rescan disk', fn: 'libScan()' }],
+  async render(el) {
+    el.innerHTML = `<div class="toolbar">
+        <input id="libQ" placeholder="Search league / team / game…" style="min-width:200px"/>
+        <select id="libFilter"><option value="">Everything</option><option value="unsorted">Unsorted</option><option value="missing">Missing files</option></select>
+        <span class="muted" id="libStats"></span></div>
+      <div id="libWrap"></div>`;
+    const gen = render._seq;
+    const draw = async () => {
+      const data = await api.get('/api/library');
+      if (gen !== render._seq) return;
+      if (!data || !Array.isArray(data.items)) return; // transient API error — keep the current view
+      window._libItems = {}; data.items.forEach(i => { window._libItems[i.id] = i; });
+      const t = data.totals || {};
+      const disk = data.disk ? ` · ${gb(data.disk.freeBytes)} free on disk` : '';
+      const extras = [t.unsorted ? `${t.unsorted} unsorted` : '', t.missing ? `${t.missing} missing` : ''].filter(Boolean).join(' · ');
+      $('#libStats').textContent = `${t.count || 0} game${t.count === 1 ? '' : 's'} · ${gb(t.bytes || 0)}${disk}${extras ? ' · ' + extras : ''}`;
+      const q = $('#libQ').value, f = $('#libFilter').value;
+      let rows = data.items;
+      if (f === 'unsorted') rows = rows.filter(i => i.unsorted);
+      else if (f === 'missing') rows = rows.filter(i => i.status === 'Missing');
+      if (q) rows = rows.filter(i => tokensMatch(`${i.show} ${i.title} ${i.channel || ''} ${i.season || ''}`, q));
+      $('#libWrap').innerHTML = rows.length ? libGroups(rows)
+        : emptyBox(data.items.length ? 'Nothing matches this search/filter.' : 'Nothing in the library yet — finished recordings land here automatically.');
+    };
+    $('#libQ').addEventListener('input', () => { clearTimeout(window._libT); window._libT = setTimeout(draw, 250); });
+    $('#libFilter').addEventListener('change', draw);
+    await draw();
+    if (gen === render._seq) setLive(draw); // finished recordings appear via the same SSE refresh as everywhere else
+  },
+};
+
+// League (show) sections; Unsorted pinned on top when non-empty.
+function libGroups(items) {
+  const unsorted = items.filter(i => i.unsorted);
+  const filed = items.filter(i => !i.unsorted);
+  const shows = new Map();
+  filed.forEach(i => { const k = i.show || 'Unknown league'; if (!shows.has(k)) shows.set(k, []); shows.get(k).push(i); });
+  let html = '';
+  if (unsorted.length) html += libSection('Unsorted — import to file into a league', unsorted, true);
+  [...shows.keys()].sort((a, b) => a.localeCompare(b)).forEach(k => { html += libSection(k, shows.get(k), false); });
+  return html;
+}
+
+function libSection(name, items, isUnsorted) {
+  const bytes = items.reduce((a, i) => a + (i.status === 'Missing' ? 0 : (i.bytes || 0)), 0);
+  const seasons = new Map();
+  items.forEach(i => { const k = isUnsorted ? -1 : (i.season || 0); if (!seasons.has(k)) seasons.set(k, []); seasons.get(k).push(i); });
+  const seasonKeys = [...seasons.keys()].sort((a, b) => b - a);
+  return `<div class="panel" style="margin-bottom:14px">
+    <div class="panel-head">${isUnsorted ? I.conflicts : I.library}<span class="panel-title">${esc(name)}</span><span class="count-pill">${items.length}</span><span class="muted" style="margin-left:auto;font-size:12px">${gb(bytes)}</span></div>
+    <div class="panel-body">${seasonKeys.map(sk => `
+      ${sk > 0 ? `<div class="muted" style="font-size:12px;margin:10px 4px 4px;text-transform:uppercase;letter-spacing:.4px">Season ${sk}</div>` : ''}
+      ${libTable(seasons.get(sk).slice().sort((a, b) => (b.startUtc || 0) - (a.startUtc || 0)))}`).join('')}
+    </div></div>`;
+}
+
+function libTable(rows) {
+  return `<table class="rtable"><tbody>${rows.map(i => {
+    const missing = i.status === 'Missing';
+    const epTag = i.season > 0 && i.episode > 0 ? `S${i.season}E${String(i.episode).padStart(2, '0')}` : '';
+    const quality = [i.height ? i.height + 'p' : '', (i.videoCodec || '').toUpperCase()].filter(Boolean).join(' · ');
+    const badges = `${missing ? ' <span class="pill s-missed" title="The file was not found at the last disk scan — it heals automatically if it comes back">Missing</span>' : ''}${i.origin === 'Adopted' ? ' <span class="tag" title="Found on disk by the library scan (not recorded by DVarr, or recorded before the library existed)">found on disk</span>' : ''}`;
+    return `<tr>
+      <td data-label=""><div class="row" style="gap:10px;align-items:center;flex-wrap:nowrap">
+        <span class="prow-ic"><img src="/api/library/${i.id}/thumb" alt="" loading="lazy" onerror="this.parentNode.style.display='none'"/></span>
+        <div><b>${esc(i.title)}</b>${badges}<div class="muted" style="font-size:12px">${[epTag, i.channel, i.source].filter(Boolean).map(esc).join(' · ')}</div></div>
+      </div></td>
+      <td data-label="Aired" class="mono muted">${dtime(i.startUtc)}</td>
+      <td data-label="Quality" class="muted">${esc(quality) || '—'}</td>
+      <td data-label="Duration" class="mono muted">${durFmt(i.durationS)}</td>
+      <td data-label="Size" class="mono">${gb(i.bytes)}</td>
+      <td data-label="" class="row acts" style="gap:6px">
+        ${missing ? '' : `<button class="sm" onclick="libWatch(${i.id})" title="Watch in the browser">${I.play} watch</button>`}
+        ${!missing && i.unsorted ? `<button class="ghost sm" onclick="libImport(${i.id})" title="File into League/Season/Game (renames for Plex/Jellyfin)">import</button>` : ''}
+        <button class="danger sm" onclick="libDelete(${i.id})">${missing ? 'remove' : 'delete'}</button>
+        ${kebab([
+          !missing && { label: 'Watch', fn: `libWatch(${i.id})` },
+          !missing && i.unsorted && { label: 'Import into a league', fn: `libImport(${i.id})` },
+          { label: missing ? 'Remove entry' : 'Delete file from disk', fn: `libDelete(${i.id})`, danger: true },
+        ])}
+      </td></tr>`;
+  }).join('')}</tbody></table>`;
+}
+
+async function libScan() {
+  toast('Scanning the media folder…');
+  const r = await api.post('/api/library/scan');
+  if (r.error) return toast(r.error, 'err');
+  if (r.skipped) return toast(`Scan skipped: ${r.skipped}`, 'err');
+  toast(`Scan done — ${r.seen} file${r.seen === 1 ? '' : 's'} on disk, ${r.adopted} adopted, ${r.healed} healed, ${r.missing} newly missing`, 'ok');
+  render();
+}
+function libImport(id) {
+  const i = (window._libItems || {})[id]; if (!i) return;
+  openImportModal(id, i.startUtc, i.title, 'lib');
+}
+function libDelete(id) {
+  const i = (window._libItems || {})[id]; if (!i) return;
+  const missing = i.status === 'Missing';
+  modal(`<h2>${missing ? 'Remove library entry' : 'Delete from disk'}</h2>
+    <p style="margin:10px 0">${esc(i.title)}${i.show ? ` <span class="muted">— ${esc(i.show)}</span>` : ''}</p>
+    ${missing
+      ? '<div class="note">The file is already gone from disk — this just removes the library entry.</div>'
+      : `<div class="note warn">This permanently deletes the video file (${gb(i.bytes)}) and its artwork from the drive — Plex/Jellyfin lose it too. The recording history entry (if any) is not touched.</div>`}
+    <div class="foot"><button class="ghost" onclick="closeModals()">Cancel</button><button class="danger" onclick="doLibDelete(${id})">${missing ? 'Remove' : 'Delete file'}</button></div>`, 'min(460px,94vw)');
+}
+async function doLibDelete(id) {
+  closeModals();
+  const r = await api.del(`/api/library/${id}`);
+  if (r.error) return toast(r.error, 'err');
+  if (r.fileCleanupError) toast(`Removed from the library, but ${r.fileCleanupError}`, 'err');
+  else toast('Deleted', 'ok');
+  render();
+}
+function libWatch(id) {
+  const i = (window._libItems || {})[id]; if (!i) return;
+  openHlsPlayer(`/api/library/${id}/play/hls/index.m3u8`, i.title,
+    '<span class="tag ok">from disk</span>',
+    'Playing the library file. The seekable range grows while it prepares; H.264 files prepare in seconds.');
+}
+function recPreview(id, title) {
+  openHlsPlayer(`/api/recordings/${id}/preview/hls/index.m3u8`, title || `Recording #${id}`,
+    '<span class="tag ok">no stream slot used</span>',
+    "Playing the recording's own captured footage — the timeline keeps growing while it records.");
 }
 
 // ---- Channels ----
@@ -1416,6 +1563,42 @@ function stopPreview() {
   if (_hls) { try { _hls.destroy(); } catch { } _hls = null; }
 }
 
+// ---- HLS modal player (library playback + in-progress recording preview) ----
+// Same modal shell + teardown path (_hls / stopPreview via closeModals) as the live channel preview, but the
+// source is a DVarr-generated HLS session over LOCAL files — no provider connection, no stream slot.
+function openHlsPlayer(url, title, tagHtml, readyNote) {
+  modal(`<h2 style="display:flex;justify-content:space-between;align-items:center;gap:12px">${esc(title)} ${tagHtml || ''}</h2>
+    <video id="pvVideo" controls autoplay playsinline muted style="width:100%;background:#000;border-radius:8px;max-height:64vh"></video>
+    <div id="pvMsg" class="muted" style="margin-top:8px">Preparing… (first open of a big file can take a few seconds)</div>
+    <div class="foot"><button class="ghost" onclick="closeModals()">Close</button></div>`, 'min(900px,94vw)');
+  startHlsUrl(url, readyNote);
+}
+function startHlsUrl(url, readyNote) {
+  const video = $('#pvVideo'), msg = $('#pvMsg');
+  if (!video) return;
+  stopPreview();
+  const fail = async () => {
+    if (!$('#pvMsg')) return; // modal already closed
+    // The playlist endpoint answers a human-readable JSON message on failure — surface it instead of an hls.js code.
+    let m = 'Playback failed — the file may be unreadable or ffmpeg unavailable.';
+    try { const r = await api.get(url); if (r && (r.message || r.error)) m = r.message || r.error; } catch { }
+    $('#pvMsg').innerHTML = `<span style="color:var(--warn)">${esc(m)}</span>`;
+  };
+  if (window.Hls && Hls.isSupported()) {
+    _hls = new Hls({ manifestLoadingMaxRetry: 6, manifestLoadingRetryDelay: 1000, levelLoadingMaxRetry: 6 });
+    _hls.loadSource(url);
+    _hls.attachMedia(video);
+    _hls.on(Hls.Events.MANIFEST_PARSED, () => { video.play().catch(() => { }); if ($('#pvMsg')) $('#pvMsg').textContent = (readyNote || '') + ' Tap the video for volume / fullscreen.'; });
+    _hls.on(Hls.Events.ERROR, (e, data) => { if (data && data.fatal) fail(); });
+  } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+    video.src = url; video.play().catch(() => { });
+    msg.textContent = (readyNote || '') + ' Tap the video for volume / fullscreen.';
+    video.addEventListener('error', fail, { once: true });
+  } else {
+    msg.textContent = 'Your browser cannot play HLS streams. Try Chrome/Edge/Safari.';
+  }
+}
+
 // =========================================================================
 // actions (global)
 // =========================================================================
@@ -1489,7 +1672,9 @@ function scheduleFor(channelId) {
 }
 
 // Manual import: sort a staged (.unsorted) recording onto a TheSportsDB game — Sport → League → Game.
-async function openImportModal(id, startUtc, title) {
+// kind: 'rec' files by recording id (the classic path), 'lib' files a library item (works even when the
+// original recording row is long gone). Both share the identical sport → league → game picker.
+async function openImportModal(id, startUtc, title, kind = 'rec') {
   const sports = await api.get('/api/tsdb/sports');
   const dateStr = new Date(startUtc * 1000).toISOString().slice(0, 10);
   modal(`<h2>Import recording</h2>
@@ -1502,7 +1687,7 @@ async function openImportModal(id, startUtc, title) {
         <input type="hidden" id="impGame"/></label>
     </div>
     <div id="impMsg" class="muted" style="margin-top:8px;font-size:12px"></div>
-    <div class="foot"><button class="ghost" onclick="closeModals()">Cancel</button><button id="impGo" onclick="submitImport(${id})" disabled>Import</button></div>`, 'min(560px,94vw)');
+    <div class="foot"><button class="ghost" onclick="closeModals()">Cancel</button><button id="impGo" onclick="submitImport(${id}, '${kind}')" disabled>Import</button></div>`, 'min(560px,94vw)');
   window._impDate = dateStr;
   let leagues = [], games = [];
   // League: a keyword filter narrows the <select> option list (mirrors the schedule Group step).
@@ -1560,13 +1745,14 @@ async function openImportModal(id, startUtc, title) {
   let lt; $('#impLeagueQ').oninput = () => { clearTimeout(lt); lt = setTimeout(renderLeagues, 150); };
   let gt; $('#impGameQ').oninput = () => { clearTimeout(gt); gt = setTimeout(renderGames, 200); };
 }
-async function submitImport(id) {
+async function submitImport(id, kind = 'rec') {
   const leagueId = $('#impLeague').value, eventId = $('#impGame').value;
   if (!leagueId || !eventId) return toast('Pick a sport, league and game', 'err');
   $('#impGo').disabled = true; $('#impMsg').textContent = 'Filing…';
-  const r = await api.post(`/api/recordings/${id}/import`, { leagueId, eventId });
+  const url = kind === 'lib' ? `/api/library/${id}/import` : `/api/recordings/${id}/import`;
+  const r = await api.post(url, { leagueId, eventId });
   if (r.error) { toast(r.error, 'err'); $('#impGo').disabled = false; $('#impMsg').textContent = ''; }
-  else { toast('Imported into the library', 'ok'); closeModals(); render(); }
+  else { toast('Filed into the library', 'ok'); closeModals(); render(); }
 }
 // Raw per-item API calls (no toast/render). The single-item action fns below wrap these with a toast + render; the
 // Recordings bulk actions reuse them directly so a batch can summarise once instead of toasting per item.
@@ -2079,6 +2265,8 @@ window.openScheduleModal = openScheduleModal; window.submitSchedule = submitSche
 window.openPreview = openPreview; window.stopRec = stopRec; window.startRec = startRec; window.delRec = delRec; window.reresolveRec = reresolveRec; window.reresolveLeague = reresolveLeague;
 window.recToggle = recToggle; window.recToggleAll = recToggleAll; window.bulkStart = bulkStart; window.bulkResolve = bulkResolve; window.bulkStop = bulkStop; window.bulkDelete = bulkDelete; window.runPendingDelete = runPendingDelete;
 window.openImportModal = openImportModal; window.submitImport = submitImport;
+window.libScan = libScan; window.libImport = libImport; window.libDelete = libDelete; window.doLibDelete = doLibDelete;
+window.libWatch = libWatch; window.recPreview = recPreview; window.openHlsPlayer = openHlsPlayer;
 window.ingest = ingest; window.doIngest = doIngest; window.saveSettings = saveSettings; window.closeModals = closeModals;
 window.toggleKebab = toggleKebab; window.closeKebabs = closeKebabs;
 window.syncEpg = syncEpg; window.doSyncEpg = doSyncEpg; window.openSourceModal = openSourceModal; window.submitSource = submitSource; window.deleteSource = deleteSource; window.refreshAccount = refreshAccount;

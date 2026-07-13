@@ -235,24 +235,36 @@ public sealed class PreviewTranscodeManager : IAsyncDisposable
     }
 }
 
-/// <summary>Purges orphan preview dirs on boot, periodically reclaims idle sessions, and tears everything down on
-/// graceful shutdown so no ffmpeg process / stream slot / temp dir is left behind.</summary>
+/// <summary>Purges orphan session dirs on boot, periodically reclaims idle sessions (live-preview transcodes,
+/// library playback, in-progress recording previews), and tears everything down on graceful shutdown so no
+/// ffmpeg process / stream slot / temp dir is left behind.</summary>
 public sealed class PreviewSweeper : BackgroundService
 {
     private readonly PreviewTranscodeManager _mgr;
-    public PreviewSweeper(PreviewTranscodeManager mgr) { _mgr = mgr; }
+    private readonly DVarr.Services.Media.LibraryPlaybackManager _playback;
+    private readonly RecordingPreviewManager _recPreview;
+    public PreviewSweeper(PreviewTranscodeManager mgr, DVarr.Services.Media.LibraryPlaybackManager playback, RecordingPreviewManager recPreview)
+    { _mgr = mgr; _playback = playback; _recPreview = recPreview; }
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _mgr.PurgeOrphanDirs(); // no sessions at boot → any leftover preview dirs are stale
+        // No sessions exist at boot → any leftover session dirs are stale scratch from a previous run.
+        _mgr.PurgeOrphanDirs();
+        _playback.PurgeOrphanDirs();
+        _recPreview.PurgeOrphanDirs();
         while (!stoppingToken.IsCancellationRequested)
         {
             try { await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken); } catch { break; }
             try { await _mgr.SweepAsync(); } catch { }
+            try { await _playback.SweepAsync(); } catch { }
+            try { await _recPreview.SweepAsync(); } catch { }
         }
     }
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
-        try { await _mgr.DisposeAsync(); } catch { } // kill all ffmpeg + release leases while DI is still alive
+        // Kill all ffmpeg + release leases while DI is still alive.
+        try { await _mgr.DisposeAsync(); } catch { }
+        try { await _playback.DisposeAsync(); } catch { }
+        try { await _recPreview.DisposeAsync(); } catch { }
         await base.StopAsync(cancellationToken);
     }
 }

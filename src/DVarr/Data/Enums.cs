@@ -57,4 +57,10 @@ public enum NotificationKind
 
 public enum Severity { Info, Warn, Critical }
 
+/// <summary>How a library item came to exist (stored as TEXT like every enum).</summary>
+public enum LibraryItemOrigin { Recorded, Adopted }
+
+/// <summary>Whether the library item's file was present at the last reconciling scan.</summary>
+public enum LibraryItemStatus { Ok, Missing }
+
 public enum EventStatus { Scheduled, Live, Completed, Postponed, Cancelled, Unknown }

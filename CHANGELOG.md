@@ -12,6 +12,21 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.38.0] — 2026-07-14
+The Library: DVarr now tracks what's physically on the drive. Finished recordings graduate off the Recordings page into a Plex-style Library, and everything — including a recording still in progress — can be watched in the browser.
+
+### Added
+- **Library page** (GitHub follow-up on the delete-files issue: *"there should be a way to see and delete what's still physically on the drive"*). A new **Library** tab shows every recorded file organised exactly as Plex/Jellyfin see it — **league → season → game** — with episode tag, air date, quality, duration, size and the channel/source it was captured from, plus per-league size rollups, library totals and **free disk space**. A **finished recording no longer sits as "Done" on the Recordings page — it appears here instead** (Recordings stays the request/capture pipeline, with a "finished → Library" link). Searchable by league, team or game name.
+- **The library is tracked, not guessed.** Files are registered the moment a recording is filed, in a store that survives everything around it being deleted: remove the recording entry (keeping the file) and the library still knows exactly what the file is. A **reconciling disk scan** (startup, every 6 hours, and a **Rescan disk** button) keeps it honest: it **adopts files DVarr didn't create** ("found on disk" badge — league/season/game reconstructed from the file layout and matched to your leagues/events), **marks files removed outside DVarr as Missing** (healing automatically if they come back, and recognising an externally moved/renamed file by name+size so it keeps its history), and refuses to touch anything when the media share is simply unmounted — a flaky mount can never mass-flag the library. Existing installs backfill their finished recordings into the library on first boot.
+- **Watch from the Library.** Every file plays in the browser: H.264 recordings are remuxed on the fly (lossless — the full seekable timeline appears within seconds), HEVC/other codecs are transcoded (NVENC on the server GPU, CPU fallback). Idle playback sessions clean themselves up.
+- **Watch a recording while it's still recording — without using a second provider stream.** The ▶ **watch** button on a live recording plays from the capture segments already on disk, so it can never fight the recording (or anything else) for the credential's single slot. The timeline keeps growing while it records — seek anywhere in what's been captured, jump to the live edge — and rolls seamlessly into normal playback when the recording finishes. Failed recordings get a **footage** button that plays whatever was captured before the failure.
+- **Delete from the Library deletes the actual file**, its artwork/NFO sidecars, and any game/season/league folders the delete emptied (never the media root), with the file size stated in the confirm dialog. A Missing entry's delete just removes the entry. Deleting a recording with "also delete the file" keeps the library in sync automatically; deleting a library file never touches the scheduler's history, so the event can't accidentally re-record.
+- **Import from the Library.** Unsorted files (manual captures awaiting a match, or adopted strays) are grouped at the top with the same sport → league → game Import dialog — which now also works for files whose original recording entry is long gone.
+- Dashboard's "Recently completed" panel is now **"Recently finished"**: files that landed in the library merged with any failures, each linking to the right page.
+
+### Changed
+- `/api/recordings` no longer returns Done rows (they live at the new `/api/library`); the Done option is gone from the Recordings page filter. Done rows are kept internally as scheduler history, so nothing re-records.
+
 ## [1.37.2] — 2026-07-13
 UI hardening batch: fifteen interface and accessibility fixes from the full-application audit, verified against a live instance.
 

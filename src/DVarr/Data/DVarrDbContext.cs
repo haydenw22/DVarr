@@ -26,6 +26,7 @@ public class DVarrDbContext : DbContext
     public DbSet<Setting> Settings => Set<Setting>();
     public DbSet<Notification> Notifications => Set<Notification>();
     public DbSet<SecretEntry> Secrets => Set<SecretEntry>();
+    public DbSet<LibraryItem> LibraryItems => Set<LibraryItem>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -126,6 +127,20 @@ public class DVarrDbContext : DbContext
         {
             e.HasIndex(s => new { s.RecordingId, s.Capture, s.Seq });
             e.HasOne<Recording>().WithMany(r => r.Segments).HasForeignKey(s => s.RecordingId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // --- LibraryItem: the durable record of files on disk ---
+        // Every provenance FK is SetNull, NOT cascade: deleting a recording (or a league and its events) must
+        // never silently delete the library's knowledge of a file that still exists on the drive.
+        b.Entity<LibraryItem>(e =>
+        {
+            e.HasIndex(i => i.FilePath).IsUnique();
+            e.HasIndex(i => i.RecordingId);
+            e.HasIndex(i => new { i.ShowName, i.SeasonYear });
+            e.HasIndex(i => i.Status);
+            e.HasOne<Recording>().WithMany().HasForeignKey(i => i.RecordingId).OnDelete(DeleteBehavior.SetNull);
+            e.HasOne<Event>().WithMany().HasForeignKey(i => i.EventId).OnDelete(DeleteBehavior.SetNull);
+            e.HasOne<League>().WithMany().HasForeignKey(i => i.LeagueId).OnDelete(DeleteBehavior.SetNull);
         });
 
         // --- Ops ---

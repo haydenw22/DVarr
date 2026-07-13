@@ -8,7 +8,7 @@
     <AssemblyName>DVarr</AssemblyName>
     <!-- SemVer (see CHANGELOG.md). MAJOR=generational leap (still 1), MINOR=new functionality/major fixes,
          PATCH=minor fixes/polish. Surfaced on /api/health and the UI. Bump this with every CHANGELOG entry. -->
-    <Version>1.37.2</Version>
+    <Version>1.38.0</Version>
     <!-- Invariant globalization affects CULTURES only, not time zones: timezone_display resolves IANA zones from the
          OS tz database (tzdata ships in the image; EpochTime falls back to fixed +10 if a zone can't be resolved). -->
     <InvariantGlobalization>true</InvariantGlobalization>
