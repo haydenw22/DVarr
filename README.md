@@ -27,7 +27,17 @@ DVarr watches the leagues you follow on [TheSportsDB](https://www.thesportsdb.co
 - **Guide + calendar** — a fast EPG grid (click a programme to schedule it), a monthly calendar of everything followed, and a token-secured **ICS feed** you can subscribe to from Google Calendar.
 - **Mobile PWA** — install it on your phone; drawer navigation, card layouts and touch-sized controls, with zero functionality lost.
 - **Login with trusted devices** — HTTP Basic for scripts and automations, a cookie login page for browsers (180-day trusted devices), credentials set via Docker env vars, and a rate-limited login endpoint. Machine-to-machine surfaces (Plex, Home Assistant, IPTV export, health) carry their own tokens and stay reachable.
-- **Integrations** — Plex custom metadata provider, Sonarr-v3-compatible API, Home Assistant status endpoint, credential-free M3U/XMLTV export for LAN IPTV players.
+- **Integrations** — Plex custom metadata provider, Jellyfin/Emby-ready NFO + artwork on every filed recording, Sonarr-v3-compatible API, Home Assistant status endpoint, credential-free M3U/XMLTV export for LAN IPTV players.
+
+---
+
+## What's new
+
+- **v1.37** — deleting a recording now deletes the file from disk too (with a keep-file option); a broken dead-feed decode setting can no longer kill recordings (the recorder self-heals and tells you which setting to fix); the Recordings page shows *why* something needs attention; a failed recording no longer displays the wrong channel.
+- **v1.36** — IPTV service expiry on the Sources page, a redesigned Leagues page with drag-to-reorder channel priority, multi-select channel mapping, and bulk actions on Recordings.
+- **v1.35** — per-game guide-match channel picks up to 48h ahead, the preview User-Agent fix, and protection against timestamp-corrupted recordings.
+
+The full story for every release is in the [CHANGELOG](CHANGELOG.md) and on the [releases page](https://github.com/haydenw22/DVarr/releases).
 
 ---
 
@@ -202,11 +212,17 @@ For **national broadcasts** (a game moved to FOX/ESPN and the like), also map th
 
 All fallbacks for a league must be on the **same provider login** — one stream per login means a mid-recording failover can't jump credentials (the schema enforces this).
 
-**That's the setup done.** The dashboard shows what's planned; the Calendar shows every followed event; recordings start, survive drops, auto-extend, then get filed into `/media` with posters and `.nfo` metadata, ready for Plex.
+**That's the setup done.** The dashboard shows what's planned; the Calendar shows every followed event; recordings start, survive drops, auto-extend, then get filed into `/media` with posters and `.nfo` metadata, ready for Plex or Jellyfin.
 
 ### 6 · Optional extras
 
+> **How the media folder works:** DVarr creates each league's folder — along with its `tvshow.nfo`, poster, season art and episode metadata — **when the first recording is filed**, not before. If your media folder has leftover league folders from another tool (Sportarr etc.), delete the empty ones: a bare folder named "NFL" with no metadata is exactly what makes a media server's online providers mis-match it to a random TV show.
+
 - **Plex** — DVarr ships a Plex Custom Metadata Provider (Plex 1.43+). In Plex: **Settings → Metadata Agents → Add Provider** → `http://<dvarr-lan-ip>:1867/plex` → restart Plex → point a **TV Shows** library at the DVarr agent. Real game titles and TheSportsDB artwork on every recording. Full instructions live in **DVarr → Settings → Plex**.
+- **Jellyfin / Emby** — no plugin needed; DVarr writes everything locally (`tvshow.nfo`, episode `.nfo`s, posters, season art, episode thumbnails):
+  1. Add a **Shows** library pointing at DVarr's media folder.
+  2. In that library's settings, enable the **Nfo** metadata reader and **untick the internet metadata downloaders** (TMDB/TVDB/etc.). With internet providers left on, Jellyfin "corrects" league names into whatever TV show matches the folder name — "NFL" becomes *Inside the NFL*, "NHL" becomes *NHL News* — and keeps overwriting DVarr's metadata.
+  3. After your first recording is filed, run **Refresh metadata → Replace all metadata** on the library once, so any earlier wrong guesses are flushed.
 - **Calendar subscription** — Calendar page → **Subscribe (ICS)** for a token-secured feed Google/Apple Calendar can poll. Set **Settings → Data Sources → Public base URL** if you access DVarr through a reverse proxy.
 - **Home Assistant** — set a webhook URL under **Settings → Data Sources** to push recording state changes; a status endpoint is also available for polling.
 - **IPTV players on your LAN** — credential-free M3U + XMLTV export endpoints let players tune channels without ever seeing your provider login.
