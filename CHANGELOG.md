@@ -12,6 +12,13 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.38.2] — 2026-07-14
+Library/preview playback survives files the browser can't decode directly (Discord report: one clip played, another gave a "playback failed" error).
+
+### Fixed
+- **Playback now falls back to the transcoder automatically.** The in-browser player streams a compatible file's video losslessly (`-c copy`); but some real captures carry bitstreams a browser can't consume even though they're nominally H.264 — a mid-capture reconnect seam, an interlaced or 4:2:2/10-bit broadcast feed, unusual audio packaging. Previously that surfaced as a dead player and a misleading "ffmpeg unavailable" message. Now: files that are detectably browser-hostile (interlaced / non-4:2:0 H.264) go straight to the transcoder, and if the direct copy still fails in the player for any other reason, it automatically retries once via the transcoder — same ladder the live channel preview has always used. Applies to both Library playback and the in-progress recording preview.
+- **Playback errors now say what actually happened.** The player shows the real error detail instead of a generic guess, and each playback session's ffmpeg output is kept and logged when a session fails to start or dies mid-stream — so the next report contains the diagnosis.
+
 ## [1.38.1] — 2026-07-14
 Placeholder-stream detection, an enforced recording cap, a Discord link, and a Settings tidy-up.
 

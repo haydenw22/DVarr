@@ -25,6 +25,7 @@ public sealed class LibraryPlaybackManager : IAsyncDisposable
         public string Dir = "";
         public string Mode = "copy";
         public long LastAccessUtc;
+        public System.Collections.Concurrent.ConcurrentQueue<string> StderrTail = new();
     }
 
     private readonly ConcurrentDictionary<int, Session> _sessions = new();
@@ -38,9 +39,10 @@ public sealed class LibraryPlaybackManager : IAsyncDisposable
     public LibraryPlaybackManager(FfmpegLocator ffmpeg, RuntimePaths paths, IServiceScopeFactory scopes, ILogger<LibraryPlaybackManager> log)
     { _ffmpeg = ffmpeg; _paths = paths; _scopes = scopes; _log = log; }
 
-    public async Task<PlaybackResult> EnsureAsync(int itemId, CancellationToken ct)
+    public async Task<PlaybackResult> EnsureAsync(int itemId, bool forceTranscode, CancellationToken ct)
     {
-        if (_sessions.TryGetValue(itemId, out var live) && File.Exists(Path.Combine(live.Dir, "index.m3u8")))
+        if (_sessions.TryGetValue(itemId, out var live) && File.Exists(Path.Combine(live.Dir, "index.m3u8"))
+            && !(forceTranscode && live.Mode == "copy")) // the browser rejected the copy — rebuild transcoded
         {
             Interlocked.Exchange(ref live.LastAccessUtc, EpochTime.Now());
             return new PlaybackResult(PlaybackStatus.Ok, Path.Combine(live.Dir, "index.m3u8"), live.Mode);
@@ -49,30 +51,36 @@ public sealed class LibraryPlaybackManager : IAsyncDisposable
         await _startGate.WaitAsync(ct);
         try
         {
-            if (_sessions.TryGetValue(itemId, out live) && File.Exists(Path.Combine(live.Dir, "index.m3u8")))
+            if (_sessions.TryGetValue(itemId, out live) && File.Exists(Path.Combine(live.Dir, "index.m3u8"))
+                && !(forceTranscode && live.Mode == "copy"))
             {
                 live.LastAccessUtc = EpochTime.Now();
                 return new PlaybackResult(PlaybackStatus.Ok, Path.Combine(live.Dir, "index.m3u8"), live.Mode);
             }
             if (live != null) await KillAsync(itemId);
 
-            string? path; string? vCodec; string? aCodec;
+            string? path; string? aCodec; bool copyVideo;
             using (var scope = _scopes.CreateScope())
             {
                 var db = scope.ServiceProvider.GetRequiredService<DVarrDbContext>();
                 var item = await db.LibraryItems.AsNoTracking().Where(i => i.Id == itemId)
                     .Select(i => new { i.FilePath, i.VideoCodec, i.AudioCodec }).FirstOrDefaultAsync(ct);
                 if (item is null) return new PlaybackResult(PlaybackStatus.NotFound, null, null);
-                path = item.FilePath; vCodec = item.VideoCodec; aCodec = item.AudioCodec;
+                path = item.FilePath; aCodec = item.AudioCodec;
                 if (!File.Exists(path)) return new PlaybackResult(PlaybackStatus.Missing, null, null);
-                if (vCodec is null) // adopted before a probe ran (or ffprobe was missing) — try once now
+                // The copy decision needs more than the stored codec name: interlaced or 4:2:2/10-bit H.264
+                // (real on broadcast-grade 1080 feeds) remuxes fine but decodes badly-or-not-at-all in the
+                // browser, so probe the actual bitstream whenever copy is on the table.
+                if (forceTranscode)
+                    copyVideo = false;
+                else
                 {
                     var probe = await scope.ServiceProvider.GetRequiredService<LibraryService>().ProbeAsync(path, ct);
-                    vCodec = probe.VideoCodec; aCodec = probe.AudioCodec;
+                    copyVideo = probe.CopySafeVideo;
+                    aCodec ??= probe.AudioCodec;
                 }
             }
 
-            var copyVideo = string.Equals(vCodec, "h264", StringComparison.OrdinalIgnoreCase);
             var copyAudio = string.Equals(aCodec, "aac", StringComparison.OrdinalIgnoreCase);
 
             var dir = Path.Combine(_paths.SegmentDir, "playback", itemId.ToString());
@@ -83,7 +91,8 @@ public sealed class LibraryPlaybackManager : IAsyncDisposable
             foreach (var mode in attempts)
             {
                 foreach (var f in Directory.EnumerateFiles(dir)) { try { File.Delete(f); } catch { } }
-                var ff = StartFfmpeg(path!, dir, mode, copyAudio);
+                var stderr = new System.Collections.Concurrent.ConcurrentQueue<string>();
+                var ff = StartFfmpeg(path!, dir, mode, copyAudio, stderr);
                 var ready = false;
                 for (var i = 0; i < 80; i++)
                 {
@@ -94,13 +103,15 @@ public sealed class LibraryPlaybackManager : IAsyncDisposable
                 }
                 if (ready)
                 {
-                    _sessions[itemId] = new Session { Ff = ff, Dir = dir, Mode = mode, LastAccessUtc = EpochTime.Now() };
+                    _sessions[itemId] = new Session { Ff = ff, Dir = dir, Mode = mode, LastAccessUtc = EpochTime.Now(), StderrTail = stderr };
                     _log.LogInformation("[Playback] library item {Id} playing ({Mode})", itemId, mode);
                     return new PlaybackResult(PlaybackStatus.Ok, playlist, mode);
                 }
                 try { if (!SafeHasExited(ff)) ff.Kill(true); } catch { }
                 try { ff.Dispose(); } catch { }
-                if (mode == "nvenc") _log.LogWarning("[Playback] NVENC start failed for item {Id}; falling back to CPU", itemId);
+                // The ffmpeg tail is the actual diagnosis — a silent Error status cost a support round-trip once.
+                _log.LogWarning("[Playback] {Mode} start failed for item {Id}: {Err}", mode, itemId,
+                    stderr.Count > 0 ? string.Join(" | ", stderr) : "(no ffmpeg output)");
             }
             return new PlaybackResult(PlaybackStatus.Error, null, null);
         }
@@ -123,7 +134,7 @@ public sealed class LibraryPlaybackManager : IAsyncDisposable
         return File.Exists(full) ? full : null;
     }
 
-    private Process StartFfmpeg(string input, string dir, string mode, bool copyAudio)
+    private Process StartFfmpeg(string input, string dir, string mode, bool copyAudio, System.Collections.Concurrent.ConcurrentQueue<string> stderrTail)
     {
         var psi = new ProcessStartInfo(_ffmpeg.Ffmpeg)
         { RedirectStandardError = true, RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true };
@@ -162,7 +173,20 @@ public sealed class LibraryPlaybackManager : IAsyncDisposable
         });
         foreach (var a in args) psi.ArgumentList.Add(a);
         var p = Process.Start(psi)!;
-        _ = Task.Run(async () => { try { while (await p.StandardError.ReadLineAsync() is not null) { } } catch { } });
+        // Keep a bounded tail of stderr instead of discarding it — it's the diagnosis when a session fails.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                while (await p.StandardError.ReadLineAsync() is { } line)
+                {
+                    if (string.IsNullOrWhiteSpace(line)) continue;
+                    stderrTail.Enqueue(line.Trim());
+                    while (stderrTail.Count > 20) stderrTail.TryDequeue(out _);
+                }
+            }
+            catch { }
+        });
         _ = Task.Run(async () => { try { while (await p.StandardOutput.ReadLineAsync() is not null) { } } catch { } });
         return p;
     }
@@ -190,6 +214,14 @@ public sealed class LibraryPlaybackManager : IAsyncDisposable
     private async Task KillAsync(int itemId)
     {
         if (!_sessions.TryRemove(itemId, out var s)) return;
+        try
+        {
+            // A session whose ffmpeg died mid-stream is the "played 6 minutes then stalled" class of bug —
+            // surface its stderr tail rather than reclaiming the evidence silently.
+            if (SafeHasExited(s.Ff) && s.Ff.ExitCode != 0 && !s.StderrTail.IsEmpty)
+                _log.LogWarning("[Playback] item {Id} ffmpeg exited {Code}: {Err}", itemId, s.Ff.ExitCode, string.Join(" | ", s.StderrTail));
+        }
+        catch { }
         try { if (!SafeHasExited(s.Ff)) s.Ff.Kill(true); } catch { }
         try { s.Ff.Dispose(); } catch { }
         try { if (Directory.Exists(s.Dir)) Directory.Delete(s.Dir, true); } catch { }

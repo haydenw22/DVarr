@@ -120,10 +120,12 @@ public static class LibraryEndpoints
             return Results.NotFound();
         });
 
-        // ---- Watch a library file in the browser (HLS; remux when possible, transcode when needed) ----
-        app.MapGet("/api/library/{id:int}/play/hls/index.m3u8", async (int id, HttpContext ctx, LibraryPlaybackManager mgr) =>
+        // ---- Watch a library file in the browser (HLS; remux when possible, transcode when needed).
+        // ?mode=transcode forces the transcoder — the player sends it automatically after a fatal media error
+        // on the direct copy (a bitstream the browser can't decode: splice seam, odd profile, etc.). ----
+        app.MapGet("/api/library/{id:int}/play/hls/index.m3u8", async (int id, string? mode, HttpContext ctx, LibraryPlaybackManager mgr) =>
         {
-            var r = await mgr.EnsureAsync(id, ctx.RequestAborted);
+            var r = await mgr.EnsureAsync(id, string.Equals(mode, "transcode", StringComparison.OrdinalIgnoreCase), ctx.RequestAborted);
             return r.Status switch
             {
                 PlaybackStatus.Ok => Results.Text(await File.ReadAllTextAsync(r.PlaylistPath!, ctx.RequestAborted), "application/vnd.apple.mpegurl"),
@@ -140,10 +142,11 @@ public static class LibraryEndpoints
             return Results.File(path, ctype);
         });
 
-        // ---- Preview an IN-PROGRESS recording from its local capture segments (no provider slot) ----
-        app.MapGet("/api/recordings/{id:int}/preview/hls/index.m3u8", async (int id, HttpContext ctx, RecordingPreviewManager mgr) =>
+        // ---- Preview an IN-PROGRESS recording from its local capture segments (no provider slot).
+        // Same ?mode=transcode contract as library playback. ----
+        app.MapGet("/api/recordings/{id:int}/preview/hls/index.m3u8", async (int id, string? mode, HttpContext ctx, RecordingPreviewManager mgr) =>
         {
-            var r = await mgr.EnsureAsync(id, ctx.RequestAborted);
+            var r = await mgr.EnsureAsync(id, string.Equals(mode, "transcode", StringComparison.OrdinalIgnoreCase), ctx.RequestAborted);
             return r.Status switch
             {
                 RecPreviewStatus.Ok => Results.Text(await File.ReadAllTextAsync(r.PlaylistPath!, ctx.RequestAborted), "application/vnd.apple.mpegurl"),

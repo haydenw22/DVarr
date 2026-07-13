@@ -29,6 +29,7 @@ public sealed class RecordingPreviewManager : IAsyncDisposable
         public string Dir = "";
         public string Mode = "copy";
         public long LastAccessUtc;
+        public System.Collections.Concurrent.ConcurrentQueue<string> StderrTail = new();
     }
 
     private readonly ConcurrentDictionary<int, Session> _sessions = new();
@@ -44,9 +45,10 @@ public sealed class RecordingPreviewManager : IAsyncDisposable
         IServiceScopeFactory scopes, ILogger<RecordingPreviewManager> log)
     { _ffmpeg = ffmpeg; _paths = paths; _recorder = recorder; _scopes = scopes; _log = log; }
 
-    public async Task<RecPreviewResult> EnsureAsync(int recordingId, CancellationToken ct)
+    public async Task<RecPreviewResult> EnsureAsync(int recordingId, bool forceTranscode, CancellationToken ct)
     {
-        if (_sessions.TryGetValue(recordingId, out var live) && SessionServeable(live))
+        if (_sessions.TryGetValue(recordingId, out var live) && SessionServeable(live)
+            && !(forceTranscode && live.Mode == "copy")) // the browser rejected the copy — rebuild transcoded
         {
             Interlocked.Exchange(ref live.LastAccessUtc, EpochTime.Now());
             return new RecPreviewResult(RecPreviewStatus.Ok, Path.Combine(live.Dir, "index.m3u8"), live.Mode);
@@ -55,7 +57,8 @@ public sealed class RecordingPreviewManager : IAsyncDisposable
         await _startGate.WaitAsync(ct);
         try
         {
-            if (_sessions.TryGetValue(recordingId, out live) && SessionServeable(live))
+            if (_sessions.TryGetValue(recordingId, out live) && SessionServeable(live)
+                && !(forceTranscode && live.Mode == "copy"))
             {
                 live.LastAccessUtc = EpochTime.Now();
                 return new RecPreviewResult(RecPreviewStatus.Ok, Path.Combine(live.Dir, "index.m3u8"), live.Mode);
@@ -81,7 +84,9 @@ public sealed class RecordingPreviewManager : IAsyncDisposable
             MediaInfo info;
             using (var scope = _scopes.CreateScope())
                 info = await scope.ServiceProvider.GetRequiredService<LibraryService>().ProbeAsync(probeTarget, ct);
-            var copyVideo = string.Equals(info.VideoCodec, "h264", StringComparison.OrdinalIgnoreCase);
+            // CopySafeVideo, not just codec==h264: interlaced / 4:2:2 / 10-bit H.264 feeds decode badly-or-not-
+            // at-all in browsers. forceTranscode is the player's automatic retry after a fatal media error.
+            var copyVideo = !forceTranscode && info.CopySafeVideo;
             var copyAudio = string.Equals(info.AudioCodec, "aac", StringComparison.OrdinalIgnoreCase);
 
             var dir = Path.Combine(_paths.SegmentDir, "recpreview", recordingId.ToString());
@@ -100,7 +105,8 @@ public sealed class RecordingPreviewManager : IAsyncDisposable
                 // and yields full DVR seek); a transcode starts near the live edge so it never has to encode
                 // hours of backlog before showing the current picture.
                 var fromStart = mode == "copy";
-                var ff = StartFfmpeg(dir, mode, copyAudio);
+                var stderr = new System.Collections.Concurrent.ConcurrentQueue<string>();
+                var ff = StartFfmpeg(dir, mode, copyAudio, stderr);
                 var pumpCts = CancellationTokenSource.CreateLinkedTokenSource(CancellationToken.None);
                 var stdin = ff.StandardInput.BaseStream;
                 var pump = Task.Run(async () =>
@@ -119,7 +125,7 @@ public sealed class RecordingPreviewManager : IAsyncDisposable
                 }
                 if (ready)
                 {
-                    _sessions[recordingId] = new Session { Ff = ff, PumpCts = pumpCts, Pump = pump, Dir = dir, Mode = mode, LastAccessUtc = EpochTime.Now() };
+                    _sessions[recordingId] = new Session { Ff = ff, PumpCts = pumpCts, Pump = pump, Dir = dir, Mode = mode, LastAccessUtc = EpochTime.Now(), StderrTail = stderr };
                     _log.LogInformation("[RecPreview] recording {Id} previewing from local segments ({Mode})", recordingId, mode);
                     return new RecPreviewResult(RecPreviewStatus.Ok, playlist, mode);
                 }
@@ -128,7 +134,9 @@ public sealed class RecordingPreviewManager : IAsyncDisposable
                 try { if (!SafeHasExited(ff)) ff.Kill(true); } catch { }
                 try { ff.Dispose(); } catch { }
                 pumpCts.Dispose();
-                if (mode == "nvenc") _log.LogWarning("[RecPreview] NVENC start failed for recording {Id}; falling back to CPU", recordingId);
+                // The ffmpeg tail is the actual diagnosis — never fail a start silently.
+                _log.LogWarning("[RecPreview] {Mode} start failed for recording {Id}: {Err}", mode, recordingId,
+                    stderr.Count > 0 ? string.Join(" | ", stderr) : "(no ffmpeg output)");
             }
             return new RecPreviewResult(RecPreviewStatus.Error, null, null);
         }
@@ -155,7 +163,7 @@ public sealed class RecordingPreviewManager : IAsyncDisposable
         return File.Exists(full) ? full : null;
     }
 
-    private Process StartFfmpeg(string dir, string mode, bool copyAudio)
+    private Process StartFfmpeg(string dir, string mode, bool copyAudio, System.Collections.Concurrent.ConcurrentQueue<string> stderrTail)
     {
         var psi = new ProcessStartInfo(_ffmpeg.Ffmpeg)
         { RedirectStandardInput = true, RedirectStandardError = true, RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true };
@@ -198,7 +206,20 @@ public sealed class RecordingPreviewManager : IAsyncDisposable
         });
         foreach (var a in args) psi.ArgumentList.Add(a);
         var p = Process.Start(psi)!;
-        _ = Task.Run(async () => { try { while (await p.StandardError.ReadLineAsync() is not null) { } } catch { } });
+        // Keep a bounded tail of stderr instead of discarding it — it's the diagnosis when a session fails.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                while (await p.StandardError.ReadLineAsync() is { } line)
+                {
+                    if (string.IsNullOrWhiteSpace(line)) continue;
+                    stderrTail.Enqueue(line.Trim());
+                    while (stderrTail.Count > 20) stderrTail.TryDequeue(out _);
+                }
+            }
+            catch { }
+        });
         _ = Task.Run(async () => { try { while (await p.StandardOutput.ReadLineAsync() is not null) { } } catch { } });
         return p;
     }
@@ -223,6 +244,13 @@ public sealed class RecordingPreviewManager : IAsyncDisposable
     private async Task KillAsync(int recordingId)
     {
         if (!_sessions.TryRemove(recordingId, out var s)) return;
+        try
+        {
+            // Surface a mid-session ffmpeg death instead of reclaiming the evidence silently.
+            if (SafeHasExited(s.Ff) && s.Ff.ExitCode != 0 && !s.StderrTail.IsEmpty)
+                _log.LogWarning("[RecPreview] recording {Id} ffmpeg exited {Code}: {Err}", recordingId, s.Ff.ExitCode, string.Join(" | ", s.StderrTail));
+        }
+        catch { }
         try { s.PumpCts.Cancel(); } catch { }
         try { if (!SafeHasExited(s.Ff)) s.Ff.Kill(true); } catch { }
         try { await s.Pump.WaitAsync(TimeSpan.FromSeconds(5)); } catch { }

@@ -1575,23 +1575,44 @@ function startHlsUrl(url, readyNote) {
   const video = $('#pvVideo'), msg = $('#pvMsg');
   if (!video) return;
   stopPreview();
-  const fail = async () => {
+  const isTranscode = url.includes('mode=transcode');
+  // A fatal error on the DIRECT COPY stream almost always means the browser can't consume this particular
+  // bitstream (a reconnect splice seam, an interlaced/4:2:2 profile, odd audio packaging). The transcoded
+  // variant re-encodes and re-times everything, so retry once with ?mode=transcode before giving up —
+  // the same direct→transcode ladder the live channel preview has always used.
+  const fallbackToTranscode = () => {
+    if (isTranscode || !$('#pvMsg')) return false; // already transcoding (or modal closed) — no second retry
+    $('#pvMsg').textContent = 'This file needs converting for your browser — switching to the transcoder…';
+    startHlsUrl(url + (url.includes('?') ? '&' : '?') + 'mode=transcode', readyNote);
+    return true;
+  };
+  const fail = async (detail) => {
     if (!$('#pvMsg')) return; // modal already closed
-    // The playlist endpoint answers a human-readable JSON message on failure — surface it instead of an hls.js code.
-    let m = 'Playback failed — the file may be unreadable or ffmpeg unavailable.';
+    // The playlist endpoint answers a human-readable JSON message on failure — surface it (plus the player's
+    // error code so a report tells us the actual cause) instead of a generic guess.
+    let m = 'Playback failed — the file may be unreadable.';
     try { const r = await api.get(url); if (r && (r.message || r.error)) m = r.message || r.error; } catch { }
-    $('#pvMsg').innerHTML = `<span style="color:var(--warn)">${esc(m)}</span>`;
+    $('#pvMsg').innerHTML = `<span style="color:var(--warn)">${esc(m)}</span>${detail ? ` <span class="muted">[${esc(detail)}]</span>` : ''}`;
   };
   if (window.Hls && Hls.isSupported()) {
     _hls = new Hls({ manifestLoadingMaxRetry: 6, manifestLoadingRetryDelay: 1000, levelLoadingMaxRetry: 6 });
     _hls.loadSource(url);
     _hls.attachMedia(video);
     _hls.on(Hls.Events.MANIFEST_PARSED, () => { video.play().catch(() => { }); if ($('#pvMsg')) $('#pvMsg').textContent = (readyNote || '') + ' Tap the video for volume / fullscreen.'; });
-    _hls.on(Hls.Events.ERROR, (e, data) => { if (data && data.fatal) fail(); });
+    _hls.on(Hls.Events.ERROR, (e, data) => {
+      if (!data || !data.fatal) return;
+      // Network-level failures (busy/missing/no-footage) get the server's own message — a transcode retry
+      // can't fix those. Everything else (media/mux/parse) goes down the transcode ladder.
+      if (data.type !== Hls.ErrorTypes.NETWORK_ERROR && fallbackToTranscode()) return;
+      fail(data.details || data.type);
+    });
   } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
     video.src = url; video.play().catch(() => { });
     msg.textContent = (readyNote || '') + ' Tap the video for volume / fullscreen.';
-    video.addEventListener('error', fail, { once: true });
+    video.addEventListener('error', () => {
+      if (fallbackToTranscode()) return;
+      fail(video.error && video.error.message);
+    }, { once: true });
   } else {
     msg.textContent = 'Your browser cannot play HLS streams. Try Chrome/Edge/Safari.';
   }

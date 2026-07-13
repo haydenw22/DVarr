@@ -10,7 +10,17 @@ namespace DVarr.Services.Media;
 
 /// <summary>Technical metadata read from a video file with ffprobe (all-null when ffprobe is unavailable —
 /// the item is still tracked, just without codec/duration detail).</summary>
-public sealed record MediaInfo(int? DurationS, string? VideoCodec, string? AudioCodec, int? Height);
+public sealed record MediaInfo(int? DurationS, string? VideoCodec, string? AudioCodec, int? Height, string? PixFmt = null, string? FieldOrder = null)
+{
+    /// <summary>Whether the video bitstream is safe to -c copy into HLS for a BROWSER decoder: H.264,
+    /// 8-bit 4:2:0, progressive. Interlaced or 4:2:2/10-bit H.264 (both real on broadcast-grade 1080 feeds)
+    /// decode poorly or not at all in MSE, so they take the transcode path up front. Unknown values pass —
+    /// the player's automatic transcode fallback catches anything this gate misses.</summary>
+    public bool CopySafeVideo =>
+        string.Equals(VideoCodec, "h264", StringComparison.OrdinalIgnoreCase)
+        && PixFmt is null or "yuv420p" or "yuvj420p"
+        && FieldOrder is null or "" or "progressive" or "unknown";
+}
 
 /// <summary>What the on-disk location of a file says about it, parsed from DVarr's own Plex layout
 /// ("Show/Season YYYY/Title (yyyy-MM-dd) ENN/Show - SYYYYENN - Title - HDTV-1080p.mkv").</summary>
@@ -174,7 +184,7 @@ public sealed class LibraryService
             catch (OperationCanceledException) { try { if (!p.HasExited) p.Kill(true); } catch { } return new MediaInfo(null, null, null, null); }
 
             using var doc = JsonDocument.Parse(outp);
-            int? durationS = null; string? v = null, a2 = null; int? height = null;
+            int? durationS = null; string? v = null, a2 = null, pixFmt = null, fieldOrder = null; int? height = null;
             if (doc.RootElement.TryGetProperty("format", out var fmt)
                 && fmt.TryGetProperty("duration", out var d)
                 && double.TryParse(d.GetString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var ds))
@@ -188,10 +198,12 @@ public sealed class LibraryService
                     {
                         v = codec;
                         if (s.TryGetProperty("height", out var h) && h.TryGetInt32(out var hv) && hv > 0) height = hv;
+                        if (s.TryGetProperty("pix_fmt", out var pf)) pixFmt = pf.GetString();
+                        if (s.TryGetProperty("field_order", out var fo)) fieldOrder = fo.GetString();
                     }
                     else if (type == "audio" && a2 is null) a2 = codec;
                 }
-            return new MediaInfo(durationS, v, a2, height);
+            return new MediaInfo(durationS, v, a2, height, pixFmt, fieldOrder);
         }
         catch (Exception ex)
         {
