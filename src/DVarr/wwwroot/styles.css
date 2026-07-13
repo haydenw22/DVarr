@@ -253,6 +253,10 @@ label.field { display:flex; flex-direction:column; gap:5px; font-size:12px; colo
 .lg-grip:hover { color:var(--txt); background:rgba(59,130,246,.08); }
 .lg-grip:active { cursor:grabbing; }
 .lg-grip svg { width:16px; height:16px; }
+/* Keyboard/touch reorder buttons — an accessible alternative to the drag grip (audit UI-LG-03). */
+.lg-move { flex:0 0 auto; display:inline-flex; flex-direction:column; gap:1px; }
+.lg-moveb { width:20px; height:15px; padding:0; line-height:1; font-size:10px; display:flex; align-items:center; justify-content:center; color:var(--dim2); background:transparent; border:1px solid var(--line2); border-radius:5px; cursor:pointer; }
+.lg-moveb:hover { color:var(--txt); border-color:var(--acc); background:rgba(59,130,246,.08); }
 .lg-chrow-main { flex:1 1 auto; min-width:0; }
 .lg-chrow-main b { display:block; font-size:13px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .lg-chrow-sub { font-size:11.5px; color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }

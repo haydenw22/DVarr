@@ -12,6 +12,21 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.37.2] — 2026-07-13
+UI hardening batch: fifteen interface and accessibility fixes from the full-application audit, verified against a live instance.
+
+### Fixed
+- **The Leagues page can no longer submit a different league than the one it's showing.** Typing in the league search box could leave the visible header on one league while a different one was submitted; the picker now keeps your chosen league selected (even when a filter scrolls it out of view) so the header and the saved league always match.
+- **The Map dialog can no longer map channels to the wrong league or silently drop a team scope.** The channel selection is reset when the dialog opens, "Add all" stays disabled until the picker is ready, and a mapping started from "+ Add team" keeps that team even if you submit before the team list finishes loading.
+- **Mapping and league dialogs stay open until the save actually succeeds** — a rejected save no longer discards everything you entered behind a bare error toast.
+- **Channel priority is now reorderable by keyboard and touch**, not just mouse drag — each channel has ▲▼ buttons alongside the drag grip. A cancelled drag (Esc, or dropping outside the list) now snaps back instead of leaving an unsaved reordering on screen.
+- **A failed page load looks like a failure, not an empty account** — the Leagues page shows an error with a Retry button instead of "No leagues yet" when the data couldn't be fetched.
+- **Bulk actions on Recordings only affect visible rows** — a recording selected under one filter is no longer silently acted on after a filter hides it.
+- **Stale background updates can no longer repaint the wrong page.** Live refreshes and slow filter/search responses are tied to the current page and query, so navigating quickly or changing a filter can't leave older results on screen.
+- **The first paint uses your configured timezone** instead of briefly flashing the default and rendering twice.
+- **Opening the mobile menu and then widening to desktop no longer leaves the page unable to scroll.**
+- **Accessibility:** dialogs are proper labelled modals that trap keyboard focus and restore it on close; the channel and game pickers are keyboard-navigable (arrow keys, Home/End, Enter/Space); status messages announce to screen readers; and the guide's channel-name tap behaviour works as intended on phones.
+
 ## [1.37.1] — 2026-07-13
 Integrity batch: nineteen fixes from a full-application audit, every finding verified against the code before fixing.
 

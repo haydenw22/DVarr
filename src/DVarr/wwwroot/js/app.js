@@ -113,16 +113,51 @@ function toast(msg, kind = '') {
   $('#toastRoot').appendChild(t);
   setTimeout(() => t.remove(), 4200);
 }
+// Monotonic modal generation: an async loader started for one modal captures this at open time and checks
+// modalAlive(gen) after every await, so a response for a CLOSED (or superseded) modal can't populate the next
+// one — even though loaders query by global element id (audit UI-ASYNC-02). closeModals bumps it, so does opening.
+let _modalGen = 0;
+const modalGen = () => _modalGen;
+const modalAlive = g => g === _modalGen;
 function modal(html, width) {
+  const opener = (document.activeElement && document.activeElement.focus) ? document.activeElement : null; // restore focus on close
   const bg = document.createElement('div');
   bg.className = 'modal-bg';
+  bg._opener = opener;
+  _modalGen++;
+  // role=dialog + aria-modal for assistive tech; tabindex so we can move focus into it (audit A11Y-02).
   // .modal-x: close button for the phone full-screen sheet (display:none on desktop, so wide layouts are untouched).
-  bg.innerHTML = `<div class="modal"${width ? ` style="width:${width}"` : ''}>${html}<button type="button" class="modal-x" aria-label="Close" onclick="closeModals()"><svg viewBox="0 0 24 24" style="width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>`;
+  bg.innerHTML = `<div class="modal" role="dialog" aria-modal="true" tabindex="-1"${width ? ` style="width:${width}"` : ''}>${html}<button type="button" class="modal-x" aria-label="Close" onclick="closeModals()"><svg viewBox="0 0 24 24" style="width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>`;
   bg.addEventListener('click', e => { if (e.target === bg) closeModals(); });
+  // Focus trap: keep Tab inside the dialog so keyboard/screen-reader focus can't wander behind the backdrop.
+  bg.addEventListener('keydown', e => {
+    if (e.key !== 'Tab') return;
+    const f = [...bg.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+      .filter(el => el.offsetParent !== null);
+    if (!f.length) return;
+    const first = f[0], last = f[f.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  });
   $('#modalRoot').appendChild(bg);
+  const dlg = bg.querySelector('.modal');
+  const h = dlg.querySelector('h2'); if (h) { if (!h.id) h.id = 'mdl-title-' + _modalGen; dlg.setAttribute('aria-labelledby', h.id); }
+  // Move focus into the dialog: first VISIBLE real control (skip display:none fields), else the dialog itself.
+  const focusable = [...dlg.querySelectorAll('input:not([type=hidden]):not([disabled]), select:not([disabled]), textarea:not([disabled]), button:not([disabled]):not(.modal-x)')]
+    .find(el => el.offsetParent !== null);
+  (focusable || dlg).focus();
   return bg;
 }
-function closeModals() { stopPreview(); $('#modalRoot').replaceChildren(); }
+function closeModals() {
+  stopPreview();
+  _mapPicker = null;   // drop any live Map-dialog selection so channels can't leak into the next dialog (audit UI-LG-01)
+  _modalGen++;         // invalidate any in-flight modal loaders (audit UI-ASYNC-02)
+  const root = $('#modalRoot');
+  const opener = [...root.querySelectorAll('.modal-bg')].map(b => b._opener).filter(Boolean).pop();
+  root.replaceChildren();
+  // Restore focus to whatever opened the (last) modal, so keyboard focus doesn't jump to the top of the page.
+  if (opener && opener.isConnected && typeof opener.focus === 'function') { try { opener.focus(); } catch { } }
+}
 
 // Ko-fi donation panel in a modal (official embed URL). The iframe only loads when opened, and the
 // sidebar link's href stays a plain Ko-fi URL so it still works if JS is broken. Returns false to
@@ -153,6 +188,8 @@ function copyText(text, srcSel) {
 
 // ---- mobile drawer nav (sidebar slides in over a scrim below ~820px) ----
 // body.drawer-locked freezes page scroll behind the open drawer (class is only ever set on small screens).
+// Crossing UP to desktop width auto-closes the drawer so its scroll-lock can't strand a frozen page (audit UI-DRAWER-01).
+try { matchMedia('(min-width: 821px)').addEventListener('change', e => { if (e.matches) closeDrawer(); }); } catch { /* no matchMedia (old WebView) */ }
 function closeDrawer() { const a = $('.app'); if (a) a.classList.remove('drawer-open'); document.body.classList.remove('drawer-locked'); const h = $('#hamburger'); if (h) h.setAttribute('aria-expanded', 'false'); }
 function toggleDrawer() { const a = $('.app'); if (!a) return; const open = a.classList.toggle('drawer-open'); document.body.classList.toggle('drawer-locked', open); const h = $('#hamburger'); if (h) h.setAttribute('aria-expanded', open ? 'true' : 'false'); }
 
@@ -195,13 +232,15 @@ window.addEventListener('scroll', closeKebabs, true);
 window.addEventListener('resize', closeKebabs);
 
 // ---- live refresh wiring ----
-let liveRefresh = null, liveTimer = null;
-function setLive(fn) { liveRefresh = fn; }
+let liveRefresh = null, liveTimer = null, liveGen = -1;
+// setLive binds the current page's refresh fn to the navigation generation it belongs to (audit UI-ASYNC-01), so a
+// late SSE tick can't repaint a page the user already navigated away from.
+function setLive(fn) { liveRefresh = fn; liveGen = render._seq || 0; }
 function connectSSE() {
   const es = new EventSource('/api/stream/recordings');
   // Swallow a stale/failed refresh so a transient API error (or a draw() against a just-navigated page) can't throw an
   // unhandled rejection and freeze live updates on stale data.
-  es.onmessage = () => { clearTimeout(liveTimer); liveTimer = setTimeout(() => { try { const p = liveRefresh && liveRefresh(); if (p && p.catch) p.catch(() => {}); } catch {} }, 150); };
+  es.onmessage = () => { clearTimeout(liveTimer); liveTimer = setTimeout(() => { if (liveGen !== (render._seq || 0)) return; try { const p = liveRefresh && liveRefresh(); if (p && p.catch) p.catch(() => {}); } catch {} }, 150); };
   es.onerror = () => { es.close(); setTimeout(connectSSE, 3000); };
 }
 
@@ -247,6 +286,7 @@ PAGES.dashboard = {
   actions: () => `<button onclick="openScheduleModal()">${I.plus} Schedule</button><button class="ghost" onclick="openTestModal()">${I.play} Test</button>`,
   menuActions: [{ label: 'Test recording', fn: 'openTestModal()' }], // phone topbar ⋯ (mirrors the ghost button above)
   async render(el) {
+    const gen = render._seq; // navigation generation — a late SSE draw must not repaint after the user navigates away
     const draw = async () => {
       const now = Math.floor(Date.now() / 1000);
       const [health, recs, leagues, events, sources] = await Promise.all([
@@ -256,6 +296,7 @@ PAGES.dashboard = {
         api.get(`/api/events?from=${now}`),
         api.get('/api/sources').catch(() => []),
       ]);
+      if (gen !== render._seq) return; // navigated away mid-fetch (audit UI-ASYNC-01)
       if (!Array.isArray(recs) || !Array.isArray(leagues) || !Array.isArray(events)) return; // transient API error — keep the current view, retry next tick
       const live = recs.filter(r => ACTIVE.includes(r.state));
       const scheduled = recs.filter(r => r.state === 'Pending' && r.startUtc <= now + 86400).sort((a, b) => a.startUtc - b.startUtc); // next 24h only
@@ -277,7 +318,7 @@ PAGES.dashboard = {
         </div>`;
     };
     await draw();
-    setLive(draw);
+    if (gen === render._seq) setLive(draw); // only bind live-refresh if THIS page is still current (audit UI-ASYNC-01)
   },
 };
 // KPI stat cards across the top of the dashboard (icon chip + label + value + subcaption + accent underline).
@@ -369,9 +410,11 @@ PAGES.recordings = {
           <button class="danger sm" onclick="bulkDelete()">Delete</button>
         </span></div>
       <div id="recTableWrap"></div>`;
+    const gen = render._seq; // this page's navigation generation — a late SSE draw must not paint a navigated-away view
     const draw = async () => {
       const recs = await api.get('/api/recordings');
-      if (!Array.isArray(recs)) return; // transient API error — don't blow away the table on a failed refresh
+      if (gen !== render._seq) return;   // navigated away mid-fetch (audit UI-ASYNC-01)
+      if (!Array.isArray(recs)) return;  // transient API error — don't blow away the table on a failed refresh
       // League filter options — distinct leagues present in the loaded rows (null/manual grouped separately).
       // Rebuilt on every refresh (SSE) but the current selection is preserved.
       const lSel = $('#recLeague'); const prevLeague = lSel.value;
@@ -388,10 +431,11 @@ PAGES.recordings = {
       let rows = f === 'Recording' ? recs.filter(r => ACTIVE.includes(r.state)) : (f ? recs.filter(r => r.state === f) : recs);
       if (lf === 'manual') rows = rows.filter(r => r.leagueId == null);
       else if (lf) rows = rows.filter(r => String(r.leagueId) === lf);
-      // Preserve the bulk selection across this refresh: drop only ids that no longer exist at all (deleted),
-      // so a still-present recording keeps its checkbox even as the SSE-driven redraw replaces the table HTML.
-      const present = new Set(recs.map(r => r.id));
-      [...recSel].forEach(id => { if (!present.has(id)) recSel.delete(id); });
+      // Keep the bulk selection to the currently VISIBLE rows only (audit UI-BULK-01): otherwise a row selected
+      // under one filter stays in recSel after a filter hides it, and a bulk Stop/Delete would silently hit hidden
+      // recordings. An SSE refresh keeps the same filter → same visible set → selections survive as before.
+      const visible = new Set(rows.map(r => r.id));
+      [...recSel].forEach(id => { if (!visible.has(id)) recSel.delete(id); });
       $('#recCount').textContent = `${rows.length} recording${rows.length === 1 ? '' : 's'}`;
       $('#recTableWrap').innerHTML = rows.length ? recTable(rows, true) : emptyBox('No recordings yet. Use “Schedule” or “Test”.');
       recBulkSync();
@@ -399,7 +443,7 @@ PAGES.recordings = {
     $('#recFilter').addEventListener('change', draw);
     $('#recLeague').addEventListener('change', draw);
     await draw();
-    setLive(draw);
+    if (gen === render._seq) setLive(draw); // only bind live-refresh if THIS page is still current (audit UI-ASYNC-01)
   },
 };
 
@@ -469,8 +513,12 @@ PAGES.channels = {
       $('#chGrp').innerHTML = `<option value="all">All groups${f.length ? ` (${f.length})` : ''}</option>` + f.slice(0, 800).map(g => `<option value="${esc(g)}">${esc(g)}</option>`).join('');
     };
     const loadGroups = async () => { allGroups = await api.get(`/api/channels/groups?source=${$('#chSrc').value}`); renderGroups(); };
+    // Per-draw token: a slower earlier response must not overwrite a newer filter/search result (audit UI-ASYNC-03).
+    let drawSeq = 0;
     const draw = async () => {
+      const my = ++drawSeq;
       const rows = await api.get(`/api/channels?source=${$('#chSrc').value}&group=${encodeURIComponent($('#chGrp').value)}&q=${encodeURIComponent($('#chQ').value)}&take=500`);
+      if (my !== drawSeq || !Array.isArray(rows)) return; // superseded by a newer draw, or a transient error
       window._chanRows = {}; rows.forEach(c => window._chanRows[c.id] = c);
       $('#chWrap').innerHTML = rows.length ? `<table class="rtable"><thead><tr><th>Name</th><th>Group</th><th>Source</th><th>Quality</th><th></th></tr></thead><tbody>${rows.map(c => `
         <tr><td data-label="">${esc(c.name)}</td><td data-label="Group" class="muted">${esc(c.group || '')}</td><td data-label="Source" class="muted">${esc(c.sourceLabel)}</td><td data-label="Quality" class="mono muted">${esc(c.quality || '')}</td>
@@ -532,9 +580,12 @@ PAGES.guide = {
     };
     const loadGroups = async () => { state.groups = await api.get(`/api/channels/groups?source=${state.sourceId}`); renderGroups(); };
 
+    let drawSeq = 0; // per-draw token — a slow earlier guide response must not overwrite a newer one (audit UI-ASYNC-03)
     const draw = async () => {
+      const my = ++drawSeq;
       $('#gWrap').innerHTML = '<div class="loading">Loading guide…</div>';
       const g = await api.get(`/api/guide?source=${state.sourceId}&group=${encodeURIComponent(state.group)}&q=${encodeURIComponent(state.q)}&start=${state.start}&hours=${state.hours}`);
+      if (my !== drawSeq) return; // superseded by a newer draw
       renderGuide($('#gWrap'), g);
     };
 
@@ -580,7 +631,7 @@ function renderGuide(wrap, g) {
       return `<div class="${cls}" style="left:${left}px;width:${w}px" data-ch="${c.channelId}" data-start="${p.start}" data-stop="${p.stop}" data-title="${esc(p.Title || p.title || '')}" title="${esc(p.Title || p.title || '')} · ${hhmm(p.start)}-${hhmm(p.stop)}"><span class="g-pt">${hhmm(p.start)}</span> ${esc(p.Title || p.title || '')}</div>`;
     }).join('');
     const body = blocks || `<div class="g-empty">no guide data</div>`;
-    return `<div class="g-row"><div class="g-ch" title="Watch ${esc(c.name)}" onclick="openPreview(${c.channelId},'${jsq(c.name)}')">${I.play}<span>${esc(c.name)}</span></div><div class="g-track" style="width:${trackW}px">${body}</div></div>`;
+    return `<div class="g-row"><div class="g-ch" title="Watch ${esc(c.name)}" onclick="chanTap(${c.channelId},'${jsq(c.name)}')">${I.play}<span>${esc(c.name)}</span></div><div class="g-track" style="width:${trackW}px">${body}</div></div>`;
   }).join('');
 
   wrap.innerHTML = `<div class="guide-scroll"><div class="guide-inner" style="--gch:${chCol}px;width:${chCol + trackW}px">
@@ -652,9 +703,13 @@ PAGES.leagues = {
   menuActions: [{ label: 'Refresh', fn: 'render()' }],
   async render(el) {
     const ls = await api.get('/api/leagues');
+    // Distinguish a genuine load failure from "no leagues yet" (audit UI-LOAD-01) — otherwise a failed fetch reads
+    // as an empty account and the user thinks their leagues vanished.
+    if (!Array.isArray(ls)) { el.innerHTML = errorBox((ls && ls.error) ? `Couldn't load leagues: ${ls.error}` : "Couldn't load leagues."); return; }
     window._leagues = ls;
     const maps0 = await api.get('/api/mappings');
-    const maps = Array.isArray(maps0) ? maps0 : [];
+    if (!Array.isArray(maps0)) { el.innerHTML = errorBox((maps0 && maps0.error) ? `Couldn't load channel mappings: ${maps0.error}` : "Couldn't load channel mappings."); return; }
+    const maps = maps0;
     // Bucket mappings by league once; each card slices its own whole-league / per-team groups.
     const byLeague = {};
     maps.forEach(m => { (byLeague[m.leagueId] = byLeague[m.leagueId] || []).push(m); });
@@ -749,10 +804,14 @@ function renderTeamGroup(l, t, rows) {
   </div>`;
 }
 
-// A single channel row: grip handle (drag), channel name + source, a RANK/PRIORITY badge, and remove.
+// A single channel row: grip handle (drag) + keyboard/touch move buttons, channel name + source, a RANK badge, remove.
 function renderChRow(m) {
   return `<div class="lg-chrow" data-mapid="${m.id}" draggable="false">
-    <span class="lg-grip" title="Drag to reorder priority">${I.grip}</span>
+    <span class="lg-grip" title="Drag to reorder priority" aria-hidden="true">${I.grip}</span>
+    <span class="lg-move">
+      <button type="button" class="lg-moveb" title="Move up (higher priority)" aria-label="Move up" onclick="moveMapping(${m.id},-1)">▲</button>
+      <button type="button" class="lg-moveb" title="Move down (lower priority)" aria-label="Move down" onclick="moveMapping(${m.id},1)">▼</button>
+    </span>
     <div class="lg-chrow-main">
       <b>${esc(m.channel || ('channel ' + m.channelId))}</b>
       <div class="lg-chrow-sub">${esc(m.source || '')}${m.pinned ? ' · <span class="lg-pin" title="Pinned — beats EPG guessing">★ pinned</span>' : ''}</div>
@@ -763,6 +822,22 @@ function renderChRow(m) {
       ${kebab([{ label: 'Remove mapping', fn: `deleteMapping(${m.id})`, danger: true }])}
     </span>
   </div>`;
+}
+// Keyboard/touch reorder (audit UI-LG-03): swap this row with its neighbour in the group and persist, mirroring the
+// drag path. Optimistic (no full re-render on success) so keyboard focus stays on the button for repeated presses.
+async function moveMapping(mapId, dir) {
+  const row = document.querySelector(`.lg-chrow[data-mapid="${mapId}"]`); if (!row) return;
+  const group = row.closest('.lg-chgroup'); if (!group) return;
+  const rows = [...group.querySelectorAll('.lg-chrow')];
+  const i = rows.indexOf(row), j = i + dir;
+  if (j < 0 || j >= rows.length) return; // already at an end
+  if (dir < 0) group.insertBefore(row, rows[j]); else group.insertBefore(rows[j], row); // DOM swap
+  [...group.querySelectorAll('.lg-chrow')].forEach((r, k) => { const b = r.querySelector('.lg-rank-n'); if (b) b.textContent = k + 1; }); // renumber badges
+  const orderedIds = [...group.querySelectorAll('.lg-chrow')].map(r => parseInt(r.dataset.mapid));
+  const res = await api.put('/api/mappings/reorder', { leagueId: parseInt(group.dataset.league), teamId: group.dataset.team || null, orderedIds });
+  if (res && res.error) { toast(res.error, 'err'); render(); return; } // server rejected → resync from truth
+  const btn = group.querySelector(`.lg-chrow[data-mapid="${mapId}"] .lg-moveb[aria-label="${dir < 0 ? 'Move up' : 'Move down'}"]`);
+  if (btn) btn.focus(); // keep focus on the moved row so repeated keyboard presses keep working
 }
 
 // Expand/collapse a league card; remember the state so a re-render keeps it.
@@ -779,14 +854,15 @@ function toggleLeagueCard(id) {
 // read the group's new DOM order and PUT /api/mappings/reorder, optimistically renumbering the RANK badges.
 function wireLeagueDnd(root) {
   if (!root) return;
-  let dragEl = null, dragGroup = null;
+  let dragEl = null, dragGroup = null, origOrder = null, dropped = false;
   root.addEventListener('mousedown', e => {
     const row = e.target.closest('.lg-chrow'); if (!row) return;
     row.setAttribute('draggable', e.target.closest('.lg-grip') ? 'true' : 'false'); // grip-only handle
   });
   root.addEventListener('dragstart', e => {
     const row = e.target.closest('.lg-chrow'); if (!row) return;
-    dragEl = row; dragGroup = row.closest('.lg-chgroup');
+    dragEl = row; dragGroup = row.closest('.lg-chgroup'); dropped = false;
+    origOrder = dragGroup ? [...dragGroup.querySelectorAll('.lg-chrow')] : null; // snapshot to restore on a cancelled drag
     row.classList.add('dragging');
     e.dataTransfer.effectAllowed = 'move';
     try { e.dataTransfer.setData('text/plain', row.dataset.mapid || ''); } catch { /* older WebView */ }
@@ -805,11 +881,15 @@ function wireLeagueDnd(root) {
   root.addEventListener('drop', e => {
     if (!dragEl) return;
     e.preventDefault();
+    dropped = true;
     commitGroupOrder(dragEl.closest('.lg-chgroup'));
   });
   root.addEventListener('dragend', () => {
+    // A cancelled drag (Esc, or a drop outside the group) never commits — restore the snapshot order so the DOM
+    // doesn't keep a reordering the server never saw (audit UI-LG-04).
+    if (!dropped && dragGroup && origOrder) origOrder.forEach(r => dragGroup.appendChild(r));
     if (dragEl) { dragEl.classList.remove('dragging'); dragEl.setAttribute('draggable', 'false'); }
-    dragEl = null; dragGroup = null;
+    dragEl = null; dragGroup = null; origOrder = null; dropped = false;
   });
 }
 async function commitGroupOrder(group) {
@@ -1159,15 +1239,37 @@ function plexSettingsPane() {
 }
 
 function emptyBox(msg) { return `<div class="empty">${I.recordings}<div>${esc(msg)}</div></div>`; }
+// A LOAD-FAILURE state (audit UI-LOAD-01) — visually and semantically distinct from an empty result, with a Retry.
+function errorBox(msg) { return `<div class="empty"><div style="color:var(--warn);font-weight:600">${esc(msg)}</div><div style="margin-top:10px"><button class="ghost sm" onclick="render()">Retry</button></div></div>`; }
 
 // =========================================================================
 // Channel cascade (Source → Group → Channel, each with keyword search)
 // =========================================================================
+// Keyboard model for a custom .picklist listbox (audit A11Y-01): roving focus (rows are tabindex=-1, the container
+// tabindex=0), arrow/Home/End move focus, Enter/Space activates the focused row via its existing click handler.
+// Wired once on the persistent container — the rows re-render inside it on every filter, but the listener delegates.
+function wirePicklist(list) {
+  if (!list || list._picklistWired) return;
+  list._picklistWired = true;
+  list.addEventListener('keydown', e => {
+    const rows = [...list.querySelectorAll('.pickrow[data-id]')];
+    if (!rows.length) return;
+    const cur = (document.activeElement && document.activeElement.closest) ? document.activeElement.closest('.pickrow[data-id]') : null;
+    const idx = cur ? rows.indexOf(cur) : -1;
+    if (e.key === 'ArrowDown') { e.preventDefault(); rows[Math.min(rows.length - 1, idx + 1)].focus(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); rows[idx <= 0 ? 0 : idx - 1].focus(); }
+    else if (e.key === 'Home') { e.preventDefault(); rows[0].focus(); }
+    else if (e.key === 'End') { e.preventDefault(); rows[rows.length - 1].focus(); }
+    else if ((e.key === 'Enter' || e.key === ' ') && cur) { e.preventDefault(); cur.click(); }
+  });
+}
+
 async function buildChannelCascade(host, prefill = {}, opts = {}) {
   const multi = !!opts.multi;                          // multi-select (Map dialog) vs single-select (Schedule dialog)
   const selection = multi ? new Map() : null;          // id(string) -> { id, name, source } — persists across source/group switches
   const sources = await api.get('/api/sources');
-  if (!sources.length) { host.innerHTML = `<div class="note">No sources yet — add one first (Sources page).</div>`; return; }
+  if (!host.isConnected) return;                       // the modal was closed while this was loading (audit UI-ASYNC-02)
+  if (!Array.isArray(sources) || !sources.length) { host.innerHTML = `<div class="note">No sources yet — add one first (Sources page).</div>`; return; }
   const srcLabel = () => ((sources.find(s => String(s.id) === $('#cascSrc').value) || {}).label || '');
   // Default to the first ENABLED source so we never steer the user at an off-limits/disabled credential.
   const startSrc = prefill.sourceId != null ? String(prefill.sourceId) : String((sources.find(s => s.enabled) || sources[0]).id);
@@ -1193,13 +1295,14 @@ async function buildChannelCascade(host, prefill = {}, opts = {}) {
       const label = c.name + (c.group ? ` — ${c.group}` : '');
       if (multi) {
         const on = selection.has(String(c.id));
-        return `<div class="pickrow multi${on ? ' sel' : ''}" role="option" aria-selected="${on}" data-id="${c.id}" data-name="${esc(c.name)}" title="${esc(label)}"><span class="pick-box"></span><span class="pick-lbl">${esc(label)}</span></div>`;
+        return `<div class="pickrow multi${on ? ' sel' : ''}" role="option" aria-selected="${on}" tabindex="-1" data-id="${c.id}" data-name="${esc(c.name)}" title="${esc(label)}"><span class="pick-box"></span><span class="pick-lbl">${esc(label)}</span></div>`;
       }
-      return `<div class="pickrow${String(c.id) === String(sel) ? ' sel' : ''}" role="option" data-id="${c.id}" title="${esc(label)}">${esc(label)}</div>`;
+      const on = String(c.id) === String(sel);
+      return `<div class="pickrow${on ? ' sel' : ''}" role="option" aria-selected="${on}" tabindex="-1" data-id="${c.id}" title="${esc(label)}">${esc(label)}</div>`;
     }).join('');
   };
-  const loadGroups = async () => { groups = await api.get(`/api/channels/groups?source=${$('#cascSrc').value}`); renderGroups(); };
-  const loadChannels = async () => { chans = await api.get(`/api/channels?source=${$('#cascSrc').value}&group=${encodeURIComponent($('#cascGrp').value)}&take=1000`); renderChannels(); };
+  const loadGroups = async () => { const g = await api.get(`/api/channels/groups?source=${$('#cascSrc').value}`); if (!host.isConnected) return; groups = Array.isArray(g) ? g : []; renderGroups(); };
+  const loadChannels = async () => { const c = await api.get(`/api/channels?source=${$('#cascSrc').value}&group=${encodeURIComponent($('#cascGrp').value)}&take=1000`); if (!host.isConnected) return; chans = Array.isArray(c) ? c : []; renderChannels(); };
   // Click a row → single-select: record its id in the hidden input + move the highlight; multi-select: toggle it in
   // the selection Map (which persists across source/group switches) and let the modal re-render its chip list.
   $('#cascChList').onclick = (e) => {
@@ -1237,11 +1340,12 @@ async function buildChannelCascade(host, prefill = {}, opts = {}) {
     const list = $('#cascChList');
     if (![...list.children].some(r => String(r.dataset.id) === String(prefill.channelId))) {
       const label = prefill.channelName || ('channel ' + prefill.channelId);
-      list.insertAdjacentHTML('afterbegin', `<div class="pickrow" role="option" data-id="${prefill.channelId}" title="${esc(label)}">${esc(label)}</div>`);
+      list.insertAdjacentHTML('afterbegin', `<div class="pickrow" role="option" aria-selected="true" tabindex="-1" data-id="${prefill.channelId}" title="${esc(label)}">${esc(label)}</div>`);
     }
     $('#cascCh').value = String(prefill.channelId);
     [...list.children].forEach(r => r.classList.toggle('sel', String(r.dataset.id) === String(prefill.channelId)));
   }
+  wirePicklist($('#cascChList')); // keyboard navigation for the channel listbox (audit A11Y-01)
   // Multi-select callers (Map dialog) drive their own chip list + submit from the live selection Map; `refresh`
   // re-renders the channel list so removing a chip un-ticks its row even when it's the current source/group view.
   if (multi) return { selection, refresh: renderChannels };
@@ -1420,9 +1524,11 @@ async function openImportModal(id, startUtc, title) {
     if (!f.length) { list.innerHTML = `<div class="muted" style="padding:8px 11px">(no games)</div>`; return; }
     list.innerHTML = f.slice(0, 500).map(g => {
       const label = g.title + (g.date ? ` — ${dtime(g.date)}` : '');
-      return `<div class="pickrow${String(g.id) === String(sel) ? ' sel' : ''}" role="option" data-id="${g.id}" title="${esc(label)}">${esc(label)}</div>`;
+      const on = String(g.id) === String(sel);
+      return `<div class="pickrow${on ? ' sel' : ''}" role="option" aria-selected="${on}" tabindex="-1" data-id="${g.id}" title="${esc(label)}">${esc(label)}</div>`;
     }).join('');
   };
+  wirePicklist($('#impGameList')); // keyboard navigation for the game listbox (audit A11Y-01)
   const clearGames = () => { games = []; $('#impGame').value = ''; $('#impGameQ').value = ''; $('#impGameQ').disabled = true; $('#impGameList').innerHTML = `<div class="muted" style="padding:8px 11px">— pick a league first —</div>`; $('#impGo').disabled = true; };
   clearGames();
   $('#impSport').onchange = async () => {
@@ -1632,6 +1738,7 @@ async function saveSettings() {
 async function openLeagueModal(id) {
   const x = id != null ? (window._leagues || []).find(l => l.id === id) : null;
   const edit = !!x;
+  const gen = modalGen() + 1; // this modal's generation (modal() bumps it next) — async loaders bail if it's superseded
   modal(`<h2>${edit ? 'Edit' : 'Add'} league</h2>
     <div id="lHeader" class="lg-modal-head"></div>
     <div class="fields">
@@ -1674,7 +1781,7 @@ async function openLeagueModal(id) {
         <div id="lSessDur" class="set-grid"></div>
       </div>
     </details>
-    <div class="foot"><button class="ghost" onclick="closeModals()">Cancel</button><button onclick="submitLeague(${edit ? x.id : 'null'})">${edit ? 'Save' : 'Add'} league</button></div>`, 'min(720px,96vw)');
+    <div class="foot"><button class="ghost" onclick="closeModals()">Cancel</button><button id="lSubmit" onclick="submitLeague(${edit ? x.id : 'null'})">${edit ? 'Save' : 'Add'} league</button></div>`, 'min(720px,96vw)');
 
   $('#lSwatches').querySelectorAll('.swatch').forEach(sw => sw.addEventListener('click', () => {
     $('#lSwatches').querySelectorAll('.swatch').forEach(o => o.classList.remove('sel'));
@@ -1700,7 +1807,7 @@ async function openLeagueModal(id) {
     if (!leagueId) { $('#lHeader').innerHTML = ''; $('#lTeamsWrap').style.display = 'none'; $('#lSessionsWrap').style.display = 'none'; $('#lSessDurBlock').style.display = 'none'; return; }
     $('#lHeader').innerHTML = '<span class="muted" style="font-size:12px">Loading league…</span>';
     const d = await api.get('/api/tsdb/league/' + encodeURIComponent(leagueId));
-    if (seq !== pickSeq) return; // a newer pick superseded this response — drop it
+    if (!modalAlive(gen) || seq !== pickSeq) return; // modal closed/reused, or a newer pick superseded this (audit UI-ASYNC-02)
     if (!d || d.error || !d.name) { $('#lHeader').innerHTML = '<span class="muted" style="font-size:12px">Couldn’t load that league id.</span>'; $('#lTeamsWrap').style.display = 'none'; $('#lSessionsWrap').style.display = 'none'; $('#lSessDurBlock').style.display = 'none'; return; }
     const art = d.badge || d.poster;
     $('#lHeader').innerHTML = `${art ? `<img src="${esc(art)}" alt="" class="lg-modal-badge"/>` : ''}<div><b>${esc(d.name)}</b><div class="muted" style="font-size:12px">${esc(d.sport || '')} · #${esc(String(d.id))}</div></div>`;
@@ -1742,22 +1849,36 @@ async function openLeagueModal(id) {
   };
 
   let leagues = [];
+  // The league the header/teams are currently loaded for. renderLeagues keeps THIS league selected (injecting it if a
+  // filter scrolls it out of view) so the visible header and the submitted league can never disagree — fixing the
+  // "type in the search box → first filtered option silently submits instead of what's shown" desync (audit UI-LG-02).
+  let lastPicked = x?.externalLeagueId || null;
   const renderLeagues = () => {
     const q = $('#lLeagueQ').value;
     const f = q ? leagues.filter(l => tokensMatch(`${l.name} ${l.alternate || ''} ${l.country || ''}`, q)) : leagues;
-    $('#lLeague').innerHTML = f.slice(0, 500).map(l => `<option value="${esc(l.id)}" data-name="${esc(l.name)}" data-sport="${esc(l.sport)}" ${x?.externalLeagueId === l.id ? 'selected' : ''}>${esc(l.name)}${l.country ? ` (${esc(l.country)})` : ''}</option>`).join('') || '<option value="">(no leagues)</option>';
+    let opts = f.slice(0, 500).map(l => `<option value="${esc(l.id)}" data-name="${esc(l.name)}" data-sport="${esc(l.sport)}" ${String(l.id) === String(lastPicked) ? 'selected' : ''}>${esc(l.name)}${l.country ? ` (${esc(l.country)})` : ''}</option>`).join('');
+    // Test the RENDERED slice, not the full filtered list: with >500 leagues a picked league past index 500 would be
+    // omitted from the options yet skipped here, leaving nothing selected and desyncing header vs submit (review fix).
+    if (lastPicked && !f.slice(0, 500).some(l => String(l.id) === String(lastPicked))) {
+      const p = leagues.find(l => String(l.id) === String(lastPicked));
+      if (p) opts = `<option value="${esc(p.id)}" data-name="${esc(p.name)}" data-sport="${esc(p.sport)}" selected>${esc(p.name)}${p.country ? ` (${esc(p.country)})` : ''}</option>` + opts;
+    }
+    $('#lLeague').innerHTML = opts || '<option value="">(no leagues)</option>';
   };
   const loadLeagues = async () => {
     $('#lLeague').innerHTML = '<option>Loading…</option>';
-    leagues = await api.get('/api/tsdb/leagues?sport=' + encodeURIComponent($('#lSport').value));
-    if (!Array.isArray(leagues)) leagues = [];
+    const res = await api.get('/api/tsdb/leagues?sport=' + encodeURIComponent($('#lSport').value));
+    if (!modalAlive(gen)) return; // modal closed/reused while loading (audit UI-ASYNC-02)
+    leagues = Array.isArray(res) ? res : [];
     renderLeagues();
   };
   const sports = await api.get('/api/tsdb/sports');
+  if (!modalAlive(gen)) return;
   $('#lSport').innerHTML = (Array.isArray(sports) ? sports : []).map(s => `<option ${x?.sport === s.name ? 'selected' : ''}>${esc(s.name)}</option>`).join('') || '<option>(TheSportsDB unavailable)</option>';
   $('#lSport').onchange = loadLeagues;
   let lt; $('#lLeagueQ').oninput = () => { clearTimeout(lt); lt = setTimeout(renderLeagues, 150); };
-  $('#lLeague').onchange = () => { $('#lManualId').value = ''; onLeaguePicked($('#lLeague').value); };
+  // An explicit list pick becomes the new lastPicked and drives the header (change fires reliably on a real click).
+  $('#lLeague').onchange = () => { $('#lManualId').value = ''; lastPicked = $('#lLeague').value || null; onLeaguePicked($('#lLeague').value); };
   let mt; $('#lManualId').oninput = () => { clearTimeout(mt); mt = setTimeout(() => onLeaguePicked($('#lManualId').value.trim()), 400); };
   await loadLeagues();
   if (x?.externalLeagueId) await onLeaguePicked(x.externalLeagueId); // edit (or pre-filled id) → load header + teams now
@@ -1791,9 +1912,16 @@ async function submitLeague(id) {
 
     monitoredTeams, monitoredSessions, sessionDurations,
   };
+  // Keep the dialog open until the write succeeds, so a rejected save doesn't discard everything the user entered
+  // behind a bare toast (audit UI-SUBMIT-01).
+  const btn = $('#lSubmit'); const label = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  const restore = () => { if (btn) { btn.disabled = false; btn.textContent = label; } };
+  let r; try { r = id == null ? await api.post('/api/leagues', body) : await api.put('/api/leagues/' + id, body); }
+  catch { restore(); return toast('Network error — try again', 'err'); } // a rejected fetch must not strand the button (audit UI-SUBMIT-01)
+  if (r.error) { toast(r.error, 'err'); restore(); return; }
   closeModals();
-  if (id == null) { const r = await api.post('/api/leagues', body); toast(r.error ? r.error : 'League added', r.error ? 'err' : 'ok'); }
-  else { const r = await api.put('/api/leagues/' + id, body); toast(r.error ? r.error : 'League saved', r.error ? 'err' : 'ok'); }
+  toast(id == null ? 'League added' : 'League saved', 'ok');
   render();
 }
 async function deleteLeague(id, name) { if (!confirm(`Delete league “${name}”? Removes its events & mappings.`)) return; const r = await api.del('/api/leagues/' + id); if (r.error) return toast(r.error, 'err'); toast('League deleted', 'ok'); render(); }
@@ -1802,7 +1930,14 @@ async function syncLeague(id) { toast('Syncing events…'); const r = await api.
 // Multi-select Map dialog: tick several channels (accumulating across sources/groups into chips), optionally scope to
 // one team, then "Add all" POSTs the batch to /api/mappings/bulk. `_mapPicker` holds the live selection Map for submit.
 let _mapPicker = null;
+// Deterministic team scope for the pending submit (audit UI-LG-01): if the modal was opened from "+ Add team", the
+// team the user intends is known up front — so a submit before the async team <select> populates still scopes
+// correctly instead of silently becoming a whole-league mapping.
+let _mapPreset = null;
 async function openMapModal(leagueId, name, presetTeamId, presetTeamName) {
+  _mapPicker = null; // reset synchronously so a stale selection from a previous Map dialog can't be submitted here
+  _mapPreset = presetTeamId != null ? { teamId: String(presetTeamId), teamName: presetTeamName || null } : null;
+  const gen = modalGen() + 1; // this modal's generation (modal() bumps it on the next line)
   modal(`<h2>Map channels — ${esc(name)}</h2>
     <div class="fields" id="mapCascade"></div>
     <div class="lg-sel-hdr" id="mapSelHdr">0 selected</div>
@@ -1810,20 +1945,26 @@ async function openMapModal(leagueId, name, presetTeamId, presetTeamName) {
     <div id="mapSelChips" class="lg-chips"><span class="muted" style="font-size:12px">None yet — tick channels above.</span></div>
     <div class="fields" style="margin-top:12px;border-top:1px solid var(--line);padding-top:12px">
       <label class="field" id="mTeamWrap" style="display:none">Team — only this team's games use these channels<select id="mTeam"><option value="">Whole league (every game)</option></select></label>
-      <label class="field">Starting priority (rank) for this batch — 1 = first choice<input id="mRank" type="number" min="1" step="1" value="1"/></label>
+      <label class="field">Priority for this batch <span class="muted">(new channels are added after existing ones; drag or use ▲▼ to reorder afterwards)</span><input id="mRank" type="number" min="1" step="1" value="1"/></label>
       <label class="field" style="flex-direction:row;align-items:center;gap:8px"><input id="mPin" type="checkbox" checked style="width:auto"/> Pinned — your pick beats EPG guessing</label>
     </div>
-    <div class="muted" style="font-size:12px;margin-top:8px;line-height:1.5">Rank 1 records first; if it won't open or drops out, DVarr falls back to rank 2, 3… (same provider login). Add several channels carrying the same event for resilience. To use a channel for just one team's games, pick the team above.</div>
-    <div class="foot"><button class="ghost" onclick="closeModals()">Cancel</button><button onclick="submitMap(${leagueId})">Add all</button></div>`, 'min(560px,94vw)');
-  _mapPicker = await buildChannelCascade($('#mapCascade'), {}, { multi: true, onChange: renderMapSel });
+    <div class="muted" style="font-size:12px;margin-top:8px;line-height:1.5">DVarr records the best-ranked channel; if it won't open or drops out, it falls back to the next (same provider login). Add several channels carrying the same event for resilience. To use a channel for just one team's games, pick the team above.</div>
+    <div class="foot"><button class="ghost" onclick="closeModals()">Cancel</button><button id="mSubmit" onclick="submitMap(${leagueId})" disabled>Add all</button></div>`, 'min(560px,94vw)');
+  let picker;
+  try { picker = await buildChannelCascade($('#mapCascade'), {}, { multi: true, onChange: renderMapSel }); }
+  catch { if (modalAlive(gen)) $('#mapCascade').innerHTML = `<div class="note warn">Couldn't load channels — check your connection and reopen.</div>`; return; }
+  if (!modalAlive(gen)) return;               // modal closed/superseded while the cascade loaded — don't revive _mapPicker
+  _mapPicker = picker;
+  const submit = $('#mSubmit'); if (submit) submit.disabled = false; // only actionable once the picker is ready (audit UI-LG-01)
   renderMapSel();
   // Team scope (issue #5): offer the league's team list (team sports only) so channels can be mapped to ONE team's
   // games. Followed teams sort first (they're the ones being recorded) and are starred. A preset (from "+ Add team")
   // selects that team once the list arrives.
   const lg = (window._leagues || []).find(l => l.id === leagueId);
   if (lg && lg.externalLeagueId) api.get(`/api/tsdb/league/${encodeURIComponent(lg.externalLeagueId)}`).then(d => {
+    if (!modalAlive(gen)) return;             // a later modal reused these element ids — don't populate it (audit UI-ASYNC-02)
     if (!d || !d.teamSport || !Array.isArray(d.teams) || !d.teams.length) return;
-    const sel = $('#mTeam'); if (!sel) return; // modal was closed before the team list arrived
+    const sel = $('#mTeam'); if (!sel) return;
     const followed = new Set((lg.monitoredTeams || []).map(t => String(t.id)));
     const teams = [...d.teams].sort((a, b) => (followed.has(String(b.id)) - followed.has(String(a.id))) || String(a.name || '').localeCompare(String(b.name || '')));
     sel.innerHTML = `<option value="">Whole league (every game)</option>` + teams.map(t => `<option value="${esc(t.id)}" data-name="${esc(t.name)}">${esc(t.name)}${followed.has(String(t.id)) ? ' ★' : ''}</option>`).join('');
@@ -1859,13 +2000,24 @@ async function submitMap(leagueId) {
   const channelIds = sel ? [...sel.keys()].map(Number) : [];
   if (!channelIds.length) return toast('Pick at least one channel', 'err');
   const teamSel = $('#mTeam');
-  const teamId = teamSel && teamSel.value ? teamSel.value : null;
-  const teamName = teamId ? ((teamSel.selectedOptions[0] || {}).dataset || {}).name || null : null;
+  // Team scope: ONCE the team picker is shown (team sport), the live <select> is authoritative — an explicit "Whole
+  // league" pick (value "") must map league-wide. Only while the picker is still hidden (list not loaded yet) do we
+  // fall back to the preset the modal was opened with (audit UI-LG-01 + its own review fix: don't let the preset
+  // override an explicit whole-league choice).
+  const teamShown = $('#mTeamWrap') && $('#mTeamWrap').style.display !== 'none';
+  const teamId = teamShown ? (teamSel && teamSel.value ? teamSel.value : null) : (_mapPreset ? _mapPreset.teamId : null);
+  const teamName = teamShown
+    ? (teamId ? (((teamSel.selectedOptions[0] || {}).dataset || {}).name || null) : null)
+    : (_mapPreset ? _mapPreset.teamName : null);
   const body = { leagueId, teamId, teamName, channelIds, pinned: $('#mPin').checked, startRank: Math.max(1, parseInt($('#mRank').value) || 1) };
+  // Keep the dialog (and the user's multi-channel selection) until the write actually succeeds (audit UI-SUBMIT-01).
+  // A rejected fetch (server down / dropped connection) must re-enable the button too, not just an HTTP error body.
+  const btn = $('#mSubmit'); if (btn) { btn.disabled = true; btn.textContent = 'Adding…'; }
+  let r; try { r = await api.post('/api/mappings/bulk', body); }
+  catch { if (btn) { btn.disabled = false; btn.textContent = 'Add all'; } return toast('Network error — try again', 'err'); }
+  if (r.error) { toast(r.error, 'err'); if (btn) { btn.disabled = false; btn.textContent = 'Add all'; } return; }
   closeModals();
-  const r = await api.post('/api/mappings/bulk', body);
-  if (r.error) toast(r.error, 'err');
-  else toast(`Added ${r.added} channel${r.added === 1 ? '' : 's'}${r.skipped ? ` · ${r.skipped} skipped` : ''}`, r.added ? 'ok' : '');
+  toast(`Added ${r.added} channel${r.added === 1 ? '' : 's'}${r.skipped ? ` · ${r.skipped} skipped` : ''}`, r.added ? 'ok' : '');
   render();
 }
 async function deleteMapping(id) { const r = await api.del('/api/mappings/' + id); if (r.error) return toast(r.error, 'err'); toast('Mapping removed'); render(); }
@@ -1931,8 +2083,8 @@ window.ingest = ingest; window.doIngest = doIngest; window.saveSettings = saveSe
 window.toggleKebab = toggleKebab; window.closeKebabs = closeKebabs;
 window.syncEpg = syncEpg; window.doSyncEpg = doSyncEpg; window.openSourceModal = openSourceModal; window.submitSource = submitSource; window.deleteSource = deleteSource; window.refreshAccount = refreshAccount;
 window.openLeagueModal = openLeagueModal; window.submitLeague = submitLeague; window.deleteLeague = deleteLeague; window.syncLeague = syncLeague;
-window.openMapModal = openMapModal; window.submitMap = submitMap; window.deleteMapping = deleteMapping;
-window.toggleLeagueCard = toggleLeagueCard; window.clearMapSel = clearMapSel; window.removeMapSel = removeMapSel;
+window.openMapModal = openMapModal; window.submitMap = submitMap; window.deleteMapping = deleteMapping; window.moveMapping = moveMapping;
+window.toggleLeagueCard = toggleLeagueCard; window.clearMapSel = clearMapSel; window.removeMapSel = removeMapSel; window.chanTap = chanTap;
 window.openEventModal = openEventModal; window.submitEvent = submitEvent; window.monitorEvent = monitorEvent; window.resolvePreview = resolvePreview; window.openCalEvent = openCalEvent;
 window.copyText = copyText; window.openCalendarFeedModal = openCalendarFeedModal; window.saveCalendarPublicBase = saveCalendarPublicBase; window.editCalendarPublicBase = editCalendarPublicBase;
 window.donate = donate;
@@ -1944,12 +2096,13 @@ buildNav();
   const sc = $('#scrim'); if (sc) sc.addEventListener('click', closeDrawer);
   const menu = $('#menu'); if (menu) menu.addEventListener('click', e => { if (e.target.closest('.nav-item')) closeDrawer(); });
 })();
-if (!location.hash) location.hash = '#/dashboard';
-// Load the configured display timezone BEFORE the first paint so every time renders in the right zone from the
-// start (a failed fetch just keeps the Brisbane default — the page must never be blocked by this).
+// Load the configured display timezone BEFORE the first paint, then render exactly ONCE (audit UI-INIT-01): the old
+// order set the default hash first, whose hashchange fired an early render on the wrong (default) timezone, then the
+// settings IIFE rendered again — a double paint with a wrong-zone flash for non-Brisbane users on a fresh visit.
 (async () => {
   try { const s = await api.get('/api/settings'); setDisplayTz(s && s.timezone_display); } catch { /* default stands */ }
-  render();
+  if (!location.hash) location.hash = '#/dashboard'; // fires hashchange → render, now with the correct zone set
+  else render();                                     // deep-linked hash: initial load doesn't fire hashchange, so render now
   pollHealth();
   setInterval(pollHealth, 5000);
 })();
