@@ -12,6 +12,20 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.40.0] — 2026-07-14
+Chapter markers in finished recordings, a tougher auto-stop, and a Library you can fold up (Discord requests).
+
+### Added
+- **Chapter markers.** While a recording is live, DVarr tracks the match's status from TheSportsDB and embeds the transitions as chapters in the finished file — **Kick-off, Half-time, Second half, Extra time, Penalty shoot-out, Full time** (plus a Pre-game chapter covering the pre-roll). They're standard embedded Matroska chapters, so Plex, Jellyfin, Emby, Kodi and VLC all read them natively with no sidecar files. Built soccer-first, but any sport's statuses (quarters, overtime…) become chapters automatically as their own names. Toggle: Settings → Recording → "Chapter markers" (on by default; works even for leagues with auto-stop set to fixed).
+- **Collapsible Library.** Every league section folds up with the chevron on the right, and a league with **followed teams** now groups its games under a collapsible section per team (a game between two followed teams shows under both), with everything else under "Other games". Collapse state is remembered.
+
+### Fixed / Hardened
+- **Auto-stop can no longer be fooled by a premature "FT".** For the record: auto-stop always keyed on the **match status**, never the scoreline — a 0-0 game into extra time keeps extending regardless of score. What could bite was a feed briefly showing "FT" at the end of regulation before flipping to extra time: a terminal status must now **persist across two polls (~2½ minutes)** before the window is trimmed, and any in-play sighting resets the timer. Fail long, always.
+- **Penalty-shootout statuses ("PEN"/"P"/"PT") are now explicitly IN-PLAY**, never terminal — feeds are inconsistent about whether they mean "shootout running" or "finished after penalties", and trimming mid-shootout is the one mistake this feature exists to prevent. Spelled-out statuses ("Extra Time", "Half Time"…) are recognised too.
+- Match status is now tracked for the **whole game** (needed for chapters), not just near the scheduled end; extend/clamp decisions still only apply near the end.
+- The smart auto-stop toggle now appears properly labelled under Settings → Recording (it previously hid in Advanced).
+- PWA shell cache version catches up (an app-shell update could lag behind on installed PWAs).
+
 ## [1.39.0] — 2026-07-14
 Community feature batch (Discord requests): recording priority for leagues & teams, per-mapping pin editing, hide/favourite for channels & groups, real pagination on the Channels page, and a Library alignment fix.
 

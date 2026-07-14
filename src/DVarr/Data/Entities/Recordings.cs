@@ -53,6 +53,11 @@ public class Recording
 
     /// <summary>List of {start_utc, duration_s} true-missing-time gaps (docs/04 §5.4).</summary>
     public string? GapsJson { get; set; }
+
+    /// <summary>Live match-status transitions observed while recording — JSON array of {t (epoch s), s (raw
+    /// TheSportsDB status), p (match minute)} appended by AutoStopService. Finalize turns them into embedded
+    /// MKV chapters (Kick-off / Half-time / Extra time / Penalty shoot-out…). Null = none observed.</summary>
+    public string? LiveMarksJson { get; set; }
     public string? FailureReason { get; set; }
 
     /// <summary>{resolved_channel_id, fallbacks[], score, confidence, resolver_version, resolved_at} — a snapshot, not a frozen event copy (bug #3).</summary>

@@ -103,6 +103,11 @@ public sealed class SettingsService
         // scheduled end and EXTENDS the window while the event is still in play (extra time / penalties), closing it
         // once the guide reports a terminal status. Never shortens below the scheduled window. OFF = fixed windows only.
         ["auto_stop_enabled"] = "true",
+        // Chapter markers: while a recording is live, AutoStopService also records the match's status transitions
+        // (kick-off, half-time, extra time, penalties, full time) and finalize embeds them as MKV chapters that
+        // Plex/Jellyfin/Kodi/VLC read natively. Independent of auto_stop_enabled (a "fixed" league still gets
+        // chapters); OFF = no status polling for chapter purposes.
+        ["chapter_marks_enabled"] = "true",
         ["timezone_display"] = "Australia/Brisbane",
         ["ha_webhook_url"] = "",
         // Public base URL of this DVarr instance (e.g. https://dvr.example.com), used to build the externally-reachable

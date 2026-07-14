@@ -527,6 +527,8 @@ PAGES.library = {
       if (gen !== render._seq) return;
       if (!data || !Array.isArray(data.items)) return; // transient API error — keep the current view
       window._libItems = {}; data.items.forEach(i => { window._libItems[i.id] = i; });
+      // leagueId → followed teams [{id,name}] — drives the per-team grouping inside a league's section.
+      window._libFollows = {}; (data.leagues || []).forEach(l => { window._libFollows[l.id] = l.followedTeams || []; });
       const t = data.totals || {};
       const disk = data.disk ? ` · ${gb(data.disk.freeBytes)} free on disk` : '';
       const extras = [t.unsorted ? `${t.unsorted} unsorted` : '', t.missing ? `${t.missing} missing` : ''].filter(Boolean).join(' · ');
@@ -546,7 +548,22 @@ PAGES.library = {
   },
 };
 
-// League (show) sections; Unsorted pinned on top when non-empty.
+// League (show) sections; Unsorted pinned on top when non-empty. Sections (and team sub-sections in a
+// followed-team league) are collapsible — state persists across refreshes/visits in localStorage.
+const _libCollapsed = (() => { try { return JSON.parse(localStorage.getItem('libCollapsed') || '{}'); } catch { return {}; } })();
+function libToggle(key, headEl) {
+  _libCollapsed[key] = !_libCollapsed[key];
+  try { localStorage.setItem('libCollapsed', JSON.stringify(_libCollapsed)); } catch { }
+  const body = headEl.parentNode.querySelector(':scope > .lib-body');
+  if (body) body.style.display = _libCollapsed[key] ? 'none' : '';
+  const ch = headEl.querySelector('.lib-chev svg');
+  if (ch) ch.style.transform = _libCollapsed[key] ? 'rotate(-90deg)' : 'rotate(0deg)';
+  headEl.setAttribute('aria-expanded', _libCollapsed[key] ? 'false' : 'true');
+}
+const libChev = collapsed => `<span class="lib-chev" style="display:inline-flex;margin-left:10px;color:var(--dim)"><svg viewBox="0 0 24 24" style="width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2;transition:transform .15s;transform:rotate(${collapsed ? -90 : 0}deg)"><path d="M6 9l6 6 6-6"/></svg></span>`;
+// Clickable + keyboard-operable section header attributes (the whole head is the toggle; no buttons live in it).
+const libHeadAttrs = key => `role="button" tabindex="0" aria-expanded="${_libCollapsed[key] ? 'false' : 'true'}" style="cursor:pointer" onclick="libToggle('${jsq(key)}', this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();libToggle('${jsq(key)}', this)}"`;
+
 function libGroups(items) {
   const unsorted = items.filter(i => i.unsorted);
   const filed = items.filter(i => !i.unsorted);
@@ -559,16 +576,58 @@ function libGroups(items) {
 }
 
 function libSection(name, items, isUnsorted) {
+  const key = isUnsorted ? 'unsorted' : 'lg:' + name;
+  const collapsed = !!_libCollapsed[key];
   const bytes = items.reduce((a, i) => a + (i.status === 'Missing' ? 0 : (i.bytes || 0)), 0);
+
+  // A league with FOLLOWED teams groups its games under per-team sub-sections (each collapsible);
+  // games matching no followed team fall into "Other games". Everything else keeps the season layout.
+  const leagueId = items.find(i => i.leagueId != null)?.leagueId;
+  const follows = !isUnsorted && leagueId != null ? ((window._libFollows || {})[leagueId] || []) : [];
+  const body = follows.length ? libTeamGroups(name, items, follows) : libSeasonGroups(items, isUnsorted);
+
+  return `<div class="panel" style="margin-bottom:14px">
+    <div class="panel-head" ${libHeadAttrs(key)}>${isUnsorted ? I.conflicts : I.library}<span class="panel-title">${esc(name)}</span><span class="count-pill">${items.length}</span><span class="muted" style="margin-left:auto;font-size:12px">${gb(bytes)}</span>${libChev(collapsed)}</div>
+    <div class="panel-body lib-body"${collapsed ? ' style="display:none"' : ''}>${body}</div></div>`;
+}
+
+// Classic season → games layout (leagues without followed teams, and the Unsorted group).
+function libSeasonGroups(items, isUnsorted) {
   const seasons = new Map();
   items.forEach(i => { const k = isUnsorted ? -1 : (i.season || 0); if (!seasons.has(k)) seasons.set(k, []); seasons.get(k).push(i); });
-  const seasonKeys = [...seasons.keys()].sort((a, b) => b - a);
-  return `<div class="panel" style="margin-bottom:14px">
-    <div class="panel-head">${isUnsorted ? I.conflicts : I.library}<span class="panel-title">${esc(name)}</span><span class="count-pill">${items.length}</span><span class="muted" style="margin-left:auto;font-size:12px">${gb(bytes)}</span></div>
-    <div class="panel-body">${seasonKeys.map(sk => `
-      ${sk > 0 ? `<div class="muted" style="font-size:12px;margin:10px 4px 4px;text-transform:uppercase;letter-spacing:.4px">Season ${sk}</div>` : ''}
-      ${libTable(seasons.get(sk).slice().sort((a, b) => (b.startUtc || 0) - (a.startUtc || 0)))}`).join('')}
-    </div></div>`;
+  return [...seasons.keys()].sort((a, b) => b - a).map(sk => `
+    ${sk > 0 ? `<div class="muted" style="font-size:12px;margin:10px 4px 4px;text-transform:uppercase;letter-spacing:.4px">Season ${sk}</div>` : ''}
+    ${libTable(seasons.get(sk).slice().sort((a, b) => (b.startUtc || 0) - (a.startUtc || 0)))}`).join('');
+}
+
+// Followed-team layout: one collapsible sub-section per followed team, then "Other games" for the rest.
+// A game between two followed teams appears under both (it IS both teams' game).
+function libTeamGroups(showName, items, follows) {
+  const inTeam = (i, t) => (i.homeTeamId && i.homeTeamId === t.id) || (i.awayTeamId && i.awayTeamId === t.id)
+    // Adopted/unlinked files have no team ids — fall back to the team name appearing in the game title.
+    || (!i.homeTeamId && !i.awayTeamId && t.name && tokensMatch(i.title, t.name));
+  const claimed = new Set();
+  const groups = follows.slice().sort((a, b) => (a.name || '').localeCompare(b.name || '')).map(t => {
+    const games = items.filter(i => inTeam(i, t));
+    games.forEach(i => claimed.add(i.id));
+    return { team: t, games };
+  }).filter(g => g.games.length);
+  const other = items.filter(i => !claimed.has(i.id));
+
+  const teamBlock = (label, key, games) => {
+    const collapsed = !!_libCollapsed[key];
+    const bytes = games.reduce((a, i) => a + (i.status === 'Missing' ? 0 : (i.bytes || 0)), 0);
+    return `<div class="lib-team" style="margin:8px 0">
+      <div ${libHeadAttrs(key)} style="cursor:pointer;display:flex;align-items:center;gap:8px;padding:8px 4px;border-top:1px solid var(--line)">
+        <b style="font-size:13px">${esc(label)}</b><span class="count-pill">${games.length}</span>
+        <span class="muted" style="margin-left:auto;font-size:12px">${gb(bytes)}</span>${libChev(collapsed)}
+      </div>
+      <div class="lib-body"${collapsed ? ' style="display:none"' : ''}>${libTable(games.slice().sort((a, b) => (b.startUtc || 0) - (a.startUtc || 0)))}</div>
+    </div>`;
+  };
+
+  return groups.map(g => teamBlock(g.team.name || g.team.id, `tm:${showName}|${g.team.id}`, g.games)).join('')
+    + (other.length ? teamBlock('Other games', `tm:${showName}|__other`, other) : '');
 }
 
 function libTable(rows) {
@@ -1525,6 +1584,8 @@ const SETTINGS_META = {
   default_pre_pad_s: { g: 'Recording', t: 'Pre-roll padding (seconds)', h: 'How long before an event starts to begin recording.', ty: 'int' },
   default_post_pad_s: { g: 'Recording', t: 'Post-roll padding (seconds)', h: 'How long after an event ends to keep recording.', ty: 'int' },
   retry_at_event_start: { g: 'Recording', t: 'Retry at event start', h: 'If a recording captures nothing during pre-roll (the channel isn’t live yet), make one fresh attempt at the real start time.', ty: 'bool' },
+  auto_stop_enabled: { g: 'Recording', t: 'Smart auto-stop', h: 'Near a live recording’s scheduled end, watch the match status and extend while it’s still in play (extra time, penalty shoot-outs) — never shortens the scheduled window.', ty: 'bool' },
+  chapter_marks_enabled: { g: 'Recording', t: 'Chapter markers', h: 'Track the match status while recording and embed chapters (Kick-off, Half-time, Extra time, Penalty shoot-out, Full time) into the finished file — Plex, Jellyfin, Kodi and VLC all read them natively.', ty: 'bool' },
   bitrate_floor_enabled: { g: 'Reliability', t: 'Bitrate-floor placeholder detection', h: 'Fail over when a stream keeps feeding data but far too little for real content — a provider “channel offline” slate. Uses the per-tier floors below. Opt-in; needs no GPU.', ty: 'bool' },
   bitrate_floor_kbps_sd: { g: 'Reliability', t: 'SD bitrate floor (kbps)', h: 'When placeholder detection is on: an SD channel steadily below this looks like a slate and fails over. Keep it well under a real SD stream (~1 Mbps+).', ty: 'int' },
   bitrate_floor_kbps_hd: { g: 'Reliability', t: 'HD bitrate floor (kbps)', h: 'Floor for HD channels (720p/1080p) when placeholder detection is on. Real HD is several Mbps, so a low value only catches slates.', ty: 'int' },
@@ -2521,7 +2582,7 @@ window.openPreview = openPreview; window.stopRec = stopRec; window.startRec = st
 window.recToggle = recToggle; window.recToggleAll = recToggleAll; window.bulkStart = bulkStart; window.bulkResolve = bulkResolve; window.bulkStop = bulkStop; window.bulkDelete = bulkDelete; window.runPendingDelete = runPendingDelete;
 window.openImportModal = openImportModal; window.submitImport = submitImport;
 window.libScan = libScan; window.libImport = libImport; window.libDelete = libDelete; window.doLibDelete = doLibDelete;
-window.libWatch = libWatch; window.recPreview = recPreview; window.openHlsPlayer = openHlsPlayer;
+window.libWatch = libWatch; window.recPreview = recPreview; window.openHlsPlayer = openHlsPlayer; window.libToggle = libToggle;
 window.ingest = ingest; window.doIngest = doIngest; window.saveSettings = saveSettings; window.closeModals = closeModals;
 window.toggleKebab = toggleKebab; window.closeKebabs = closeKebabs;
 window.syncEpg = syncEpg; window.doSyncEpg = doSyncEpg; window.openSourceModal = openSourceModal; window.submitSource = submitSource; window.deleteSource = deleteSource; window.refreshAccount = refreshAccount;

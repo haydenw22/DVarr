@@ -733,12 +733,24 @@ public sealed class RecorderSupervisor
         if (deoverlap && (trimmed > 0 || dropped > 0 || jumpDropped > 0))
             _log.LogInformation("[Recorder] Recording {Id} de-overlap: {Trim} segment(s) trimmed, {Drop} dropped as duplicates, {Jump} dropped for internal clock jumps", recordingId, trimmed, dropped, jumpDropped);
 
+        // Chapter markers (best-effort): live status transitions recorded during capture become embedded MKV
+        // chapters, riding the SAME concat pass as a second (ffmetadata) input — zero extra IO, and Plex /
+        // Jellyfin / Kodi / VLC all read embedded Matroska chapters natively. Any failure here just finalizes
+        // the file without chapters.
+        string? chaptersPath = null;
+        try { chaptersPath = await BuildChaptersFileAsync(recordingId, segDir, segs); }
+        catch (Exception ex) { _log.LogDebug(ex, "[Recorder] chapter build failed for {Id} (finalizing without chapters)", recordingId); }
+
         var psi = new ProcessStartInfo(_d.Ffmpeg.Ffmpeg)
         { RedirectStandardError = true, RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true };
-        foreach (var a in new[]
+        var args = new List<string>
         {
             "-hide_banner", "-loglevel", "warning", "-y",
             "-f", "concat", "-safe", "0", "-i", listPath,
+        };
+        if (chaptersPath is not null) args.AddRange(new[] { "-f", "ffmetadata", "-i", chaptersPath });
+        args.AddRange(new[]
+        {
             "-map", "0:v:0", "-map", "0:a:0?",
             // VIDEO stays LOSSLESS copy; the setts BSF rewrites only a rogue >10s PTS outlier (no-op on healthy
             // frames), so a corrupt source timestamp can't inflate the container to bogus hours. DROPPED +genpts:
@@ -751,8 +763,10 @@ public sealed class RecorderSupervisor
             // instead of leaving a silent gap; make_zero rebases any small negative TS the inpoint seeks introduce.
             "-c:a", "aac", "-b:a", "256k", "-af", "aresample=async=1:min_hard_comp=0.1",
             "-avoid_negative_ts", "make_zero",
-            outputPath,
-        }) psi.ArgumentList.Add(a);
+        });
+        if (chaptersPath is not null) args.AddRange(new[] { "-map_chapters", "1" });
+        args.Add(outputPath);
+        foreach (var a in args) psi.ArgumentList.Add(a);
 
         Process? proc = null;
         try
@@ -785,6 +799,34 @@ public sealed class RecorderSupervisor
             catch { /* already gone / access race — nothing to reap */ }
             proc?.Dispose();
         }
+    }
+
+    /// <summary>Build the ffmetadata chapters file for a recording from its LiveMarksJson, anchored to the
+    /// capture's actual start (the Started notification's timestamp — TZ-proof, unlike segment filenames).
+    /// Returns the file path, or null when there is nothing chapter-worthy.</summary>
+    private async Task<string?> BuildChaptersFileAsync(int recordingId, string segDir, List<string> segs)
+    {
+        using var scope = _d.Scopes.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<DVarrDbContext>();
+        var rec = await db.Recordings.AsNoTracking().FirstOrDefaultAsync(r => r.Id == recordingId);
+        if (rec is null || string.IsNullOrWhiteSpace(rec.LiveMarksJson)) return null;
+        var marks = ChapterMarks.Parse(rec.LiveMarksJson);
+        if (marks.Count == 0) return null;
+
+        var t0 = await db.Notifications.AsNoTracking()
+            .Where(n => n.RecordingId == recordingId && n.Kind == NotificationKind.Started)
+            .OrderBy(n => n.TsUtc).Select(n => (long?)n.TsUtc).FirstOrDefaultAsync()
+            ?? rec.StartUtc - rec.PrePadS;
+
+        // Rough tail bound only (chapter ENDs are cosmetic): ~8s per captured segment.
+        var estDuration = Math.Max(60, segs.Count * 8);
+        var meta = ChapterMarks.BuildFfmetadata(marks, t0, estDuration);
+        if (meta is null) return null;
+
+        var path = Path.Combine(segDir, "chapters.ffmeta");
+        await File.WriteAllTextAsync(path, meta);
+        _log.LogInformation("[Recorder] Recording {Id}: embedding {N} live-status chapter mark(s)", recordingId, marks.Count);
+        return path;
     }
 
     /// <summary>Resolve a boolean setting from a fresh scope (finalize can run from boot-recovery, with no ambient settings).</summary>

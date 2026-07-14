@@ -37,10 +37,13 @@ public sealed class AutoStopService : BackgroundService
     };
 
     /// <summary>Guide statuses that mean the event is OVER (case-insensitive, trimmed). Soccer: FT / AET / AP
-    /// (after penalties) / PEN; generic feeds also emit the spelled-out forms; AW/WO = awarded/walk-over.</summary>
+    /// (after penalties); generic feeds also emit the spelled-out forms; AW/WO = awarded/walk-over.
+    /// NOTE "PEN"/"P"/"PT" are deliberately NOT here — feeds are inconsistent about whether they mean a
+    /// shoot-out IN PROGRESS or finished-after-penalties, and clamping mid-shootout is the one mistake this
+    /// service exists to prevent. They classify as in-play; AET/AP/Match Finished land shortly after anyway.</summary>
     private static readonly HashSet<string> TerminalStatuses = new(StringComparer.OrdinalIgnoreCase)
     {
-        "FT", "AET", "AP", "PEN", "Match Finished", "Finished", "Full Time", "Race Finished",
+        "FT", "AET", "AP", "Match Finished", "Finished", "Full Time", "Race Finished",
         "Cancelled", "Postponed", "Abandoned", "AW", "WO",
     };
 
@@ -48,7 +51,9 @@ public sealed class AutoStopService : BackgroundService
     /// shoot-out, generic Live). Presence in the livescore feed or a non-empty strProgress also counts.</summary>
     private static readonly HashSet<string> InPlayStatuses = new(StringComparer.OrdinalIgnoreCase)
     {
-        "1H", "2H", "HT", "ET", "BREAK", "P", "Live",
+        "1H", "2H", "HT", "ET", "BREAK", "P", "PT", "PEN", "Live",
+        "1st Half", "2nd Half", "First Half", "Second Half", "Half Time", "Halftime",
+        "Extra Time", "Penalties", "Penalty Shootout",
     };
 
     private enum StatusClass { Terminal, InPlay, Unknown }
@@ -62,6 +67,9 @@ public sealed class AutoStopService : BackgroundService
         public long? OriginalEndFallback; // first-seen Recording.EndUtc — cap base ONLY when Event.EndUtc is null
         public bool CapWarned;            // "cannot extend further" already notified (one Warn, not one per tick)
         public long LastSeenUtc;          // last tick this recording was a candidate (prune key)
+        public long FirstTerminalUtc;     // terminal debounce: when a terminal status was FIRST seen (0 = not currently terminal)
+        public string? LastMarkStatus;    // last raw status written to LiveMarksJson (dedupe transitions)
+        public int MarkCount;             // marks written so far (bounded — a flapping feed can't grow the JSON forever)
     }
 
     // Last-poll stamps keyed by recording id (event lookups) / lowercased sport (livescore), per the 120s throttle.
@@ -69,11 +77,17 @@ public sealed class AutoStopService : BackgroundService
     private static readonly ConcurrentDictionary<string, long> _liveScoreStamp = new(StringComparer.OrdinalIgnoreCase);
     private static readonly ConcurrentDictionary<string, Dictionary<string, TsdbLiveScore>> _liveScoreIndex = new(StringComparer.OrdinalIgnoreCase);
 
-    private const int PollAheadS = 600;      // start watching a recording this long before its scheduled end
     private const int DecideAheadS = 120;    // decisions (extend/clamp) only this close to the current end
     private const int ExtendStepS = 900;     // one extension step (15 min)
     private const int PollIntervalS = 120;   // min seconds between TSDB calls per recording / per sport
     private const int SlotGuardS = 120;      // safety gap kept before the next recording's pre-roll on the credential
+    /// <summary>A terminal status must persist this long (≥2 polls) before a clamp acts on it — real feeds
+    /// briefly show "FT" at the end of regulation before flipping to ET/penalties, and clamping on that one
+    /// bogus sample is exactly the missed-shootout failure auto-stop exists to prevent. Fail LONG.</summary>
+    private const int TerminalConfirmS = 150;
+    /// <summary>Marks cap per recording: far above any real match's transition count, only a backstop so a
+    /// status-flapping feed can't grow LiveMarksJson without bound.</summary>
+    private const int MaxMarks = 40;
 
     public AutoStopService(IServiceScopeFactory scopes, DbWriteGate gate, ILogger<AutoStopService> log)
     { _scopes = scopes; _gate = gate; _log = log; }
@@ -100,23 +114,25 @@ public sealed class AutoStopService : BackgroundService
         var settings = scope.ServiceProvider.GetRequiredService<SettingsService>();
         var tsdb = scope.ServiceProvider.GetRequiredService<TheSportsDbClient>();
 
-        if (!await settings.GetBoolAsync("auto_stop_enabled")) return;
+        var autoStop = await settings.GetBoolAsync("auto_stop_enabled");
+        var chapterMarks = await settings.GetBoolAsync("chapter_marks_enabled");
+        if (!autoStop && !chapterMarks) return;
 
         var now = EpochTime.Now();
 
-        // Candidates: live captures linked to an event, in an Auto (not "fixed") league, near/past their scheduled
-        // end. No upper bound on `now` — a capture deep in its post-pad can still be extended if penalties run on.
+        // Candidates: EVERY live event-linked capture, tracked from the moment it starts — chapter marks need
+        // the kickoff/half-time transitions, not just the endgame. Extend/clamp DECISIONS still apply only near
+        // the end (DecideAheadS below) and only for Auto (not "fixed") leagues with auto-stop enabled. No upper
+        // bound on `now` — a capture deep in its post-pad can still be extended if penalties run on.
         var candidates = await (from r in db.Recordings.AsNoTracking()
                                 join e in db.Events.AsNoTracking() on r.EventId equals e.Id
                                 join l in db.Leagues.AsNoTracking() on e.LeagueId equals l.Id
                                 where ActiveStates.Contains(r.State)
-                                      && (l.AutoStopMode == null || l.AutoStopMode == "auto")
-                                      && now >= r.EndUtc - PollAheadS
                                 select new
                                 {
                                     r.Id, RecEndUtc = r.EndUtc, r.PostPadS, r.SourceId,
                                     e.TsdbEventId, e.Title, EventEndUtc = e.EndUtc,
-                                    l.Sport, l.AutoStopMaxExtendS,
+                                    l.Sport, l.AutoStopMaxExtendS, l.AutoStopMode,
                                 }).ToListAsync(ct);
         if (candidates.Count == 0) { Prune(now); return; }
 
@@ -171,8 +187,26 @@ public sealed class AutoStopService : BackgroundService
                 var status = !string.IsNullOrWhiteSpace(live?.Status) ? live!.Status : track.LastStatus;
                 var cls = Classify(status, live);
 
-                // Decisions only just before the current end — and Auto NEVER shortens a window: the terminal branch
-                // only trims a previous EXTENSION back (never below the scheduled end), the in-play branch only grows.
+                // Chapter marks: persist every raw status TRANSITION (kick-off, HT, 2H, ET, penalties, FT…)
+                // with its wall-clock — finalize turns them into embedded MKV chapters. Independent of the
+                // extend/clamp decisions, so "fixed" auto-stop leagues still get chapters.
+                if (chapterMarks)
+                    await RecordMarkAsync(db, c.Id, track, status, live?.Progress, now, ct);
+
+                // Terminal debounce: real feeds briefly show "FT" at the end of regulation before flipping to
+                // ET/penalties. A terminal sample only counts once it has PERSISTED across polls; until then it
+                // classifies as Unknown (fail LONG — hold, don't clamp). Any non-terminal sighting resets it.
+                if (cls == StatusClass.Terminal)
+                {
+                    if (track.FirstTerminalUtc == 0) track.FirstTerminalUtc = now;
+                    if (now - track.FirstTerminalUtc < TerminalConfirmS) cls = StatusClass.Unknown;
+                }
+                else track.FirstTerminalUtc = 0;
+
+                // Decisions only for auto-stop-enabled Auto leagues, and only just before the current end — Auto
+                // NEVER shortens a window: the terminal branch only trims a previous EXTENSION back (never below
+                // the scheduled end), the in-play branch only grows.
+                if (!autoStop || (c.AutoStopMode is not null && c.AutoStopMode != "auto")) continue;
                 if (now < c.RecEndUtc - DecideAheadS) continue;
 
                 if (cls == StatusClass.Terminal)
@@ -299,6 +333,41 @@ public sealed class AutoStopService : BackgroundService
         }, ct);
         if (applied)
             _log.LogInformation("[AutoStop] Recording {Id}: finished per guide ({Status}) — closing after post-pad", recId, status);
+    }
+
+    /// <summary>Append a status-transition mark ({t,s,p}) to Recording.LiveMarksJson when the raw status
+    /// changes. Deduped against the last written status and bounded by <see cref="MaxMarks"/>; a write failure
+    /// is swallowed (chapters are best-effort — they must never disturb the capture).</summary>
+    private async Task RecordMarkAsync(DVarrDbContext db, int recId, RecTrack track, string? status, string? progress, long now, CancellationToken ct)
+    {
+        var s = status?.Trim();
+        if (string.IsNullOrEmpty(s)) return;
+        if (string.Equals(track.LastMarkStatus, s, StringComparison.OrdinalIgnoreCase)) return;
+        if (track.MarkCount >= MaxMarks) return;
+        track.LastMarkStatus = s;
+        track.MarkCount++;
+        try
+        {
+            await _gate.WriteAsync(async () =>
+            {
+                var r = await db.Recordings.FindAsync(recId);
+                if (r is null || !ActiveStates.Contains(r.State)) return;
+                var marks = new List<Dictionary<string, object?>>();
+                if (!string.IsNullOrWhiteSpace(r.LiveMarksJson))
+                {
+                    try { marks = System.Text.Json.JsonSerializer.Deserialize<List<Dictionary<string, object?>>>(r.LiveMarksJson!) ?? marks; }
+                    catch { /* corrupt → start fresh */ }
+                }
+                if (marks.Count >= MaxMarks) return;
+                marks.Add(new Dictionary<string, object?> { ["t"] = now, ["s"] = s, ["p"] = string.IsNullOrWhiteSpace(progress) ? null : progress!.Trim() });
+                r.LiveMarksJson = System.Text.Json.JsonSerializer.Serialize(marks);
+                r.UpdatedUtc = now;
+                await db.SaveChangesAsync(ct);
+            }, ct);
+            _log.LogDebug("[AutoStop] Recording {Id}: status mark '{Status}' at {Now}", recId, s, now);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex) { _log.LogDebug(ex, "[AutoStop] mark write failed for {Id}", recId); }
     }
 
     /// <summary>Standalone AutoExtended notification (no recording mutation).</summary>

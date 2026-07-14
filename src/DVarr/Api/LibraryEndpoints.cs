@@ -17,13 +17,33 @@ public static class LibraryEndpoints
 {
     public static void MapLibraryApi(this WebApplication app)
     {
-        // ---- Library list (flat rows + rollups; the client groups league → season → game) ----
+        // ---- Library list (flat rows + rollups; the client groups league → [team →] season → game) ----
         app.MapGet("/api/library", async (DVarrDbContext db, RuntimePaths paths, LibraryScanService scanner) =>
         {
             var items = await db.LibraryItems.AsNoTracking()
                 .OrderBy(i => i.ShowName).ThenByDescending(i => i.SeasonYear).ThenByDescending(i => i.StartUtc)
                 .ToListAsync();
             var disk = DiskSpace(paths.MediaDir);
+
+            // Team enrichment: each event-linked item carries its home/away TheSportsDB team ids, and each league
+            // present in the library reports its FOLLOWED teams — the client uses the pair to group a followed
+            // league's games under per-team sections. Two small IN lookups, stitched in memory.
+            var evIds = items.Where(i => i.EventId != null).Select(i => i.EventId!.Value).Distinct().ToList();
+            var evTeams = evIds.Count == 0
+                ? new Dictionary<int, (string? Home, string? Away)>()
+                : await db.Events.AsNoTracking().Where(e => evIds.Contains(e.Id))
+                    .Select(e => new { e.Id, e.HomeTeamId, e.AwayTeamId })
+                    .ToDictionaryAsync(e => e.Id, e => (Home: e.HomeTeamId, Away: e.AwayTeamId));
+            var lgIds = items.Where(i => i.LeagueId != null).Select(i => i.LeagueId!.Value).Distinct().ToList();
+            var lgFollows = lgIds.Count == 0
+                ? new List<object>()
+                : (await db.Leagues.AsNoTracking().Where(l => lgIds.Contains(l.Id))
+                        .Select(l => new { l.Id, l.MonitoredTeamsJson }).ToListAsync())
+                    .Select(l => new { l.Id, Teams = ParseFollowedTeams(l.MonitoredTeamsJson) })
+                    .Where(l => l.Teams.Count > 0)
+                    .Select(l => (object)new { id = l.Id, followedTeams = l.Teams })
+                    .ToList();
+
             return Results.Json(new
             {
                 items = items.Select(i => new
@@ -36,7 +56,10 @@ public static class LibraryEndpoints
                     channel = i.ChannelName, source = i.SourceLabel,
                     origin = i.Origin.ToString(), status = i.Status.ToString(), unsorted = i.Unsorted,
                     addedUtc = i.CreatedUtc, missingSinceUtc = i.MissingSinceUtc,
+                    homeTeamId = i.EventId is { } eid1 && evTeams.TryGetValue(eid1, out var t1) ? t1.Home : null,
+                    awayTeamId = i.EventId is { } eid2 && evTeams.TryGetValue(eid2, out var t2) ? t2.Away : null,
                 }),
+                leagues = lgFollows,
                 totals = new
                 {
                     count = items.Count,
@@ -162,6 +185,26 @@ public static class LibraryEndpoints
             var ctype = seg.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase) ? "application/vnd.apple.mpegurl" : "video/mp2t";
             return Results.File(path, ctype);
         });
+    }
+
+    /// <summary>League.MonitoredTeamsJson ([{id,name}] written by the Leagues page) → [{id,name}] objects for the
+    /// library response. Empty list on null/blank/malformed — team grouping just doesn't apply then.</summary>
+    private static List<object> ParseFollowedTeams(string? json)
+    {
+        var teams = new List<object>();
+        if (string.IsNullOrWhiteSpace(json)) return teams;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            foreach (var t in doc.RootElement.EnumerateArray())
+            {
+                var id = t.TryGetProperty("id", out var i) ? i.GetString() : null;
+                var name = t.TryGetProperty("name", out var n) ? n.GetString() : null;
+                if (!string.IsNullOrWhiteSpace(id)) teams.Add(new { id = id!, name = name ?? id! });
+            }
+        }
+        catch { /* malformed → no team grouping */ }
+        return teams;
     }
 
     /// <summary>Free/total bytes of the filesystem holding the media root — longest-mount-point match so a
