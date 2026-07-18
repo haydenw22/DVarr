@@ -22,6 +22,8 @@ public sealed class RescueSweepService : BackgroundService
     private readonly ILogger<RescueSweepService> _log;
 
     private const double MinTitleScore = 0.30;         // an EPG programme must actually look like the event
+    private const double MinSingleSidedScore = 0.50;   // single-name events (motorsport…) have no both-team gate, so demand a much stronger title match
+    private const double AmbiguityMargin = 0.05;       // two DIFFERENT programmes scoring this close is a coin flip — wait for a clearer guide
     private const double MinReplayDurationFrac = 0.70; // ...and be at least this fraction of the game's length (not a highlights show)
     private const int RefreshCooldownS = 30 * 60;      // at most one opportunistic EPG refresh per source per 30 min
     private static readonly ConcurrentDictionary<int, long> _lastRefresh = new();
@@ -139,23 +141,62 @@ public sealed class RescueSweepService : BackgroundService
         var earliest = Math.Max(t.EventEndUtc, now + 120); // 2-min lead so the pre-roll can still arm
         var effIds = byKey.Keys.Select(k => k.Epg).Distinct().ToList();
 
-        var progs = await db.Programmes.AsNoTracking()
-            .Where(p => sourceIds.Contains(p.SourceId) && effIds.Contains(p.EpgChannelId)
-                        && p.StartUtc >= earliest && p.StartUtc <= t.ExpiresUtc && (p.StopUtc - p.StartUtc) >= minLen)
-            .OrderBy(p => p.StartUtc).Take(400).ToListAsync(ct);
+        // Both sides of the fixture, for the "shows THIS game" gate below. A two-team event demands BOTH teams in
+        // the programme title (audit RESCUE-01) — a team-magazine show, a highlights block, or the same team's
+        // OTHER game must never be "rescued" in place of the real matchup. Single-name events (motorsport…) have
+        // no both-team notion, so they demand a much stronger overall title match instead.
+        var query = string.IsNullOrWhiteSpace(t.MatchQuery) ? t.Title : t.MatchQuery;
+        var (sideA, sideB) = ResolverService.EventSides(query);
+        var twoSided = !ReferenceEquals(sideA, sideB);
 
-        // Best title match above the floor; earliest air breaks ties.
-        var best = progs
-            .Select(p => new { p, score = ResolverService.Similarity(p.Title, t.MatchQuery), chan = byKey.GetValueOrDefault((p.SourceId, p.EpgChannelId)) })
-            .Where(x => x.chan is not null && x.score >= MinTitleScore)
-            .OrderByDescending(x => x.score).ThenBy(x => x.p.StartUtc)
-            .FirstOrDefault();
+        // Page through the WHOLE window by keyset instead of scoring an arbitrary 400-row prefix — with
+        // whole-source search enabled, early unrelated programmes used to crowd the real re-air out of the
+        // candidate set entirely (audit RESCUE-04). Hard cap is a runaway backstop, far above any real window.
+        var found = new List<(Programme P, double Score, Channel Chan)>();
+        long curStart = long.MinValue; var curId = 0; var scanned = 0;
+        while (scanned < 50_000)
+        {
+            var cs = curStart; var ci = curId;
+            var page = await db.Programmes.AsNoTracking()
+                .Where(p => sourceIds.Contains(p.SourceId) && effIds.Contains(p.EpgChannelId)
+                            && p.StartUtc >= earliest && p.StartUtc <= t.ExpiresUtc && (p.StopUtc - p.StartUtc) >= minLen
+                            && (p.StartUtc > cs || (p.StartUtc == cs && p.Id > ci)))
+                .OrderBy(p => p.StartUtc).ThenBy(p => p.Id).Take(500).ToListAsync(ct);
+            if (page.Count == 0) break;
+            scanned += page.Count;
+            curStart = page[^1].StartUtc; curId = page[^1].Id;
+            foreach (var p in page)
+            {
+                var chan = byKey.GetValueOrDefault((p.SourceId, p.EpgChannelId));
+                if (chan is null) continue;
+                var score = ResolverService.Similarity(p.Title, query);
+                if (twoSided)
+                {
+                    if (score < MinTitleScore || !ResolverService.ShowsBothTeams(p.Title, sideA, sideB)) continue;
+                }
+                else if (score < MinSingleSidedScore) continue;
+                found.Add((p, score, chan));
+            }
+        }
 
-        if (best is null) { await BumpAsync(db, t.Id, now + interval, now, "no re-air in the guide yet", ct); return; }
+        if (found.Count == 0) { await BumpAsync(db, t.Id, now + interval, now, "no re-air in the guide yet", ct); return; }
+
+        // Best title match wins; earliest air breaks ties. But two DIFFERENT programmes scoring within the margin
+        // is a coin flip (doubleheaders, similarly-named fixtures) — wait for a clearer guide rather than guess.
+        // The same title on another channel/time is just the same re-air and never blocks.
+        var ordered = found.OrderByDescending(x => x.Score).ThenBy(x => x.P.StartUtc).ToList();
+        var best = ordered[0];
+        var rival = ordered.Skip(1).FirstOrDefault(x => !string.Equals(x.P.Title, best.P.Title, StringComparison.OrdinalIgnoreCase));
+        if (rival.P is not null && best.Score - rival.Score < AmbiguityMargin)
+        {
+            await BumpAsync(db, t.Id, now + interval, now,
+                "two different programmes match almost equally — waiting for a clearer guide", ct);
+            return;
+        }
 
         // Schedule the replay: Opportunistic priority (never preempts a live game), EventId-linked so finalize files
         // it exactly like the original would have, RescueTicketId-linked so the sweep can follow its outcome.
-        var ch = best.chan!;
+        var ch = best.Chan;
         await _gate.WriteAsync(async () =>
         {
             var fresh = await db.RescueTickets.FirstOrDefaultAsync(x => x.Id == ticketId, ct);
@@ -163,8 +204,12 @@ public sealed class RescueSweepService : BackgroundService
             var rep = new RecordingEntity
             {
                 EventId = t.EventId, ChannelId = ch.Id, SourceId = ch.SourceId, StreamId = ch.StreamId,
-                StartUtc = best.p.StartUtc, EndUtc = best.p.StopUtc, PrePadS = 60, PostPadS = 120,
+                StartUtc = best.P.StartUtc, EndUtc = best.P.StopUtc, PrePadS = 60, PostPadS = 120,
                 Title = t.Title, MatchQuery = t.MatchQuery, Priority = RecordingPriority.Opportunistic,
+                // Locked to the exact re-air the sweep chose (audit RESCUE-02): the EPG re-pick scores the ORIGINAL
+                // event's window and would happily drag this replay back to a channel that carried the original
+                // broadcast but isn't carrying the re-air.
+                ChannelLocked = true,
                 RescueTicketId = t.Id, State = RecordingState.Pending, CreatedUtc = now, UpdatedUtc = now,
             };
             db.Recordings.Add(rep);
@@ -176,12 +221,12 @@ public sealed class RescueSweepService : BackgroundService
             db.Notifications.Add(new Notification
             {
                 RecordingId = t.RecordingId, TsUtc = now, Kind = NotificationKind.ReplayScheduled, Severity = Severity.Info,
-                Message = $"found a re-air of “{t.Title}” on {ch.Name} at {EpochTime.ToDisplay(best.p.StartUtc):ddd d MMM HH:mm} — scheduled a replay",
+                Message = $"found a re-air of “{t.Title}” on {ch.Name} at {EpochTime.ToDisplay(best.P.StartUtc):ddd d MMM HH:mm} — scheduled a replay",
             });
             await db.SaveChangesAsync(ct);
         }, ct);
         _log.LogInformation("[Rescue] ticket {Id}: scheduled replay of '{Title}' on {Chan} at {When} (score {Score:0.00})",
-            ticketId, t.Title, ch.Name, best.p.StartUtc, best.score);
+            ticketId, t.Title, ch.Name, best.P.StartUtc, best.Score);
     }
 
     /// <summary>Opportunistically refresh a source's guide when it's stale (&gt;12h), rate-limited to once/30min per

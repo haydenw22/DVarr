@@ -451,11 +451,15 @@ public static class ApiEndpoints
             {
                 t.State = RescueTicketState.Cancelled;
                 t.Note = "cancelled by user";
-                // Cancel the scheduled replay too, but only if it hasn't started capturing (never kill a live one here).
+                // Cancel the scheduled replay too, but only if it hasn't started capturing (never kill a live one
+                // here). A replay can also be parked in Conflict while both logins are busy — that's every bit as
+                // not-yet-started as Pending, and leaving it armed after "stop hunting" re-records a cancelled
+                // rescue the moment a login frees (audit RESCUE-03).
                 if (t.ReplayRecordingId is { } rid)
                 {
                     var rep = await db.Recordings.FindAsync(rid);
-                    if (rep is not null && rep.State == RecordingState.Pending) { rep.State = RecordingState.Cancelled; rep.UpdatedUtc = EpochTime.Now(); }
+                    if (rep is not null && rep.State is RecordingState.Pending or RecordingState.Conflict)
+                    { rep.State = RecordingState.Cancelled; rep.UpdatedUtc = EpochTime.Now(); }
                 }
                 await db.SaveChangesAsync();
             });

@@ -62,8 +62,15 @@ public static class HealthEndpoints
             // scratch, reported separately only when it lives on a different filesystem.
             var mediaDisk = DiskUtil.For(paths.MediaDir);
             var segDisk = DiskUtil.For(paths.SegmentDir);
-            var mediaFloor = await settings.GetIntAsync("disk_min_free_gb") * 1_000_000_000L;
-            var segFloor = await settings.GetIntAsync("disk_min_free_segments_gb") * 1_000_000_000L;
+            // The floors live in the SAME database whose failure the block above just converted to "degraded" — a
+            // read outside that boundary would throw the unhandled 500 this endpoint exists to prevent (HEALTH-01).
+            long mediaFloor = 0, segFloor = 0;
+            try
+            {
+                mediaFloor = await settings.GetIntAsync("disk_min_free_gb") * 1_000_000_000L;
+                segFloor = await settings.GetIntAsync("disk_min_free_segments_gb") * 1_000_000_000L;
+            }
+            catch { /* degraded payload just shows no floors */ }
             var mediaRoot = DiskUtil.MountRoot(paths.MediaDir);
             var segRoot = DiskUtil.MountRoot(paths.SegmentDir);
             var sameVol = mediaRoot != null && string.Equals(mediaRoot, segRoot, StringComparison.OrdinalIgnoreCase);

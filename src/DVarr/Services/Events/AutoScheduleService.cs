@@ -627,6 +627,33 @@ public sealed class AutoScheduleService : BackgroundService
                 {
                     slots.Add(new CreditAwarePlanner.Slot(chosen.SourceId, winStart, winEnd, newId, RecordingState.Pending, rank));
                     placed++;
+                    // Disk guardrail (warn-only) for the hands-off path too (audit DISK-01): the manual scheduling
+                    // endpoint already warns when a recording is projected to breach the free-space floor — an
+                    // auto-armed one must not be quieter about the same risk. Never blocks a placement.
+                    try
+                    {
+                        var mediaFloor = await settings.GetIntAsync("disk_min_free_gb") * 1_000_000_000L;
+                        var segFloor = await settings.GetIntAsync("disk_min_free_segments_gb") * 1_000_000_000L;
+                        if (mediaFloor > 0 || segFloor > 0)
+                        {
+                            var paths = scope.ServiceProvider.GetRequiredService<RuntimePaths>();
+                            var ch = await db.Channels.AsNoTracking().FirstOrDefaultAsync(c => c.Id == chosen.ChannelId, ct);
+                            var projected = await DiskGuard.ProjectBytesAsync(db, chosen.ChannelId, ch?.DetectedQuality, winEnd - winStart, ct);
+                            var warns = DiskGuard.ProjectedWarnings(projected, paths, mediaFloor, segFloor);
+                            if (warns.Count > 0)
+                                await _gate.WriteAsync(async () =>
+                                {
+                                    db.Notifications.Add(new Notification
+                                    {
+                                        RecordingId = newId, TsUtc = now, Kind = NotificationKind.LowDiskSpace, Severity = Severity.Warn,
+                                        Message = $"'{e.Title}' may run the disk low — " + string.Join("; ", warns),
+                                    });
+                                    await db.SaveChangesAsync(ct);
+                                }, ct);
+                        }
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                    catch (Exception ex) { _log.LogDebug(ex, "[AutoSchedule] disk projection failed for '{Title}'", e.Title); }
                 }
                 else conflicted++;
                 handledEventIds.Add(e.Id);

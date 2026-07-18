@@ -201,13 +201,28 @@ public sealed class ResolverService
         return (all, all);
     }
 
-    /// <summary>True when a programme title shares at least one significant token with BOTH sides of the event — i.e.
-    /// it plausibly shows this specific matchup, not just one of the teams generically.</summary>
+    /// <summary>True when a programme title shows THIS specific matchup, not just one of the teams generically.
+    /// For a two-sided event each side must be evidenced by a token UNIQUE to it (audit EPG-01): a token both sides
+    /// share — "United", "City", "FC" — is evidence for NEITHER, otherwise "Manchester United TV" would satisfy both
+    /// Manchester United AND Newcastle United on the shared "united" alone. A side with no unique token at all can't
+    /// be proven, so the match is refused rather than guessed.</summary>
     public static bool ShowsBothTeams(string? progTitle, HashSet<string> sideA, HashSet<string> sideB)
     {
         if (sideA.Count == 0 && sideB.Count == 0) return false;
         var t = Tokens(progTitle);
         if (t.Count == 0) return false;
-        return (sideA.Count == 0 || sideA.Overlaps(t)) && (sideB.Count == 0 || sideB.Overlaps(t));
+        // Single-sided event (EventSides returned the same instance for both) — plain overlap is all we can ask.
+        if (ReferenceEquals(sideA, sideB)) return sideA.Overlaps(t);
+        if (sideA.Count == 0 || sideB.Count == 0) return false;
+        bool aProven = false, bProven = false;
+        foreach (var tok in t)
+        {
+            var inA = sideA.Contains(tok);
+            var inB = sideB.Contains(tok);
+            if (inA && !inB) aProven = true;
+            else if (inB && !inA) bProven = true;
+            if (aProven && bProven) return true;
+        }
+        return false;
     }
 }

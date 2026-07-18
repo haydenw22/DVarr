@@ -12,6 +12,26 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.41.2] — 2026-07-18
+Channel-picking and replay-matching made evidence-based. v1.41's new automation decided *where* to record and *what counts as the same game* on token overlap that could be fooled by shared words and premature guide data — this release makes every one of those decisions prove itself first.
+
+### Fixed / Hardened
+- **A shared word can no longer count as both teams.** Every "does this programme show THIS game" test (channel re-pick, national fallback, replay rescue, media auto-filing) required a token from each side of the fixture — but a word both sides share satisfied both at once, so a programme about one team could pass as the matchup whenever the two team names had a word in common. Each side must now be proven by a word unique to it; a title that only ever names one side can never match a two-team fixture again.
+- **A mapped channel showing a placeholder no longer loses the game.** Real case: a fixture mapped to a sports channel whose guide listed the slot as a placeholder ("TBD vs TBD") was moved to an unmapped channel whose guide had firmed up earlier — off the channel (and picture quality) the user actually wanted. A placeholder on a mapped channel now means "the slot is reserved, the guide just hasn't named it yet": national fallback holds position and re-judges once the guide resolves.
+- **National-fallback moves are reversible now.** Moving to an unmapped channel used to lock the recording there permanently. The move is no longer locked: when a mapped channel's guide later firms up and actually shows the game, the ordinary re-pick reclaims it for your own lineup. Flapping is prevented by the both-team requirement plus the existing score/hysteresis gates. A **pinned** mapped channel additionally demands a much stronger match before a national move can leave it at all.
+- **National-fallback moves keep their safety net.** Re-pointing to an unmapped channel silently dropped the recording's fallback ladder — if that channel's feed died mid-game there was nowhere to walk back to. The mapped channels are now rebuilt as fallbacks behind the national pick.
+- **Replay rescue must prove the matchup.** A re-air candidate for a two-team game now has to name **both** teams — a team-magazine show, a highlights block, or the same team's *other* game can no longer be "rescued" in place of the real fixture. Single-name events (motorsport…) demand a much stronger overall title match instead, and when two *different* programmes score nearly identically the sweep waits for a clearer guide rather than guessing.
+- **A found replay stays on its re-air.** The scheduled replay is locked to the exact channel and airing the sweep chose — the guide re-pick used to evaluate the *original* event's window and could drag a correctly-found replay back to a channel that carried the original broadcast but not the re-air.
+- **Cancelling a rescue cancels a conflicted replay too.** "Stop hunting" only cancelled a *Pending* replay; one parked in Conflict stayed armed and would record the moment a login freed.
+- **Large-lineup guide searches are complete and deterministic.** Replay rescue scored an arbitrary first-400-programmes slice (whole-provider search could crowd out the real re-air entirely) and national fallback took an unordered first-4096 slice that could differ between sweeps. Rescue now walks the entire search window in pages; national fallback's candidate set is deterministic.
+- **Auto-scheduled recordings get the disk projection warning too.** The "this recording may run the disk low" pre-arm check only ran for manually-scheduled recordings; the hands-off scheduler now runs the same projection when it arms a game.
+- **The health endpoint can't crash while reporting a broken database.** Reading the disk-floor settings sat outside the failure handling, so the one endpoint meant to report a locked/corrupt database could itself 500 on it.
+- **Media auto-filing can't bind to the wrong fixture on a shared club name.** The finished-recording matcher accepted any event sharing two significant words — which two related fixtures can do while naming only one correct side. It now applies the same each-side-proven rule as everything else.
+
+### Changed
+- **Recordings sorting is now by event window.** The sort selector orders by the recording's event date — **closest first** (the new default: soonest upcoming games on top, then past windows most-recent first) or **furthest first** — replacing the old newest/oldest toggle. Title A–Z / Z–A remain.
+- **Logs page is lighter.** The table only re-renders when the log content actually changed (no more losing your text selection every 4 seconds) and auto-refresh pauses while the tab is hidden.
+
 ## [1.41.1] — 2026-07-18
 Same-day hardening of the v1.41.0 feature set, driven by an internal adversarial audit of the new destructive-automation paths (retention, watched webhooks, the log viewer). No new features — this release makes the new safety contracts actually hold.
 

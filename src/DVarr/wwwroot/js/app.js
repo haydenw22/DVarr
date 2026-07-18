@@ -428,8 +428,8 @@ PAGES.recordings = {
         <select id="recFilter"><option value="">All states</option><option>Recording</option><option>Pending</option><option>NeedsAttention</option><option>Missed</option><option>Cancelled</option></select>
         <select id="recLeague"><option value="">All leagues</option></select>
         <select id="recSort" title="Sort order">
-          <option value="date_desc">Newest first</option>
-          <option value="date_asc">Oldest first</option>
+          <option value="evt_close">Event date — closest first</option>
+          <option value="evt_far">Event date — furthest first</option>
           <option value="name_asc">Title A–Z</option>
           <option value="name_desc">Title Z–A</option>
         </select>
@@ -464,15 +464,24 @@ PAGES.recordings = {
       let rows = f === 'Recording' ? recs.filter(r => ACTIVE.includes(r.state)) : (f ? recs.filter(r => r.state === f) : recs);
       if (lf === 'manual') rows = rows.filter(r => r.leagueId == null);
       else if (lf) rows = rows.filter(r => String(r.leagueId) === lf);
-      // User-chosen sort (default newest-first). Sorting a copy after filtering; the API's own order is irrelevant now.
-      const sort = ($('#recSort') || {}).value || 'date_desc';
+      // User-chosen sort, keyed on the EVENT WINDOW (startUtc), default closest-first. "Closest first" is what a
+      // recording list actually wants: the next games to record on top (soonest upcoming → furthest upcoming),
+      // with already-started/past windows below them (most recent past first). "Furthest first" is the plain
+      // reverse-chronological view. Sorting a copy after filtering; the API's own order is irrelevant now.
+      const sort = ($('#recSort') || {}).value || 'evt_close';
       const byName = (a, b) => (a.title || '').localeCompare(b.title || '');
-      const byDate = (a, b) => (a.startUtc || 0) - (b.startUtc || 0);
+      const nowS = Math.floor(Date.now() / 1000);
+      const byClosest = (a, b) => {
+        const aPast = (a.startUtc || 0) <= nowS, bPast = (b.startUtc || 0) <= nowS;
+        if (aPast !== bPast) return aPast ? 1 : -1;            // upcoming windows above past ones
+        return aPast ? (b.startUtc || 0) - (a.startUtc || 0)   // past: most recent first
+                     : (a.startUtc || 0) - (b.startUtc || 0);  // upcoming: soonest first
+      };
       rows = rows.slice().sort(
-        sort === 'date_asc' ? byDate
-        : sort === 'name_asc' ? byName
+        sort === 'name_asc' ? byName
         : sort === 'name_desc' ? ((a, b) => byName(b, a))
-        : ((a, b) => byDate(b, a))); // date_desc default
+        : sort === 'evt_far' ? ((a, b) => (b.startUtc || 0) - (a.startUtc || 0))
+        : byClosest); // evt_close default
       // Keep the bulk selection to the currently VISIBLE rows only (audit UI-BULK-01): otherwise a row selected
       // under one filter stays in recSel after a filter hides it, and a bulk Stop/Delete would silently hit hidden
       // recordings. An SSE refresh keeps the same filter → same visible set → selections survive as before.
@@ -1626,10 +1635,16 @@ PAGES.logs = {
       <div class="note muted" style="font-size:12px">Recent server activity (newest first), kept in memory only — it resets when DVarr restarts. Handy for debugging a recording or a provider issue without opening the container logs.</div>
       <div id="logWrap" class="loading">…</div>`;
     const gen = render._seq;
+    let lastPayload = null;
     const draw = async () => {
       const level = $('#logLevel').value, q = $('#logQ').value;
       const rows = await api.get(`/api/logs?take=800${level ? `&level=${encodeURIComponent(level)}` : ''}${q ? `&q=${encodeURIComponent(q)}` : ''}`);
       if (gen !== render._seq || !Array.isArray(rows)) return;
+      // Skip the full-table rebuild when nothing changed — re-escaping and re-laying-out hundreds of identical
+      // rows every 4s churned the DOM (and lost text selection) for no visible difference (audit UI-04).
+      const payload = level + '|' + q + '|' + JSON.stringify(rows);
+      if (payload === lastPayload) return;
+      lastPayload = payload;
       $('#logWrap').innerHTML = rows.length
         ? `<table class="rtable logtable"><tbody>${rows.map(r => `<tr class="log-${esc((r.level || '').toLowerCase())}"><td class="mono muted" style="white-space:nowrap">${dtime(r.ts)}</td><td class="mono log-lvl">${esc(r.level)}</td><td class="mono muted" style="white-space:nowrap">${esc(r.category)}</td><td class="log-msg">${esc(r.message)}</td></tr>`).join('')}</tbody></table>`
         : emptyBox('No log lines match. (The buffer clears on restart.)');
@@ -1637,8 +1652,9 @@ PAGES.logs = {
     $('#logLevel').addEventListener('change', draw);
     let qt; $('#logQ').addEventListener('input', () => { clearTimeout(qt); qt = setTimeout(draw, 300); });
     await draw();
-    // Light auto-refresh (every 4s) while the toggle is on and this page is still current.
-    const timer = setInterval(() => { if (gen === render._seq && $('#logAuto') && $('#logAuto').checked) draw(); else if (gen !== render._seq) clearInterval(timer); }, 4000);
+    // Light auto-refresh (every 4s) while the toggle is on, this page is still current, and the tab is actually
+    // visible — a backgrounded tab polling forever is wasted work on both ends (audit UI-04).
+    const timer = setInterval(() => { if (gen === render._seq && !document.hidden && $('#logAuto') && $('#logAuto').checked) draw(); else if (gen !== render._seq) clearInterval(timer); }, 4000);
   },
 };
 

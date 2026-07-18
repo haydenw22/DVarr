@@ -335,7 +335,15 @@ public sealed class MediaImportService
                         .Select(e => new { e.Id, e.Title, e.StartUtc }).ToListAsync(ct);
                     var best = candidates
                         .Select(e => new { e, score = qTokens.Intersect(MatchTokens(e.Title)).Count() })
-                        .Where(x => x.score >= 2) // ≥2 shared significant tokens = both team names, not a coincidence
+                        .Where(x => x.score >= 2) // ≥2 shared significant tokens as the ranking floor
+                        // Two shared tokens can BOTH belong to one side — "Manchester" + "United" matches
+                        // Manchester United vs ANY opponent (audit MEDIA-01). For a two-sided event title each
+                        // side must be evidenced by its own unique tokens; single-name events keep the ≥2 rule.
+                        .Where(x =>
+                        {
+                            var (a, b) = ResolverService.EventSides(x.e.Title);
+                            return ReferenceEquals(a, b) || ResolverService.ShowsBothTeams(matchText, a, b);
+                        })
                         .OrderByDescending(x => x.score).ThenBy(x => Math.Abs(x.e.StartUtc - rec.StartUtc))
                         .FirstOrDefault();
                     if (best is not null)
