@@ -97,6 +97,14 @@ public static class ParityEndpoints
             });
         });
 
+        // The Prowlarr copy-me key for the logged-in owner (behind the app's normal auth — /api/parity/* is NOT in
+        // the auth-exempt list). Exists so the key never has to be read out of the logs (audit LOG-01).
+        app.MapGet("/api/parity/apikey", async (DVarrDbContext db, DbWriteGate gate) =>
+        {
+            var (key, _) = await EnsureApiKeyAsync(db, gate);
+            return Results.Json(new { apiKey = key });
+        });
+
         // ---- Minimal Sonarr v3 surface for Prowlarr (X-Api-Key). Partial by design (P3). ----
         var v3 = app.MapGroup("/api/v3");
         v3.MapGet("/system/status", async (HttpContext ctx, DVarrDbContext db) =>

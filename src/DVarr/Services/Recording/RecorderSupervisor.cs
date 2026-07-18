@@ -334,6 +334,18 @@ public sealed class RecorderSupervisor
                     }
                 },
                 NotificationKind.NeedsAttention, Severity.Critical, "finalize failed (no playable output)");
+
+            // Second-chance replay: a monitored-league game that ended with no playable copy opens a rescue ticket —
+            // a background sweep then hunts the guide for a re-air and schedules it at low priority. Best-effort.
+            try
+            {
+                using var rescueScope = _d.Scopes.CreateScope();
+                await DVarr.Services.Events.RescueService.TryOpenTicketAsync(
+                    rescueScope.ServiceProvider.GetRequiredService<DVarrDbContext>(), _d.Gate,
+                    rescueScope.ServiceProvider.GetRequiredService<DVarr.Services.SettingsService>(),
+                    recordingId, "recording failed — no playable output", _log);
+            }
+            catch (Exception ex) { _log.LogDebug(ex, "[Recorder] rescue-ticket open failed for {Id}", recordingId); }
         }
     }
 
@@ -809,9 +821,10 @@ public sealed class RecorderSupervisor
         using var scope = _d.Scopes.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<DVarrDbContext>();
         var rec = await db.Recordings.AsNoTracking().FirstOrDefaultAsync(r => r.Id == recordingId);
-        if (rec is null || string.IsNullOrWhiteSpace(rec.LiveMarksJson)) return null;
-        var marks = ChapterMarks.Parse(rec.LiveMarksJson);
-        if (marks.Count == 0) return null;
+        if (rec is null) return null;
+        // Honour the toggle at finalize too: the capture side already stops NEW marks accruing when it's off, but
+        // the scheduled fallback below is synthesized from scratch here, so it must be gated as well.
+        if (!await GetBoolSettingAsync("chapter_marks_enabled", true)) return null;
 
         var t0 = await db.Notifications.AsNoTracking()
             .Where(n => n.RecordingId == recordingId && n.Kind == NotificationKind.Started)
@@ -820,12 +833,22 @@ public sealed class RecorderSupervisor
 
         // Rough tail bound only (chapter ENDs are cosmetic): ~8s per captured segment.
         var estDuration = Math.Max(60, segs.Count * 8);
-        var meta = ChapterMarks.BuildFfmetadata(marks, t0, estDuration);
+
+        // Prefer real live-status chapters; fall back to schedule-derived ones when no livescore was captured
+        // (LiveMarksJson empty, or only non-chapter statuses like NS/TBD were seen).
+        var marks = ChapterMarks.Parse(rec.LiveMarksJson);
+        var meta = marks.Count > 0 ? ChapterMarks.BuildFfmetadata(marks, t0, estDuration) : null;
+        var source = meta is not null ? $"{marks.Count} live-status" : null;
+        if (meta is null)
+        {
+            meta = ChapterMarks.BuildScheduledFfmetadata(t0, rec.StartUtc, rec.EndUtc, estDuration);
+            source = "scheduled (no livescore)";
+        }
         if (meta is null) return null;
 
         var path = Path.Combine(segDir, "chapters.ffmeta");
         await File.WriteAllTextAsync(path, meta);
-        _log.LogInformation("[Recorder] Recording {Id}: embedding {N} live-status chapter mark(s)", recordingId, marks.Count);
+        _log.LogInformation("[Recorder] Recording {Id}: embedding {Source} chapter mark(s)", recordingId, source);
         return path;
     }
 

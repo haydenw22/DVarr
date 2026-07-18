@@ -41,6 +41,15 @@ var dbPath = Path.Combine(configDir, "dvarr.db");
 // ---------------------------------------------------------------------------
 // Services
 // ---------------------------------------------------------------------------
+// In-memory ring buffer of recent log lines backing the in-app Logs viewer (/api/logs). One instance both feeds the
+// logger provider and is resolved by the endpoint. Purely in-memory (nothing to disk; cleared on restart).
+var logBuffer = new LogRingBuffer();
+builder.Services.AddSingleton(logBuffer);
+builder.Logging.AddProvider(new RingBufferLoggerProvider(logBuffer));
+// Framework HttpClient categories log every request URL at Information — for provider calls that's the IPTV login
+// verbatim (audit LOG-01). Silence them below Warning in EVERY sink (console + ring); app code logs what matters.
+builder.Logging.AddFilter("System.Net.Http.HttpClient", LogLevel.Warning);
+
 builder.Services.AddSingleton(new RuntimePaths(configDir, mediaDir, segmentDir));
 builder.Services.AddSingleton<DbWriteGate>();
 builder.Services.AddSingleton<SqlitePragmaInterceptor>();
@@ -70,6 +79,7 @@ builder.Services.AddScoped<EpgRepickService>();
 builder.Services.AddScoped<CreditAwarePlanner>();
 builder.Services.AddScoped<DVarr.Services.Media.MediaImportService>();
 builder.Services.AddScoped<DVarr.Services.Media.LibraryService>();
+builder.Services.AddScoped<DVarr.Services.Media.RetentionService>();
 builder.Services.AddHttpClient<XtreamClient>()
     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AutomaticDecompression = System.Net.DecompressionMethods.All });
 builder.Services.AddHttpClient<EventFetcher>()
@@ -85,6 +95,7 @@ builder.Services.AddHostedService<AutoScheduleService>();
 builder.Services.AddHostedService<AutoStopService>(); // smart auto-stop: extends live recordings while the guide says the event is still in play
 builder.Services.AddHostedService<HaWebhookService>();
 builder.Services.AddHostedService<EpgAutoSyncService>();
+builder.Services.AddHostedService<DVarr.Services.Events.RescueSweepService>(); // second-chance replay hunting: re-air rescue for failed games
 
 var urls = builder.Configuration["DVarr:Urls"] ?? "http://0.0.0.0:1867";
 builder.WebHost.UseUrls(urls);
@@ -135,12 +146,16 @@ using (var scope = app.Services.CreateScope())
     await scope.ServiceProvider.GetRequiredService<SourceSeeder>().SeedFromFileAsync(configDir);
 
     var gate = scope.ServiceProvider.GetRequiredService<DbWriteGate>();
-    var (apiKey, apiKeyCreated) = await DVarr.Api.ParityEndpoints.EnsureApiKeyAsync(db, gate);
-    // Echo the secret only on the boot that generates it — don't re-print it into the log on every restart.
-    if (apiKeyCreated)
-        app.Logger.LogInformation("Sonarr-emulation API key generated (paste into Prowlarr): {Key}", apiKey);
-    else
-        app.Logger.LogInformation("Sonarr-emulation API key already configured.");
+    // Never echo the key itself into any log (audit LOG-01 — the in-app Logs page would display it); the
+    // logged-in owner reads it from /api/parity/apikey instead.
+    var (_, apiKeyCreated) = await DVarr.Api.ParityEndpoints.EnsureApiKeyAsync(db, gate);
+    app.Logger.LogInformation(apiKeyCreated
+        ? "Sonarr-emulation API key generated — view it (logged in) at /api/parity/apikey and paste into Prowlarr."
+        : "Sonarr-emulation API key already configured.");
+
+    // Per-install secret for the Plex/Jellyfin watched webhooks (URL token; shown under Settings → Storage).
+    var (_, webhookTokenCreated) = await DVarr.Api.WebhookEndpoints.EnsureWebhookTokenAsync(db, gate);
+    if (webhookTokenCreated) app.Logger.LogInformation("Media-server webhook token generated (URLs under Settings → Storage).");
 
     var (_, calTokenCreated) = await DVarr.Api.CalendarEndpoints.EnsureCalendarTokenAsync(db, gate);
     // Only note the token was created (the copy-me URL is available at /api/calendar/url); don't re-log it every boot.
@@ -183,6 +198,7 @@ app.MapParityApi();
 app.MapCalendarApi();
 app.MapPreviewApi();
 app.MapLibraryApi();
+app.MapWebhookApi();
 app.MapPlexApi();
 app.MapFallbackToFile("index.html");
 

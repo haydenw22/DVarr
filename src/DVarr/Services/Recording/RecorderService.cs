@@ -303,6 +303,16 @@ public sealed class RecorderService
             await db.SaveChangesAsync();
         });
         _log.LogWarning("[Recorder] Recording {Id} MISSED: {Why}", recordingId, why);
+
+        try
+        {
+            using var rescueScope = _scopes.CreateScope();
+            await DVarr.Services.Events.RescueService.TryOpenTicketAsync(
+                rescueScope.ServiceProvider.GetRequiredService<DVarrDbContext>(), _gate,
+                rescueScope.ServiceProvider.GetRequiredService<DVarr.Services.SettingsService>(),
+                recordingId, "missed: " + why, _log);
+        }
+        catch (Exception ex) { _log.LogDebug(ex, "[Recorder] rescue-ticket open failed for {Id}", recordingId); }
     }
 
     /// <summary>Re-finalize a recording from segments that survived a restart (no lease needed — process restarted).</summary>

@@ -70,7 +70,8 @@ public static class PreviewEndpoints
                     // e.g. [403] instead of a generic 502 the UI can't explain.
                     var status = (int)resp.StatusCode;
                     ctx.Response.StatusCode = status >= 400 ? status : 502;
-                    log.LogInformation("[Preview] upstream {Status} for channel {Id} ({Url})", status, channelId, upstreamUrl);
+                    // Never log the upstream URL — it carries the provider login (audit LOG-01).
+                    log.LogInformation("[Preview] upstream {Status} for channel {Id}", status, channelId);
                     await ctx.Response.WriteAsJsonAsync(new { error = "upstream", status });
                     return;
                 }

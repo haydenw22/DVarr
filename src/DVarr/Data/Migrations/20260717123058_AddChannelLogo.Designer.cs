@@ -3,6 +3,7 @@ using System;
 using DVarr.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -10,9 +11,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace DVarr.Data.Migrations
 {
     [DbContext(typeof(DVarrDbContext))]
-    partial class DVarrDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260717123058_AddChannelLogo")]
+    partial class AddChannelLogo
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "8.0.28");
@@ -384,18 +387,6 @@ namespace DVarr.Data.Migrations
                     b.Property<int>("Priority")
                         .HasColumnType("INTEGER");
 
-                    b.Property<int?>("RetentionGbCap")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<int?>("RetentionKeepDays")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<int?>("RetentionKeepLast")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("RetentionMode")
-                        .HasColumnType("TEXT");
-
                     b.Property<int>("ScheduleHorizonDays")
                         .HasColumnType("INTEGER");
 
@@ -495,9 +486,6 @@ namespace DVarr.Data.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
-                    b.Property<bool>("Protected")
-                        .HasColumnType("INTEGER");
-
                     b.Property<int?>("RecordingId")
                         .HasColumnType("INTEGER");
 
@@ -533,9 +521,6 @@ namespace DVarr.Data.Migrations
 
                     b.Property<string>("VideoCodec")
                         .HasColumnType("TEXT");
-
-                    b.Property<long?>("WatchedUtc")
-                        .HasColumnType("INTEGER");
 
                     b.HasKey("Id");
 
@@ -800,9 +785,6 @@ namespace DVarr.Data.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
-                    b.Property<int?>("RescueTicketId")
-                        .HasColumnType("INTEGER");
-
                     b.Property<string>("ResolutionSnapshotJson")
                         .HasColumnType("TEXT");
 
@@ -913,71 +895,6 @@ namespace DVarr.Data.Migrations
                     b.HasIndex("RecordingId", "Capture", "Seq");
 
                     b.ToTable("RecordingSegments");
-                });
-
-            modelBuilder.Entity("DVarr.Data.Entities.RescueTicket", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long>("CreatedUtc")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long>("EventEndUtc")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<int>("EventId")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long>("EventStartUtc")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long>("ExpiresUtc")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long?>("LastSweepUtc")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<int>("LeagueId")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("MatchQuery")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<long>("NextSweepUtc")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("Note")
-                        .HasColumnType("TEXT");
-
-                    b.Property<int>("RecordingId")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<int?>("ReplayRecordingId")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("State")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("Title")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<bool>("WholeSource")
-                        .HasColumnType("INTEGER");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("EventId");
-
-                    b.HasIndex("RecordingId");
-
-                    b.HasIndex("State", "NextSweepUtc");
-
-                    b.ToTable("RescueTickets");
                 });
 
             modelBuilder.Entity("DVarr.Data.Entities.ScheduleTick", b =>

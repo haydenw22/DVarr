@@ -242,6 +242,35 @@ public sealed class TheSportsDbClient
         return list;
     }
 
+    /// <summary>The full schedule for a league around <paramref name="year"/>, trying the same season-name candidates
+    /// as the local sync (EventFetcher): a calendar-year season ("2026"), then the split-year forms ("2026-2027",
+    /// "2025-2026"). Takes the first non-empty season and merges the following one, so a European/split-year league
+    /// (whose seasons are named "2025-2026", never "2026") isn't queried under a season that doesn't exist and
+    /// returns empty. Shared by manual Import so its results match what the sync would fetch.</summary>
+    public async Task<List<TsdbEvent>> GetLeagueScheduleAroundAsync(string idLeague, int year, CancellationToken ct = default)
+    {
+        var merged = new List<TsdbEvent>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        void Merge(IEnumerable<TsdbEvent> evs) { foreach (var e in evs) if (seen.Add(e.Id)) merged.Add(e); }
+
+        string? hit = null;
+        foreach (var season in new[] { year.ToString(), $"{year}-{year + 1}", $"{year - 1}-{year}" })
+        {
+            var evs = await GetSeasonEventsAsync(idLeague, season, ct);
+            if (evs.Count == 0) continue;
+            Merge(evs); hit = season; break;
+        }
+        if (hit is not null)
+        {
+            string next = hit.Contains('-') && int.TryParse(hit.Split('-')[1], out var end) ? $"{end}-{end + 1}"
+                : int.TryParse(hit, out var y) ? (y + 1).ToString() : (year + 1).ToString();
+            try { Merge(await GetSeasonEventsAsync(idLeague, next, ct)); }
+            catch (OperationCanceledException) { throw; }
+            catch { /* next-season best-effort */ }
+        }
+        return merged;
+    }
+
     /// <summary>Look up a single event by its TheSportsDB idEvent (v2 /lookup/event/{id}) — used by manual Import to
     /// file a staged recording onto the exact game the user picked.</summary>
     public async Task<TsdbEvent?> GetEventByIdAsync(string idEvent, CancellationToken ct = default)

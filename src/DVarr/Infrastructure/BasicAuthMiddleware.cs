@@ -117,6 +117,13 @@ public sealed class BasicAuthMiddleware
         // Home Assistant polls this REST status endpoint without credentials.
         if (p.StartsWith("/api/ha/status", StringComparison.OrdinalIgnoreCase)) return true;
 
+        // Media-server "watched" webhooks (Plex/Jellyfin): a media server can't present DVarr's login, so these
+        // two EXACT endpoints are login-exempt — but each carries its OWN per-install secret token (401 without
+        // it), mirroring the calendar feed. Deliberately NOT a prefix (audit SEC-08): a future webhook endpoint
+        // must opt in here explicitly rather than being born unauthenticated.
+        if (p.Equals("/api/webhooks/plex", StringComparison.OrdinalIgnoreCase)
+            || p.Equals("/api/webhooks/jellyfin", StringComparison.OrdinalIgnoreCase)) return true;
+
         // EXACT /api/stream/{digits}.ts only: LAN IPTV players pull the stream proxy with no headers (already
         // 403-blocked externally at nginx). Deliberately NOT a prefix — /api/stream/recordings (the UI's SSE)
         // must stay gated so the logged-in browser attaches its session cookie / cached basic creds automatically.

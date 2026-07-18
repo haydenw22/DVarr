@@ -7,6 +7,8 @@ using Microsoft.EntityFrameworkCore;
 namespace DVarr.Api;
 
 public record LibraryImportRequest(string? LeagueId, string? EventId);
+public record ProtectRequest(bool Protected);
+public record RetentionRunRequest(List<int>? Ids);
 
 /// <summary>
 /// The Library: what is PHYSICALLY on the media drive, organised the way Plex/Jellyfin see it
@@ -55,6 +57,7 @@ public static class LibraryEndpoints
                     videoCodec = i.VideoCodec, audioCodec = i.AudioCodec, height = i.Height,
                     channel = i.ChannelName, source = i.SourceLabel,
                     origin = i.Origin.ToString(), status = i.Status.ToString(), unsorted = i.Unsorted,
+                    isProtected = i.Protected, watchedUtc = i.WatchedUtc,
                     addedUtc = i.CreatedUtc, missingSinceUtc = i.MissingSinceUtc,
                     homeTeamId = i.EventId is { } eid1 && evTeams.TryGetValue(eid1, out var t1) ? t1.Home : null,
                     awayTeamId = i.EventId is { } eid2 && evTeams.TryGetValue(eid2, out var t2) ? t2.Away : null,
@@ -91,6 +94,46 @@ public static class LibraryEndpoints
             if (item.Status == LibraryItemStatus.Ok) cleanupError = lib.DeleteItemFiles(item);
             await gate.WriteAsync(async () => { db.LibraryItems.Remove(item); await db.SaveChangesAsync(); });
             return Results.Json(new { deleted = true, fileCleanupError = cleanupError });
+        });
+
+        // ---- Protect / unprotect a library item (retention eviction never deletes a protected item) ----
+        app.MapPut("/api/library/{id:int}/protect", async (int id, ProtectRequest req, DVarrDbContext db, DbWriteGate gate) =>
+        {
+            var item = await db.LibraryItems.FindAsync(id);
+            if (item is null) return Results.NotFound();
+            await gate.WriteAsync(async () => { item.Protected = req.Protected; item.UpdatedUtc = EpochTime.Now(); await db.SaveChangesAsync(); });
+            return Results.Json(new { id, item.Protected });
+        });
+
+        // ---- Retention dry-run preview: what WOULD be evicted under the current policy (deletes nothing) ----
+        app.MapGet("/api/retention/preview", async (RetentionService retention, CancellationToken ct) =>
+        {
+            var plans = await retention.PlanAsync(ct);
+            return Results.Json(new
+            {
+                totalItems = plans.Sum(p => p.Victims.Count),
+                totalBytes = plans.Sum(p => p.BytesFreed),
+                leagues = plans.Where(p => p.Victims.Count > 0).Select(p => new
+                {
+                    p.LeagueId, p.League, p.Mode, p.Detail, bytes = p.BytesFreed,
+                    items = p.Victims.Select(v => new { v.Id, v.Title, v.Show, v.StartUtc, v.Bytes, v.Watched }),
+                }),
+            });
+        });
+
+        // ---- Retention run-now: carry out the eviction the user just PREVIEWED (explicit user action). The body
+        // carries the reviewed victim ids (audit RET-02): if the fresh plan differs — a new game landed, protection
+        // or a policy changed since the dialog opened — nothing is deleted and 409 tells the UI to re-preview. ----
+        app.MapPost("/api/retention/run", async (RetentionRunRequest? req, RetentionService retention, CancellationToken ct) =>
+        {
+            var (deleted, freed, planChanged) = await retention.SweepAsync(req?.Ids, ct);
+            if (planChanged)
+                return Results.Json(new
+                {
+                    planChanged = true,
+                    error = "the library changed since the preview — nothing was deleted; review the new plan",
+                }, statusCode: 409);
+            return Results.Json(new { deleted, bytesFreed = freed });
         });
 
         // ---- Manual import (the Unsorted group): file into League/Season/Game and re-point the row ----
@@ -207,24 +250,11 @@ public static class LibraryEndpoints
         return teams;
     }
 
-    /// <summary>Free/total bytes of the filesystem holding the media root — longest-mount-point match so a
-    /// container volume (/media) reports ITS backing store, not the root fs. Null when it can't be read.</summary>
+    /// <summary>Free/total bytes of the filesystem holding the media root (shared <see cref="DiskUtil"/> — longest
+    /// mount-point match so a container volume reports ITS backing store). Null when it can't be read.</summary>
     private static object? DiskSpace(string mediaDir)
     {
-        try
-        {
-            // Trailing-separator on BOTH sides ("C:\media\" vs "C:\", "/media/" vs "/media/"): TrimEnding…
-            // deliberately never trims a root path, so building the prefix from a trimmed root produced "C:\\"
-            // and matched nothing. Longest mount-point match, so /media in a container reports ITS volume.
-            static string Sep(string p) => p.EndsWith(Path.DirectorySeparatorChar) ? p : p + Path.DirectorySeparatorChar;
-            var full = Sep(Path.GetFullPath(mediaDir));
-            var best = DriveInfo.GetDrives()
-                .Where(d => d.IsReady && full.StartsWith(Sep(d.RootDirectory.FullName), StringComparison.OrdinalIgnoreCase))
-                .OrderByDescending(d => d.RootDirectory.FullName.Length)
-                .FirstOrDefault();
-            if (best is null) return null;
-            return new { freeBytes = best.AvailableFreeSpace, totalBytes = best.TotalSize };
-        }
-        catch { return null; }
+        var d = DiskUtil.For(mediaDir);
+        return d is null ? null : new { freeBytes = d.Value.FreeBytes, totalBytes = d.Value.TotalBytes };
     }
 }

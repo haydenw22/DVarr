@@ -56,6 +56,17 @@ public class League
     /// <see cref="AutoStopMode"/> is Auto.</summary>
     public int? AutoStopMaxExtendS { get; set; }
 
+    /// <summary>Retention policy for this league's finished recordings. Null = inherit the global default
+    /// (retention_default_mode). "keep_all" | "keep_last_n" | "keep_days" | "gb_cap" | "watched". Eviction never
+    /// touches a Protected item and always deletes unprotected-oldest first (see RetentionService).</summary>
+    public string? RetentionMode { get; set; }
+    /// <summary>keep_last_n: how many most-recent games to keep. Null = inherit the global default.</summary>
+    public int? RetentionKeepLast { get; set; }
+    /// <summary>keep_days: delete games older than this many days. Null = inherit the global default.</summary>
+    public int? RetentionKeepDays { get; set; }
+    /// <summary>gb_cap: keep the newest games up to this many GB, evict older. Null = inherit the global default.</summary>
+    public int? RetentionGbCap { get; set; }
+
     public long? LastEventSyncUtc { get; set; }
 
     /// <summary>Conflict tie-breaker (higher wins) when demand exceeds both logins for a window: a higher-priority

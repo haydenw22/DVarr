@@ -210,6 +210,7 @@ public static class ApiEndpoints
                 {
                     x.c.Id, x.c.Name, x.c.SourceId, x.sourceLabel, x.c.StreamId,
                     quality = x.c.DetectedQuality, number = x.c.ChannelNumber, group = x.c.GroupName,
+                    logo = x.c.LogoUrl,
                     logicalKey = x.c.LogicalKey, manual = !string.IsNullOrEmpty(x.c.DirectUrl),
                     favorite = x.c.Favorite, hidden = x.c.Hidden,
                 }),
@@ -315,7 +316,7 @@ public static class ApiEndpoints
                 .ThenByDescending(c => (c.EpgChannelId != null && c.EpgChannelId != "") || (c.MatchedEpgId != null && c.MatchedEpgId != ""))
                 .ThenBy(c => c.Name)
                 .Take(take is > 0 and <= 400 ? take.Value : 120)
-                .Select(c => new { c.Id, c.Name, c.SourceId, c.EpgChannelId, c.MatchedEpgId, c.StreamId, group = c.GroupName, manual = c.DirectUrl != null && c.DirectUrl != "" })
+                .Select(c => new { c.Id, c.Name, c.SourceId, c.EpgChannelId, c.MatchedEpgId, c.StreamId, group = c.GroupName, logo = c.LogoUrl, manual = c.DirectUrl != null && c.DirectUrl != "" })
                 .ToListAsync();
 
             // Effective tvg-id = provider's epg_channel_id, else the name-matched one. Programme.EpgChannelId is
@@ -346,7 +347,7 @@ public static class ApiEndpoints
                 source = sid,
                 channels = chans.Select(c => new
                 {
-                    channelId = c.Id, c.Name, c.SourceId, c.StreamId, c.group, c.manual, epgChannelId = Eff(c.EpgChannelId, c.MatchedEpgId),
+                    channelId = c.Id, c.Name, c.SourceId, c.StreamId, c.group, c.logo, c.manual, epgChannelId = Eff(c.EpgChannelId, c.MatchedEpgId),
                     programmes = (Eff(c.EpgChannelId, c.MatchedEpgId) is { } eff && progByKey.TryGetValue((c.SourceId, eff.ToLowerInvariant()), out var ps))
                         ? ps.Select(p => new { p.Id, start = p.StartUtc, stop = p.StopUtc, p.Title })
                         : Enumerable.Empty<object>().Select(_ => new { Id = 0, start = 0L, stop = 0L, Title = "" }),
@@ -377,7 +378,7 @@ public static class ApiEndpoints
                         channel = ch != null ? ch.Name : null, source = s != null ? s.Label : null,
                         r.StartUtc, r.EndUtc, r.PrePadS, r.PostPadS,
                         r.BytesWritten, r.AttemptCount, r.OutputPath, r.FailureReason,
-                        r.EventId,
+                        r.EventId, r.RescueTicketId,
                     };
             var live = await q.Where(x => !terminal.Contains(x.StateEnum)).OrderByDescending(x => x.StartUtc).ToListAsync();
             var history = await q.Where(x => terminal.Contains(x.StateEnum)).OrderByDescending(x => x.StartUtc).Take(200).ToListAsync();
@@ -394,6 +395,16 @@ public static class ApiEndpoints
                 ? new Dictionary<int, string>()
                 : await db.Leagues.Where(l => lgIds.Contains(l.Id)).Select(l => new { l.Id, l.Name }).ToDictionaryAsync(x => x.Id, x => x.Name);
 
+            // Replay-rescue status for the returned rows: a terminal (failed/missed) row that opened a ticket shows
+            // its hunt status; the latest ticket per originating recording wins (loose join by RecordingId).
+            var recIds = rows.Select(r => r.Id).ToList();
+            var ticketByRec = (await db.RescueTickets.AsNoTracking()
+                    .Where(t => recIds.Contains(t.RecordingId))
+                    .Select(t => new { t.RecordingId, t.State, t.NextSweepUtc, t.ExpiresUtc, t.ReplayRecordingId })
+                    .ToListAsync())
+                .GroupBy(t => t.RecordingId)
+                .ToDictionary(g => g.Key, g => g.OrderByDescending(t => t.NextSweepUtc).First());
+
             return Results.Json(rows.Select(r =>
             {
                 int? leagueId = r.EventId is { } eid && evLeague.TryGetValue(eid, out var lid) ? lid : null;
@@ -404,6 +415,10 @@ public static class ApiEndpoints
                     r.BytesWritten, r.AttemptCount, r.OutputPath, r.FailureReason,
                     leagueId,
                     league = leagueId is { } l && lgName.TryGetValue(l, out var ln) ? ln : null,
+                    isReplay = r.RescueTicketId != null,
+                    rescue = ticketByRec.TryGetValue(r.Id, out var tk)
+                        ? (object)new { state = tk.State.ToString(), nextSweepUtc = tk.NextSweepUtc, expiresUtc = tk.ExpiresUtc, replayRecordingId = tk.ReplayRecordingId }
+                        : null,
                 };
             }));
         });
@@ -425,7 +440,29 @@ public static class ApiEndpoints
             });
         });
 
-        app.MapPost("/api/recordings", async (CreateRecordingRequest req, DVarrDbContext db, DbWriteGate gate, SettingsService settings) =>
+        // Stop hunting for a re-air of a failed recording (cancels the ticket + any not-yet-started replay).
+        app.MapPost("/api/recordings/{id:int}/rescue/cancel", async (int id, DVarrDbContext db, DbWriteGate gate) =>
+        {
+            var t = await db.RescueTickets
+                .Where(x => x.RecordingId == id && (x.State == RescueTicketState.Open || x.State == RescueTicketState.Scheduled))
+                .OrderByDescending(x => x.NextSweepUtc).FirstOrDefaultAsync();
+            if (t is null) return Results.NotFound();
+            await gate.WriteAsync(async () =>
+            {
+                t.State = RescueTicketState.Cancelled;
+                t.Note = "cancelled by user";
+                // Cancel the scheduled replay too, but only if it hasn't started capturing (never kill a live one here).
+                if (t.ReplayRecordingId is { } rid)
+                {
+                    var rep = await db.Recordings.FindAsync(rid);
+                    if (rep is not null && rep.State == RecordingState.Pending) { rep.State = RecordingState.Cancelled; rep.UpdatedUtc = EpochTime.Now(); }
+                }
+                await db.SaveChangesAsync();
+            });
+            return Results.Json(new { cancelled = true });
+        });
+
+        app.MapPost("/api/recordings", async (CreateRecordingRequest req, DVarrDbContext db, DbWriteGate gate, SettingsService settings, RuntimePaths paths) =>
         {
             var ch = await db.Channels.FindAsync(req.ChannelId);
             if (ch is null) return Results.BadRequest(new { error = "channel not found" });
@@ -448,6 +485,34 @@ public static class ApiEndpoints
                 CreatedUtc = now, UpdatedUtc = now,
             };
             await gate.WriteAsync(async () => { db.Recordings.Add(rec); await db.SaveChangesAsync(); });
+
+            // Disk guardrail (warn-only): a recording projected to breach the free-space floor becomes a loud
+            // notification now, rather than a silent write failure mid-capture. Never blocks — a rough bitrate
+            // estimate must not drop a game.
+            try
+            {
+                var mediaFloor = await settings.GetIntAsync("disk_min_free_gb") * 1_000_000_000L;
+                var segFloor = await settings.GetIntAsync("disk_min_free_segments_gb") * 1_000_000_000L;
+                if (mediaFloor > 0 || segFloor > 0)
+                {
+                    var windowS = (rec.EndUtc + rec.PostPadS) - (rec.StartUtc - rec.PrePadS);
+                    var projected = await DiskGuard.ProjectBytesAsync(db, ch.Id, ch.DetectedQuality, windowS);
+                    var warns = DiskGuard.ProjectedWarnings(projected, paths, mediaFloor, segFloor);
+                    if (warns.Count > 0)
+                        await gate.WriteAsync(async () =>
+                        {
+                            db.Notifications.Add(new Notification
+                            {
+                                RecordingId = rec.Id, TsUtc = EpochTime.Now(),
+                                Kind = NotificationKind.LowDiskSpace, Severity = Severity.Warn,
+                                Message = "This recording may run the disk low — " + string.Join("; ", warns),
+                            });
+                            await db.SaveChangesAsync();
+                        });
+                }
+            }
+            catch { /* guardrail is best-effort — never fail the schedule over it */ }
+
             return Results.Json(new { rec.Id, state = rec.State.ToString() });
         });
 
@@ -551,8 +616,10 @@ public static class ApiEndpoints
                     .ToListAsync(ct);
                 if (evs.Count > 0) return Results.Json(evs);
             }
-            var year = (DateTime.TryParse(date, out var dy) ? dy.Year : EpochTime.ToDisplay(EpochTime.Now()).Year).ToString();
-            var live = (await tsdb.GetSeasonEventsAsync(leagueId, year, ct)).OrderBy(e => e.StartUtc ?? 0L)
+            // Try the same season-name candidates the sync uses (calendar-year AND split-year), not just "{year}" —
+            // a European league whose seasons are "2025-2026"/"2026-2027" returned nothing under a bare "2026".
+            var year = DateTime.TryParse(date, out var dy) ? dy.Year : EpochTime.ToDisplay(EpochTime.Now()).Year;
+            var live = (await tsdb.GetLeagueScheduleAroundAsync(leagueId, year, ct)).OrderBy(e => e.StartUtc ?? 0L)
                 .Select(e => new { id = e.Id, title = e.Title, date = e.StartUtc, round = e.Round }).ToList();
             return Results.Json(live);
         });
@@ -788,6 +855,11 @@ public static class ApiEndpoints
             if (values.TryGetValue("timezone_display", out var tzId)) EpochTime.SetDisplayZone(tzId);
             return Results.Json(await settings.GetAllAsync());
         });
+
+        // ---- In-app log viewer (recent server log lines from the ring buffer; behind the app's auth like all APIs) ----
+        app.MapGet("/api/logs", (LogRingBuffer logs, int? take, string? level, string? q) =>
+            Results.Json(logs.Recent(take ?? 500, level, q)
+                .Select(e => new { ts = e.TsUtc, level = e.Level, category = e.Category, message = e.Message })));
 
         // ---- Activity feed ----
         app.MapGet("/api/notifications", async (DVarrDbContext db, int? take) =>

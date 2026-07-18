@@ -41,7 +41,30 @@ public sealed class MediaImportService
         if (rec is null || !File.Exists(currentPath)) return currentPath;
 
         var f = await BuildFilingAsync(rec, ct);
-        if (f is null) return await StageUnsortedAsync(recordingId, currentPath, ct); // no event + no match → stage for manual Import
+        if (f is null)
+        {
+            var staged = await StageUnsortedAsync(recordingId, currentPath, ct); // no event + no match → stage for manual Import
+            // Don't let a "Match"-ticked recording fail SILENTLY: tell the user it couldn't be matched and needs a
+            // manual Import (only when a match was actually attempted — a plain manual recording expects to be unsorted).
+            if (!string.IsNullOrWhiteSpace(rec.MatchQuery))
+            {
+                try
+                {
+                    await _gate.WriteAsync(async () =>
+                    {
+                        _db.Notifications.Add(new Data.Entities.Notification
+                        {
+                            RecordingId = recordingId, TsUtc = EpochTime.Now(), Kind = NotificationKind.Unmatched,
+                            Severity = Severity.Warn,
+                            Message = $"couldn't auto-match “{rec.Title}” to a game — it's in the library’s unsorted area; use Import to file it",
+                        });
+                        await _db.SaveChangesAsync(ct);
+                    }, ct);
+                }
+                catch (Exception ex) { _log.LogDebug(ex, "[Media] unmatched-notification write failed for {Id}", recordingId); }
+            }
+            return staged;
+        }
         return await FileRecordingAsync(rec, currentPath, f, ct);
     }
 
@@ -286,20 +309,64 @@ public sealed class MediaImportService
         // 1) Event-linked (auto-scheduled): authoritative, and its ordinal matches the Plex provider's episode index.
         if (rec.EventId is { } eid)
         {
-            var ev = await _db.Events.FindAsync(new object?[] { eid }, ct);
-            var league = ev is null ? null : await _db.Leagues.FindAsync(new object?[] { ev.LeagueId }, ct);
-            if (ev is not null && league is not null)
-            {
-                var local = EpochTime.ToDisplay(ev.StartUtc);
-                var year = local.Year;
-                var ep = await SeasonOrdinalAsync(league.Id, year, ev.Id, ev.StartUtc, ct);
-                return new Filing(league.Name, league.Sport, year, ep, ev.Title, local.ToString("yyyy-MM-dd"),
-                    league.PosterUrl, string.IsNullOrWhiteSpace(ev.ThumbUrl) ? league.PosterUrl : ev.ThumbUrl,
-                    $"league-{league.Id}", ev.Id);
-            }
+            var f = await FilingForEventAsync(eid, ct);
+            if (f is not null) return f;
         }
 
-        // 2) Manual recording with a TheSportsDB match query: best-effort enrich for a Plex-clean name.
+        // 2) Local-event match (no EventId): bind to a LOCAL synced event this recording COVERS, before the fragile
+        // TheSportsDB text search. DVarr syncs the full season of every monitored league, so a monitored game is local.
+        if (rec.EventId is null)
+        {
+            try
+            {
+                var winStart = rec.StartUtc - rec.PrePadS;
+                var winEnd = rec.EndUtc + rec.PostPadS;
+
+                // 2a) Team-token match on the recording's match query, falling back to its title. Matching on TEAM
+                // tokens (not the whole title) is robust for foreign-language guide titles — "FC Porto"/"Moreirense"
+                // appear in both the Polish EPG title and the TheSportsDB event, while league-label noise ("Liga
+                // portugalska", "mecz:") doesn't overlap and is ignored. The title fallback catches a recording whose
+                // schedule set no explicit match query but whose title still carries the teams.
+                var matchText = !string.IsNullOrWhiteSpace(rec.MatchQuery) ? rec.MatchQuery : rec.Title;
+                var qTokens = MatchTokens(matchText);
+                if (qTokens.Count > 0)
+                {
+                    var candidates = await _db.Events.Where(e => e.StartUtc >= winStart && e.StartUtc <= winEnd)
+                        .Select(e => new { e.Id, e.Title, e.StartUtc }).ToListAsync(ct);
+                    var best = candidates
+                        .Select(e => new { e, score = qTokens.Intersect(MatchTokens(e.Title)).Count() })
+                        .Where(x => x.score >= 2) // ≥2 shared significant tokens = both team names, not a coincidence
+                        .OrderByDescending(x => x.score).ThenBy(x => Math.Abs(x.e.StartUtc - rec.StartUtc))
+                        .FirstOrDefault();
+                    if (best is not null)
+                    {
+                        var f = await FilingForEventAsync(best.e.Id, ct, $"by team tokens (score {best.score})", rec.Id);
+                        if (f is not null) return f;
+                    }
+                }
+
+                // 2b) Channel→league→event: a recording on a channel MAPPED to a monitored league, with exactly one of
+                // that league's events airing in the window, files against that event even when the guide title is
+                // generic ("MLB Baseball") and carries no team names — the mapping + time is signal enough. Fixes a
+                // manual/guide MLB recording that landed unsorted because its EPG title had no team names to match on.
+                var leagueIds = await _db.LeagueChannelMaps.Where(m => m.ChannelId == rec.ChannelId)
+                    .Select(m => m.LeagueId).Distinct().ToListAsync(ct);
+                if (leagueIds.Count > 0)
+                {
+                    var evIds = await _db.Events.Where(e => leagueIds.Contains(e.LeagueId) && e.Monitored
+                            && e.StartUtc >= winStart && e.StartUtc <= winEnd)
+                        .Select(e => e.Id).ToListAsync(ct);
+                    if (evIds.Count == 1) // only when unambiguous — never guess between two games in the window
+                    {
+                        var f = await FilingForEventAsync(evIds[0], ct, "by mapped channel + time window", rec.Id);
+                        if (f is not null) return f;
+                    }
+                }
+            }
+            catch (Exception ex) { _log.LogDebug(ex, "[Media] local-event match failed for recording {Id}", rec.Id); }
+        }
+
+        // 3) Manual recording with a TheSportsDB match query: best-effort text search for a Plex-clean name.
         if (!string.IsNullOrWhiteSpace(rec.MatchQuery))
         {
             try
@@ -307,6 +374,15 @@ public sealed class MediaImportService
                 var year = EpochTime.ToDisplay(rec.StartUtc).Year;
                 var hits = await _tsdb.SearchEventsAsync(rec.MatchQuery!, year.ToString(), ct);
                 if (hits.Count == 0) hits = await _tsdb.SearchEventsAsync(rec.MatchQuery!, null, ct);
+                // The raw EPG title often carries league-label noise around the teams ("Liga portugalska - mecz: …"),
+                // which sinks TheSportsDB's event-name search. If it missed, retry with just the significant tokens
+                // (team names), which searches far more reliably.
+                if (hits.Count == 0)
+                {
+                    var cleaned = string.Join(" ", MatchTokens(rec.MatchQuery!));
+                    if (cleaned.Length > 0 && !string.Equals(cleaned, rec.MatchQuery!.Trim(), StringComparison.OrdinalIgnoreCase))
+                        hits = await _tsdb.SearchEventsAsync(cleaned, null, ct);
+                }
                 var best = PickBestMatch(hits, rec.StartUtc);
                 if (best is not null)
                 {
@@ -333,6 +409,23 @@ public sealed class MediaImportService
         return null;
     }
 
+    /// <summary>Build a Filing from a linked DVarr Event (shared by the event-linked and local-match tiers). Returns
+    /// null when the event/league row is gone; logs the match reason when supplied.</summary>
+    private async Task<Filing?> FilingForEventAsync(int eventId, CancellationToken ct, string? matchReason = null, int? recId = null)
+    {
+        var ev = await _db.Events.FindAsync(new object?[] { eventId }, ct);
+        var league = ev is null ? null : await _db.Leagues.FindAsync(new object?[] { ev.LeagueId }, ct);
+        if (ev is null || league is null) return null;
+        if (matchReason is not null)
+            _log.LogInformation("[Media] Recording {Id} matched local event {Eid} '{Title}' {Why}", recId, ev.Id, ev.Title, matchReason);
+        var local = EpochTime.ToDisplay(ev.StartUtc);
+        var year = local.Year;
+        var ep = await SeasonOrdinalAsync(league.Id, year, ev.Id, ev.StartUtc, ct);
+        return new Filing(league.Name, league.Sport, year, ep, ev.Title, local.ToString("yyyy-MM-dd"),
+            league.PosterUrl, string.IsNullOrWhiteSpace(ev.ThumbUrl) ? league.PosterUrl : ev.ThumbUrl,
+            $"league-{league.Id}", ev.Id);
+    }
+
     private async Task<int> SeasonOrdinalAsync(int leagueId, int year, int eventId, long eventStartUtc, CancellationToken ct)
     {
         // ThenBy(Id) gives a STABLE tie-break (motorsport sessions / date-only events can share StartUtc) so this
@@ -347,6 +440,23 @@ public sealed class MediaImportService
         // would collide with the real first event.
         _log.LogWarning("[Media] event {Eid} absent from league {Lid} year {Yr} ordinal set; using date fallback", eventId, leagueId, year);
         return EpochTime.ToDisplay(eventStartUtc).DayOfYear;
+    }
+
+    // Common connective / broadcast noise that must never count as a "team" token when matching a recording title to an
+    // event (kept tiny + language-agnostic; league-label words are naturally ignored since they don't appear in the
+    // TheSportsDB event title). Everything else of length >= 3 is treated as significant (team names, cities).
+    private static readonly HashSet<string> MatchStop = new(StringComparer.Ordinal)
+    { "vs", "the", "and", "live", "match", "game", "fixture", "round", "matchday" };
+
+    /// <summary>Significant lowercased alphanumeric tokens (length >= 3, minus obvious connective noise) of a title —
+    /// the basis for team-name overlap matching. "FC Porto - Moreirense FC" → {porto, moreirense}.</summary>
+    internal static HashSet<string> MatchTokens(string? s)
+    {
+        var set = new HashSet<string>(StringComparer.Ordinal);
+        if (string.IsNullOrWhiteSpace(s)) return set;
+        foreach (var raw in System.Text.RegularExpressions.Regex.Split(s!.ToLowerInvariant(), "[^a-z0-9]+"))
+            if (raw.Length >= 3 && !MatchStop.Contains(raw)) set.Add(raw);
+        return set;
     }
 
     private static TsdbEvent? PickBestMatch(List<TsdbEvent> hits, long startUtc)

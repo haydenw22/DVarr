@@ -44,6 +44,12 @@ public sealed class AutoScheduleService : BackgroundService
     // per finalize). Runs at most once a day, piggybacked on the schedule tick.
     private static long _lastRetentionPruneUtc;
 
+    // Last low-disk-space warning: warn at most once / 6h so a genuinely full disk nags without spamming the feed.
+    private static long _lastLowDiskWarnUtc;
+
+    // Last retention eviction sweep (at most once a day, piggybacked on the tick).
+    private static long _lastRetentionSweepUtc;
+
     public AutoScheduleService(IServiceScopeFactory scopes, DbWriteGate gate, ILogger<AutoScheduleService> log)
     { _scopes = scopes; _gate = gate; _log = log; }
 
@@ -160,6 +166,50 @@ public sealed class AutoScheduleService : BackgroundService
                 }, ct);
             }
             catch (Exception ex) { _log.LogWarning(ex, "[AutoSchedule] retention prune failed (will retry tomorrow)"); }
+        }
+
+        // 0b) Low-space guardrail: warn (≤ once / 6h) when a media/segments filesystem is already under its floor, so a
+        //     full disk surfaces as a loud alert well before a 2am recording fails on write.
+        try
+        {
+            var mediaFloor = await settings.GetIntAsync("disk_min_free_gb") * 1_000_000_000L;
+            var segFloor = await settings.GetIntAsync("disk_min_free_segments_gb") * 1_000_000_000L;
+            if ((mediaFloor > 0 || segFloor > 0) && now - Interlocked.Read(ref _lastLowDiskWarnUtc) > 6 * 3600)
+            {
+                var paths = scope.ServiceProvider.GetRequiredService<RuntimePaths>();
+                var low = DiskGuard.CurrentLowSpace(paths, mediaFloor, segFloor);
+                if (low.Count > 0)
+                {
+                    Interlocked.Exchange(ref _lastLowDiskWarnUtc, now);
+                    var msg = "Low disk space — " + string.Join("; ", low);
+                    await _gate.WriteAsync(async () =>
+                    {
+                        db.Notifications.Add(new Notification { TsUtc = now, Kind = NotificationKind.LowDiskSpace, Severity = Severity.Warn, Message = msg });
+                        await db.SaveChangesAsync(ct);
+                    }, ct);
+                    _log.LogWarning("[AutoSchedule] {Msg}", msg);
+                }
+            }
+        }
+        catch (Exception ex) { _log.LogWarning(ex, "[AutoSchedule] low-space check failed"); }
+
+        // 0c) Retention sweep (daily): evict old finished recordings per each league's policy (unprotected-oldest
+        //     first, reusing the safe delete-with-files primitive). No-op unless a non-keep_all policy is configured.
+        if (now - Interlocked.Read(ref _lastRetentionSweepUtc) > 86400)
+        {
+            try
+            {
+                var (n, freed, _) = await scope.ServiceProvider.GetRequiredService<DVarr.Services.Media.RetentionService>().SweepAsync(ct: ct);
+                // Advance the stamp only on SUCCESS (audit RET-05) — a failed sweep (locked db, unmounted drive)
+                // must not silently defer cleanup a whole day.
+                Interlocked.Exchange(ref _lastRetentionSweepUtc, now);
+                if (n > 0) _log.LogInformation("[AutoSchedule] retention evicted {N} item(s), freed {Gb:0.0} GB", n, freed / 1_000_000_000.0);
+            }
+            catch (Exception ex)
+            {
+                Interlocked.Exchange(ref _lastRetentionSweepUtc, now - 86400 + 3600); // retry in ~1h, not tomorrow
+                _log.LogWarning(ex, "[AutoSchedule] retention sweep failed (retrying in ~1h)");
+            }
         }
 
         // 1) Refresh events for monitored, non-manual leagues whose data is stale.
@@ -623,5 +673,15 @@ public sealed class AutoScheduleService : BackgroundService
             db.Notifications.Add(new Notification { RecordingId = recId, TsUtc = now, Kind = NotificationKind.Missed, Severity = Severity.Critical, ToState = "Missed", Message = r.FailureReason });
             await db.SaveChangesAsync();
         });
+
+        try
+        {
+            using var rescueScope = _scopes.CreateScope();
+            await RescueService.TryOpenTicketAsync(
+                rescueScope.ServiceProvider.GetRequiredService<DVarrDbContext>(), _gate,
+                rescueScope.ServiceProvider.GetRequiredService<SettingsService>(),
+                recId, "conflict window elapsed (both logins busy)", _log);
+        }
+        catch (Exception ex) { _log.LogDebug(ex, "[AutoSchedule] rescue-ticket open failed for {Id}", recId); }
     }
 }

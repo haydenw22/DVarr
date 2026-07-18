@@ -55,6 +55,13 @@ public class LibraryItem
     /// into the League/Season/Game layout.</summary>
     public bool Unsorted { get; set; }
 
+    /// <summary>User "protect" flag — retention eviction never deletes a protected item (grand finals, keepsakes).</summary>
+    public bool Protected { get; set; }
+
+    /// <summary>When a media server reported this file watched (Plex/Jellyfin scrobble webhook), epoch s. Null =
+    /// unwatched. Drives the "delete after watched" retention mode.</summary>
+    public long? WatchedUtc { get; set; }
+
     public long CreatedUtc { get; set; }
     public long UpdatedUtc { get; set; }
 }

@@ -53,6 +53,27 @@ public enum NotificationKind
     EpgRepick,     // arm-window guide match moved a recording to the channel actually showing the event
     Unresolvable,  // a monitored event can't be scheduled (league has no usable channel mapping)
     AutoExtended,  // smart auto-stop adjusted a live recording's window from the guide's live status (extended / capped / closed)
+    Unmatched,     // a finished manual/guide recording couldn't be auto-matched to a game — staged for manual Import
+    LowDiskSpace,  // a filesystem is under its free-space floor, or a new recording is projected to breach it
+    ReplayHunting,   // opened a second-chance rescue ticket — hunting the guide for a re-air of a failed game
+    ReplayScheduled, // found a re-air and scheduled a low-priority replay recording
+    ReplayGaveUp,    // no re-air appeared before the rescue ticket expired
+    RetentionEvicted, // retention policy deleted one or more old recordings to reclaim space
+}
+
+/// <summary>Lifecycle of a second-chance replay-rescue ticket (docs: automatic re-air rescue).</summary>
+public enum RescueTicketState
+{
+    /// <summary>Still hunting the guide for a re-air.</summary>
+    Open,
+    /// <summary>A re-air was found and a replay recording is armed.</summary>
+    Scheduled,
+    /// <summary>A good copy landed (the replay finished, or the event was recorded some other way).</summary>
+    Closed,
+    /// <summary>No re-air appeared before the ticket expired.</summary>
+    GaveUp,
+    /// <summary>Cancelled by the user.</summary>
+    Cancelled,
 }
 
 public enum Severity { Info, Warn, Critical }

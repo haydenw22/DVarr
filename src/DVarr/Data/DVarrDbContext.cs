@@ -28,6 +28,7 @@ public class DVarrDbContext : DbContext
     public DbSet<Notification> Notifications => Set<Notification>();
     public DbSet<SecretEntry> Secrets => Set<SecretEntry>();
     public DbSet<LibraryItem> LibraryItems => Set<LibraryItem>();
+    public DbSet<RescueTicket> RescueTickets => Set<RescueTicket>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -144,11 +145,21 @@ public class DVarrDbContext : DbContext
         {
             e.HasIndex(i => i.FilePath).IsUnique();
             e.HasIndex(i => i.RecordingId);
+            e.HasIndex(i => i.LeagueId); // per-league retention scans
             e.HasIndex(i => new { i.ShowName, i.SeasonYear });
             e.HasIndex(i => i.Status);
             e.HasOne<Recording>().WithMany().HasForeignKey(i => i.RecordingId).OnDelete(DeleteBehavior.SetNull);
             e.HasOne<Event>().WithMany().HasForeignKey(i => i.EventId).OnDelete(DeleteBehavior.SetNull);
             e.HasOne<League>().WithMany().HasForeignKey(i => i.LeagueId).OnDelete(DeleteBehavior.SetNull);
+        });
+
+        // --- RescueTicket (second-chance replay hunting; loose provenance snapshots — no cascading FKs so a
+        //     re-sync or a recording delete can't wipe an in-flight ticket) ---
+        b.Entity<RescueTicket>(e =>
+        {
+            e.HasIndex(t => new { t.State, t.NextSweepUtc });
+            e.HasIndex(t => t.EventId);
+            e.HasIndex(t => t.RecordingId);
         });
 
         // --- Ops ---

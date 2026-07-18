@@ -90,11 +90,42 @@ public static class ChapterMarks
         if (chapters[0].StartMs > 90_000) chapters.Insert(0, (0, "Pre-game"));
         else if (chapters[0].StartMs > 0) chapters[0] = (0, chapters[0].Title); // tiny lead-in — snap to 0
 
+        return RenderChapters(chapters, estimatedDurationS);
+    }
+
+    /// <summary>
+    /// Fallback chapters from the SCHEDULE alone, for when no live status was captured (LiveMarksJson empty — e.g.
+    /// TheSportsDB carried no livescore for the fixture). Produces Pre-game / Kick-off (scheduled) / Post-game from
+    /// the scheduled kickoff and window-end, relative to the capture start. These are estimates — the "(scheduled)"
+    /// label is deliberate — but they still give a one-press skip past the studio pre-roll. Returns null when there
+    /// is no bracketing structure worth embedding (no pre-roll AND no post-roll).
+    /// </summary>
+    public static string? BuildScheduledFfmetadata(long captureStartUtc, long scheduledStartUtc, long scheduledEndUtc, int estimatedDurationS)
+    {
+        if (captureStartUtc <= 0 || estimatedDurationS <= 0) return null;
+
+        var kickoffS = Math.Max(0, scheduledStartUtc - captureStartUtc);
+        var postS = scheduledEndUtc - captureStartUtc;
+
+        var chapters = new List<(long StartMs, string Title)>();
+        if (kickoffS > 90) chapters.Add((0, "Pre-game"));            // meaningful pre-roll before kickoff
+        chapters.Add((kickoffS * 1000, "Kick-off (scheduled)"));
+        if (postS > kickoffS + 60 && postS < (long)estimatedDurationS - 60)
+            chapters.Add((postS * 1000, "Post-game"));               // file ran past the scheduled end (post-pad / auto-stop extension)
+
+        // A lone kickoff-at-0 marker isn't worth a chapter track — need at least one bracketing chapter.
+        if (chapters.Count < 2) return null;
+        return RenderChapters(chapters, estimatedDurationS);
+    }
+
+    /// <summary>Render an ordered (offset, title) list as an ;FFMETADATA1 chapters document. Chapter ENDs are
+    /// cosmetic (players navigate by starts) — each ends where the next begins, the last at the estimated tail.</summary>
+    private static string RenderChapters(List<(long StartMs, string Title)> chapters, int estimatedDurationS)
+    {
         var sb = new StringBuilder(";FFMETADATA1\n");
         for (var i = 0; i < chapters.Count; i++)
         {
             var start = chapters[i].StartMs;
-            // Ends are cosmetic (players navigate by starts) — next chapter's start, or the estimated tail.
             var end = i + 1 < chapters.Count ? chapters[i + 1].StartMs : Math.Max(start + 60_000, (long)estimatedDurationS * 1000);
             if (end <= start) end = start + 1000;
             sb.Append("[CHAPTER]\nTIMEBASE=1/1000\n");

@@ -80,7 +80,7 @@ public sealed class SettingsService
         // Brisbane +10). The container ships no tz database, so this is a pure offset (no daylight-saving shift) — exact
         // for Brisbane. OFF by default; the manual per-source EPG button is unaffected. (epg_auto_sync_time's default
         // must stay non-numeric so the /api/settings int-guard treats it as text.)
-        ["epg_auto_sync_enabled"] = "false",
+        ["epg_auto_sync_enabled"] = "true",
         ["epg_auto_sync_time"] = "04:00",
         ["epg_auto_sync_offset_minutes"] = "600",
         // Internal bookkeeping (NOT a user setting; hidden by the UI): the local date ("yyyy-MM-dd") the daily EPG sync
@@ -96,6 +96,10 @@ public sealed class SettingsService
         // Arm-window EPG re-pick: when ON, a Pending recording within ~24h of start is re-resolved against the live
         // guide and moved (same credential only) to whichever mapped channel's EPG actually shows the event.
         ["epg_repick_enabled"] = "true",
+        // National-broadcast fallback: when a monitored game airs on a channel you DIDN'T map (e.g. it moved to ESPN)
+        // and no mapped channel's guide shows it, search the whole provider for a channel whose guide clearly shows the
+        // matchup (BOTH teams) and record there instead. Same login only; requires the guide to actually list the game.
+        ["national_fallback_enabled"] = "true",
         // When a recording's pre-roll attempt captures nothing (e.g. the channel isn't live yet), make ONE guaranteed
         // fresh attempt at the event's real start time. Never interrupts a recording that's already capturing.
         ["retry_at_event_start"] = "true",
@@ -108,6 +112,29 @@ public sealed class SettingsService
         // Plex/Jellyfin/Kodi/VLC read natively. Independent of auto_stop_enabled (a "fixed" league still gets
         // chapters); OFF = no status polling for chapter purposes.
         ["chapter_marks_enabled"] = "true",
+        // Second-chance replay rescue: when a monitored-league game ends with no playable copy (failed finalize,
+        // missed window, or an unresolved conflict), open a rescue ticket and let a background sweep hunt the guide
+        // for a re-air, scheduling it as a low-priority replay that never preempts a live game. whole_source widens
+        // the search from the league's mapped channels to every channel on those sources; give_up_days abandons the
+        // hunt after N days; interval_s is how often the sweep runs.
+        ["replay_rescue_enabled"] = "true",
+        ["replay_rescue_whole_source"] = "false",
+        ["replay_rescue_give_up_days"] = "3",
+        ["replay_rescue_interval_s"] = "900",
+        // Disk-space guardrails: warn (never block) when a filesystem is under its free floor, or when a new recording
+        // is projected to push it under. GB; 0 = that floor disabled. Media = the final library volume; segments = the
+        // in-flight capture scratch (may be a different filesystem — the guardrail checks both).
+        ["disk_min_free_gb"] = "10",
+        ["disk_min_free_segments_gb"] = "10",
+        // Retention: automatically evict old finished recordings per policy. Default keep_all = nothing is ever deleted
+        // until you choose a policy (globally here, or per-league on the Leagues page). Modes: keep_all | keep_last_n |
+        // keep_days | gb_cap | watched (needs the Plex/Jellyfin watched webhook). A per-recording Protect flag always
+        // wins, eviction is unprotected-oldest-first, and the Storage settings tab has a dry-run preview.
+        // (retention_default_mode's default must stay non-numeric so the /api/settings int-guard treats it as text.)
+        ["retention_default_mode"] = "keep_all",
+        ["retention_keep_last"] = "20",
+        ["retention_keep_days"] = "90",
+        ["retention_gb_cap"] = "500",
         ["timezone_display"] = "Australia/Brisbane",
         ["ha_webhook_url"] = "",
         // Public base URL of this DVarr instance (e.g. https://dvr.example.com), used to build the externally-reachable

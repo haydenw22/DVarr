@@ -1,6 +1,7 @@
 using System.Reflection;
 using DVarr.Data;
 using DVarr.Infrastructure;
+using DVarr.Services;
 using Microsoft.EntityFrameworkCore;
 
 namespace DVarr.Api;
@@ -22,7 +23,7 @@ public static class HealthEndpoints
             DVarr.Data.RecordingState.Finalizing,
         };
 
-        app.MapGet("/api/health", async (DVarrDbContext db, DVarr.Infrastructure.FfmpegLocator ff) =>
+        app.MapGet("/api/health", async (DVarrDbContext db, DVarr.Infrastructure.FfmpegLocator ff, RuntimePaths paths, SettingsService settings) =>
         {
             var now = EpochTime.Now();
 
@@ -57,6 +58,18 @@ public static class HealthEndpoints
             catch (Exception ex) { dbOk = false; dbErr = ex.Message; }
             var freeCredentials = Math.Max(0, sources - busyCredentials);
 
+            // Disk gauge (dashboard) + the floors that colour it. Media = final library volume; segments = capture
+            // scratch, reported separately only when it lives on a different filesystem.
+            var mediaDisk = DiskUtil.For(paths.MediaDir);
+            var segDisk = DiskUtil.For(paths.SegmentDir);
+            var mediaFloor = await settings.GetIntAsync("disk_min_free_gb") * 1_000_000_000L;
+            var segFloor = await settings.GetIntAsync("disk_min_free_segments_gb") * 1_000_000_000L;
+            var mediaRoot = DiskUtil.MountRoot(paths.MediaDir);
+            var segRoot = DiskUtil.MountRoot(paths.SegmentDir);
+            var sameVol = mediaRoot != null && string.Equals(mediaRoot, segRoot, StringComparison.OrdinalIgnoreCase);
+            object? mediaBlock = mediaDisk is { } md ? new { freeBytes = md.FreeBytes, totalBytes = md.TotalBytes, floorBytes = mediaFloor } : null;
+            object? segBlock = (sameVol || segDisk is null) ? null : new { freeBytes = segDisk.Value.FreeBytes, totalBytes = segDisk.Value.TotalBytes, floorBytes = segFloor };
+
             return Results.Json(new
             {
                 status = dbOk ? "ok" : "degraded",
@@ -74,6 +87,7 @@ public static class HealthEndpoints
                 sources = new { total = sources, free_credentials = freeCredentials },
                 recordings = new { active, pending },
                 scheduler = new { last_tick_utc = lastTick },
+                disk = new { media = mediaBlock, segments = segBlock, sameVolume = sameVol },
             });
         });
     }

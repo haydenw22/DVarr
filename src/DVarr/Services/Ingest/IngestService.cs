@@ -84,6 +84,7 @@ public sealed class IngestService
                         ch.TvArchive = st.TvArchive != 0;
                         ch.TvArchiveDuration = st.TvArchiveDuration;
                         ch.DetectedQuality = DetectQuality(st.Name);
+                        ch.LogoUrl = CleanIcon(st.StreamIcon);
                         ch.UpdatedUtc = now;
                         updated++;
                     }
@@ -102,6 +103,7 @@ public sealed class IngestService
                             TvArchive = st.TvArchive != 0,
                             TvArchiveDuration = st.TvArchiveDuration,
                             DetectedQuality = DetectQuality(st.Name),
+                            LogoUrl = CleanIcon(st.StreamIcon),
                             Enabled = true,
                             CreatedUtc = now,
                             UpdatedUtc = now,
@@ -171,6 +173,15 @@ public sealed class IngestService
         n = NonAlnum.Replace(n, " ");
         n = Spaces.Replace(n, " ").Trim();
         return n;
+    }
+
+    /// <summary>Accept a provider stream_icon only when it's an absolute http(s) URL — providers often ship an empty
+    /// string, a bare path, or junk. Bounded length so a pathological value can't bloat a row.</summary>
+    internal static string? CleanIcon(string? icon)
+    {
+        var s = icon?.Trim();
+        if (string.IsNullOrEmpty(s) || s.Length > 600) return null;
+        return Uri.TryCreate(s, UriKind.Absolute, out var u) && (u.Scheme == Uri.UriSchemeHttp || u.Scheme == Uri.UriSchemeHttps) ? s : null;
     }
 
     internal static string? DetectQuality(string? name)

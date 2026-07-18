@@ -3,6 +3,7 @@ using System;
 using DVarr.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -10,9 +11,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace DVarr.Data.Migrations
 {
     [DbContext(typeof(DVarrDbContext))]
-    partial class DVarrDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260717134108_AddRescueTickets")]
+    partial class AddRescueTickets
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "8.0.28");
@@ -384,18 +387,6 @@ namespace DVarr.Data.Migrations
                     b.Property<int>("Priority")
                         .HasColumnType("INTEGER");
 
-                    b.Property<int?>("RetentionGbCap")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<int?>("RetentionKeepDays")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<int?>("RetentionKeepLast")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("RetentionMode")
-                        .HasColumnType("TEXT");
-
                     b.Property<int>("ScheduleHorizonDays")
                         .HasColumnType("INTEGER");
 
@@ -495,9 +486,6 @@ namespace DVarr.Data.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
-                    b.Property<bool>("Protected")
-                        .HasColumnType("INTEGER");
-
                     b.Property<int?>("RecordingId")
                         .HasColumnType("INTEGER");
 
@@ -533,9 +521,6 @@ namespace DVarr.Data.Migrations
 
                     b.Property<string>("VideoCodec")
                         .HasColumnType("TEXT");
-
-                    b.Property<long?>("WatchedUtc")
-                        .HasColumnType("INTEGER");
 
                     b.HasKey("Id");
 

@@ -69,6 +69,10 @@ public class Recording
     /// finalize, so the file is renamed to a Plex-appropriate "League/Season/Event" with artwork. Null = leave flat.</summary>
     public string? MatchQuery { get; set; }
 
+    /// <summary>Set on a REPLAY recording scheduled by the second-chance rescue sweep — links it back to the ticket
+    /// that produced it (and marks it as a replay in the UI). Null for a normal recording.</summary>
+    public int? RescueTicketId { get; set; }
+
     public long CreatedUtc { get; set; }
     public long UpdatedUtc { get; set; }
 

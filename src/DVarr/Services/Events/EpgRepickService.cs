@@ -28,6 +28,7 @@ public sealed class EpgRepickService
     private const int BlankRefreshWindowS = 3600;      // only chase a blank guide when the event is this close (a blank guide days out is normal)
     private const int StaleEpgS = 12 * 3600;           // refresh the source's guide if its last good sync is older than this
     private const int RefreshCooldownS = 30 * 60;      // at most one opportunistic EPG refresh per source per 30 min
+    private const double PinOverrideScore = 0.5;       // a PINNED channel is only overridden by a STRONG both-team match elsewhere
 
     // Per-source last opportunistic-refresh stamp (static: the service is scoped per tick/request).
     private static readonly ConcurrentDictionary<int, long> _lastRefresh = new();
@@ -81,9 +82,19 @@ public sealed class EpgRepickService
         // placement, the guide governs where the game actually airs. The MinEpgScore + Hysteresis gates below mean a
         // channel whose guide DOES show the event is never abandoned on a weak or merely-similar match elsewhere.
         var best = all.OrderByDescending(c => c.EpgScore).ThenByDescending(c => c.Score).First();
-        var curEpg = all.FirstOrDefault(c => c.ChannelId == rec.ChannelId)?.EpgScore ?? 0;
+        var cur = all.FirstOrDefault(c => c.ChannelId == rec.ChannelId);
+        var curEpg = cur?.EpgScore ?? 0;
+
+        // National-broadcast fallback: when NO mapped channel actually shows this game (best mapped EPG match is
+        // weak/zero — EpgScore now only counts a both-team match), the game may be on a channel the user didn't map
+        // (e.g. ESPN). Search the whole credential for a both-team match and re-point there, instead of recording a
+        // mapped channel that isn't carrying the game.
+        if (best.EpgScore < MinEpgScore && await TryNationalFallbackAsync(rec, ev, ct)) return true;
+
         if (best.ChannelId == rec.ChannelId) return false;                       // already on the guide's pick
         if (best.EpgScore < MinEpgScore || best.EpgScore < curEpg + Hysteresis) return false; // move only for a real guide reason
+        // Protect a PINNED current channel: only a strong, unambiguous both-team match elsewhere overrides the user's pin.
+        if (cur is { Pinned: true } && best.EpgScore < PinOverrideScore) return false;
 
         var fromName = (await _db.Channels.FindAsync(new object?[] { rec.ChannelId }, ct))?.Name ?? $"#{rec.ChannelId}";
         var moved = false;
@@ -127,6 +138,72 @@ public sealed class EpgRepickService
         var winStart = ev.StartUtc - 1800;
         var winEnd = ev.EndUtc ?? ev.StartUtc + 7200;
         return !await _db.Programmes.AnyAsync(p => p.SourceId == sourceId && effIds.Contains(p.EpgChannelId) && p.StopUtc > winStart && p.StartUtc < winEnd, ct);
+    }
+
+    /// <summary>National-broadcast fallback: when no MAPPED channel shows the event, search every channel on the
+    /// recording's own credential for a programme that clearly shows THIS game (both teams) and re-point there — the
+    /// game moved to a channel the user didn't map (e.g. ESPN). Same credential only (slot planning untouched); locks
+    /// the channel so the normal mapped re-pick won't drag it back. Opt-out via national_fallback_enabled. Needs a
+    /// two-team event title (skips single-name events like motorsport, where "both teams" is meaningless).</summary>
+    private async Task<bool> TryNationalFallbackAsync(Data.Entities.Recording rec, Event ev, CancellationToken ct)
+    {
+        if (!await _settings.GetBoolAsync("national_fallback_enabled")) return false;
+        var (sideA, sideB) = ResolverService.EventSides(ev.Title);
+        if (ReferenceEquals(sideA, sideB) || sideA.Count == 0 || sideB.Count == 0) return false; // need two distinct teams
+
+        var now = EpochTime.Now();
+        // Every enabled channel on this credential that ISN'T already mapped to the league (those were just judged),
+        // keyed by effective EPG id (provider tvg-id, else the name-matched id).
+        var mapped = await _db.LeagueChannelMaps.Where(m => m.LeagueId == ev.LeagueId).Select(m => m.ChannelId).ToListAsync(ct);
+        var chans = await _db.Channels.AsNoTracking()
+            .Where(c => c.SourceId == rec.SourceId && c.Enabled && !mapped.Contains(c.Id))
+            .Select(c => new { c.Id, c.StreamId, c.Name, c.EpgChannelId, c.MatchedEpgId })
+            .ToListAsync(ct);
+        var byEpg = new Dictionary<string, (int Id, int StreamId, string Name)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var c in chans)
+        {
+            var eid = !string.IsNullOrEmpty(c.EpgChannelId) ? c.EpgChannelId : c.MatchedEpgId;
+            if (!string.IsNullOrEmpty(eid)) byEpg.TryAdd(eid!, (c.Id, c.StreamId, c.Name));
+        }
+        if (byEpg.Count == 0) return false;
+
+        var winStart = ev.StartUtc - 1800;
+        var winEnd = (ev.EndUtc ?? ev.StartUtc + 7200) + 1800;
+        var effIds = byEpg.Keys.ToList();
+        var progs = await _db.Programmes.AsNoTracking()
+            .Where(p => p.SourceId == rec.SourceId && effIds.Contains(p.EpgChannelId) && p.StopUtc > winStart && p.StartUtc < winEnd)
+            .Select(p => new { p.EpgChannelId, p.Title })
+            .Take(4096).ToListAsync(ct);
+
+        var best = progs
+            .Where(p => ResolverService.ShowsBothTeams(p.Title, sideA, sideB))
+            .Select(p => new { p, sim = ResolverService.Similarity(p.Title, ev.Title), ch = byEpg.GetValueOrDefault(p.EpgChannelId) })
+            .Where(x => x.ch.Id != 0)
+            .OrderByDescending(x => x.sim).FirstOrDefault();
+        if (best is null) return false;
+
+        var moved = false;
+        await _gate.WriteAsync(async () =>
+        {
+            var fresh = await _db.Recordings.AsNoTracking().FirstOrDefaultAsync(r => r.Id == rec.Id, ct);
+            if (fresh is null || fresh.State != RecordingState.Pending || fresh.ChannelLocked || fresh.ChannelId == best.ch.Id) return;
+            await RecordingRepoint.ApplyAsync(_db, rec.Id, rec.SourceId, best.ch.Id, best.ch.StreamId, now);
+            // Lock it: a deliberate "the game is here" decision the mapped-channel re-pick must not undo next tick.
+            await _db.Recordings.Where(r => r.Id == rec.Id).ExecuteUpdateAsync(s => s.SetProperty(r => r.ChannelLocked, true), ct);
+            _db.Notifications.Add(new Notification
+            {
+                RecordingId = rec.Id, TsUtc = now, Kind = NotificationKind.EpgRepick, Severity = Severity.Info,
+                Message = $"national broadcast: '{ev.Title}' is on '{best.ch.Name}' (not a mapped channel) — recording moved there",
+            });
+            await _db.SaveChangesAsync(ct);
+            moved = true;
+        }, ct);
+        if (moved)
+        {
+            _db.Entry(rec).State = Microsoft.EntityFrameworkCore.EntityState.Detached;
+            _log.LogInformation("[EpgRepick] national fallback: '{Title}' → {Chan} on credential {Src}", ev.Title, best.ch.Name, rec.SourceId);
+        }
+        return moved;
     }
 
     private void KickEpgRefresh(int sourceId, string eventTitle)

@@ -45,6 +45,11 @@ public sealed class AutoStopService : BackgroundService
     {
         "FT", "AET", "AP", "Match Finished", "Finished", "Full Time", "Race Finished",
         "Cancelled", "Postponed", "Abandoned", "AW", "WO",
+        // Non-soccer terminals (baseball / basketball / NFL / hockey on TheSportsDB): a finished game reports
+        // "Final" (sometimes "Final/OT", "Final/SO") or a spelled-out finish. Without these a finished baseball
+        // game with no clean "FT" classified as Unknown and auto-stop over-extended to the cap (recorded ~1h long).
+        // "Final*" scoreline suffixes are caught by the prefix test in Classify.
+        "Final", "Game Finished", "Ended", "Complete", "Completed", "After Over Time", "AOT",
     };
 
     /// <summary>Guide statuses that mean the event is IN PLAY (1st/2nd half, half-time, extra time, penalty
@@ -271,7 +276,10 @@ public sealed class AutoStopService : BackgroundService
     private static StatusClass Classify(string? status, TsdbLiveScore? live)
     {
         var s = status?.Trim();
-        if (!string.IsNullOrEmpty(s) && TerminalStatuses.Contains(s)) return StatusClass.Terminal;
+        // Terminal wins over livescore presence. "Final" as a prefix covers baseball/basketball/hockey scoreline
+        // suffixes ("Final/OT", "Final/SO", "Final/12") that the exact-match set can't enumerate.
+        if (!string.IsNullOrEmpty(s) && (TerminalStatuses.Contains(s) || s.StartsWith("Final", StringComparison.OrdinalIgnoreCase)))
+            return StatusClass.Terminal;
         if (live is not null) return StatusClass.InPlay;
         if (!string.IsNullOrEmpty(s) && InPlayStatuses.Contains(s)) return StatusClass.InPlay;
         return StatusClass.Unknown; // empty / "Not Started" / anything unmapped

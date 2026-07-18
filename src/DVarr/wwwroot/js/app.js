@@ -39,6 +39,9 @@ const hhmm = e => e ? new Date(e * 1000).toLocaleString('en-AU', { timeZone: DIS
 // Date-only (no time) in the display zone — used for IPTV service-expiry dates in the Sources table.
 const ddate = e => e ? new Date(e * 1000).toLocaleDateString('en-AU', { timeZone: DISPLAY_TZ, day: '2-digit', month: 'short', year: 'numeric' }) : '—';
 const mb = b => b > 0 ? (b / 1e6).toFixed(1) + ' MB' : '—';
+// Channel logo (provider icon): a small img that removes itself if the URL 404s/blocks, so a broken icon never
+// leaves a gap. Empty when the provider gave no icon.
+const chLogo = url => url ? `<img class="ch-logo" src="${esc(url)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : '';
 const sc = s => 's-' + (s || '').toLowerCase();
 // Keyword (token) matching: "uk sports" matches "UK| Sports" and "Sky Sports UK".
 const norm = s => (s == null ? '' : String(s)).toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
@@ -70,6 +73,7 @@ const ACTIVE = ['Starting', 'Recording', 'Recovering', 'FailingOver', 'Degraded'
 // any more (a finished recording graduates to the Library), so the panel merges these with library items.
 const DASH_TERMINAL = ['NeedsAttention', 'Missed', 'Cancelled'];
 const gb = b => b > 0 ? (b >= 1e9 ? (b / 1e9).toFixed(1) + ' GB' : (b / 1e6).toFixed(0) + ' MB') : '—';
+const gbtb = b => b >= 1e12 ? (b / 1e12).toFixed(2) + ' TB' : gb(b); // storage gauge: TB once it's that big
 const durFmt = s => s > 0 ? (s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m` : `${Math.round(s / 60)}m`) : '—';
 
 // ---- icons (feather-style) ----
@@ -94,6 +98,7 @@ const I = {
   dots: '<svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="2" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="2" fill="currentColor" stroke="none"/></svg>',
   chev: '<svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>',
   grip: '<svg viewBox="0 0 24 24"><circle cx="9" cy="6" r="1.5" fill="currentColor" stroke="none"/><circle cx="15" cy="6" r="1.5" fill="currentColor" stroke="none"/><circle cx="9" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="9" cy="18" r="1.5" fill="currentColor" stroke="none"/><circle cx="15" cy="18" r="1.5" fill="currentColor" stroke="none"/></svg>',
+  logs: '<svg viewBox="0 0 24 24"><path d="M4 4h16v16H4zM8 9h8M8 13h8M8 17h5"/></svg>',
 };
 
 const NAV = [
@@ -107,6 +112,7 @@ const NAV = [
   { id: 'guide', label: 'Guide' },
   { id: 'sources', label: 'Sources' },
   { id: 'activity', label: 'Activity' },
+  { id: 'logs', label: 'Logs' },
   { id: 'settings', label: 'Settings' },
 ];
 
@@ -337,11 +343,19 @@ function statRow(h, liveN, schedN) {
   const kpi = (cls, icon, label, val, sub) => `<div class="kpi${cls ? ' ' + cls : ''}"><span class="kpi-ic">${icon}</span><div class="kpi-meta"><div class="kpi-label">${esc(label)}</div><div class="kpi-value">${val}</div><div class="kpi-sub">${esc(sub)}</div></div></div>`;
   const slots = h && h.sources ? `${h.sources.free_credentials}<small> / ${h.sources.total}</small>` : '—';
   const dbOk = h && h.db ? !!h.db.ok : null;
+  // Storage gauge: free space on the media volume, red when it (or a separate segments volume) is under its floor.
+  const disk = h && h.disk && h.disk.media ? h.disk.media : null;
+  const seg = h && h.disk ? h.disk.segments : null;
+  const diskLow = (disk && disk.floorBytes > 0 && disk.freeBytes < disk.floorBytes) || (seg && seg.floorBytes > 0 && seg.freeBytes < seg.floorBytes);
+  const diskKpi = disk && disk.totalBytes
+    ? kpi(diskLow ? 'bad' : 'ok', I.sources, 'Free storage', gbtb(disk.freeBytes), diskLow ? 'LOW — free up space' : `of ${gbtb(disk.totalBytes)}`)
+    : kpi('', I.sources, 'Free storage', '—', 'no disk data');
   return `<div class="kpi-row">
     ${kpi('', I.recordings, 'Recording now', liveN, liveN ? 'live capture in progress' : 'idle')}
     ${kpi('', I.clock, 'Scheduled · 24h', schedN, 'in the next 24 hours')}
     ${kpi('', I.layers, 'Free slots', slots, 'provider stream slots')}
-    ${kpi(dbOk == null ? '' : dbOk ? 'ok' : 'bad', I.check, 'Database', dbOk == null ? '—' : dbOk ? 'OK' : 'DOWN', dbOk == null ? 'no health data' : dbOk ? 'storage healthy' : 'check the server')}</div>`;
+    ${kpi(dbOk == null ? '' : dbOk ? 'ok' : 'bad', I.check, 'Database', dbOk == null ? '—' : dbOk ? 'OK' : 'DOWN', dbOk == null ? 'no health data' : dbOk ? 'storage healthy' : 'check the server')}
+    ${diskKpi}</div>`;
 }
 // Panel card: header (icon + uppercase title + count pill + "View all") over a list body, optional footer link.
 function dashPanel(o) {
@@ -413,6 +427,12 @@ PAGES.recordings = {
     el.innerHTML = `<div class="toolbar">
         <select id="recFilter"><option value="">All states</option><option>Recording</option><option>Pending</option><option>NeedsAttention</option><option>Missed</option><option>Cancelled</option></select>
         <select id="recLeague"><option value="">All leagues</option></select>
+        <select id="recSort" title="Sort order">
+          <option value="date_desc">Newest first</option>
+          <option value="date_asc">Oldest first</option>
+          <option value="name_asc">Title A–Z</option>
+          <option value="name_desc">Title Z–A</option>
+        </select>
         <span class="muted" id="recCount"></span>
         <a class="muted" href="#/library" style="font-size:12px" title="Finished recordings live in the Library">finished → Library</a>
         <span id="recBulk" style="margin-left:auto;display:none;align-items:center;gap:8px;flex-wrap:wrap">
@@ -444,6 +464,15 @@ PAGES.recordings = {
       let rows = f === 'Recording' ? recs.filter(r => ACTIVE.includes(r.state)) : (f ? recs.filter(r => r.state === f) : recs);
       if (lf === 'manual') rows = rows.filter(r => r.leagueId == null);
       else if (lf) rows = rows.filter(r => String(r.leagueId) === lf);
+      // User-chosen sort (default newest-first). Sorting a copy after filtering; the API's own order is irrelevant now.
+      const sort = ($('#recSort') || {}).value || 'date_desc';
+      const byName = (a, b) => (a.title || '').localeCompare(b.title || '');
+      const byDate = (a, b) => (a.startUtc || 0) - (b.startUtc || 0);
+      rows = rows.slice().sort(
+        sort === 'date_asc' ? byDate
+        : sort === 'name_asc' ? byName
+        : sort === 'name_desc' ? ((a, b) => byName(b, a))
+        : ((a, b) => byDate(b, a))); // date_desc default
       // Keep the bulk selection to the currently VISIBLE rows only (audit UI-BULK-01): otherwise a row selected
       // under one filter stays in recSel after a filter hides it, and a bulk Stop/Delete would silently hit hidden
       // recordings. An SSE refresh keeps the same filter → same visible set → selections survive as before.
@@ -455,6 +484,7 @@ PAGES.recordings = {
     };
     $('#recFilter').addEventListener('change', draw);
     $('#recLeague').addEventListener('change', draw);
+    $('#recSort').addEventListener('change', draw);
     await draw();
     if (gen === render._seq) setLive(draw); // only bind live-refresh if THIS page is still current (audit UI-ASYNC-01)
   },
@@ -469,21 +499,39 @@ function recTable(rows, withActions) {
     // A failed recording keeps its capture segments on disk — the same preview player shows the forensics.
     const footage = r.state === 'NeedsAttention';
     return `
-    <tr>${withActions ? `<td data-label="" class="rec-cb"><input type="checkbox" class="rec-row-cb" data-id="${r.id}" onclick="recToggle(${r.id}, this)" ${recSel.has(r.id) ? 'checked' : ''} aria-label="Select recording"></td>` : ''}<td data-label="">${esc(r.title)}</td>
-      <td data-label="State"><span class="pill ${sc(r.state)}">${r.state}</span>${r.attemptCount ? ` <span class="muted" title="relaunch/failover attempts">↻${r.attemptCount}</span>` : ''}${r.failureReason && ['NeedsAttention', 'Conflict', 'Missed', 'Cancelled', 'Degraded', 'FinalizeRetry'].includes(r.state) ? `<div class="muted" style="font-size:11px;max-width:280px;line-height:1.35;margin-top:2px">${esc(r.failureReason)}</div>` : ''}</td>
+    <tr>${withActions ? `<td data-label="" class="rec-cb"><input type="checkbox" class="rec-row-cb" data-id="${r.id}" onclick="recToggle(${r.id}, this)" ${recSel.has(r.id) ? 'checked' : ''} aria-label="Select recording"></td>` : ''}<td data-label="">${esc(r.title)}${r.isReplay ? ' <span class="tag" title="A rescue replay of a game that failed to record the first time">replay</span>' : ''}</td>
+      <td data-label="State"><span class="pill ${sc(r.state)}">${r.state}</span>${r.attemptCount ? ` <span class="muted" title="relaunch/failover attempts">↻${r.attemptCount}</span>` : ''}${r.failureReason && ['NeedsAttention', 'Conflict', 'Missed', 'Cancelled', 'Degraded', 'FinalizeRetry'].includes(r.state) ? `<div class="muted" style="font-size:11px;max-width:280px;line-height:1.35;margin-top:2px">${esc(r.failureReason)}</div>` : ''}${rescueLine(r)}</td>
       <td data-label="Channel">${esc(r.channel)}</td><td data-label="Source" class="muted">${esc(r.source)}</td>
       <td data-label="Size" class="mono">${mb(r.bytesWritten)}</td>
       <td data-label="Window" class="mono muted">${dtime(r.startUtc)} – ${dtime(r.endUtc)}</td>
-      ${withActions ? `<td data-label="" class="row acts" style="gap:6px">${live ? `<button class="sm" onclick="recPreview(${r.id}, '${jsq(r.title || '')}')" title="Watch what's been captured so far — plays from disk, no provider slot">${I.play} watch</button>` : ''}${pendingish ? `<button class="sm" onclick="startRec(${r.id})" title="Start this recording now (early/manual)">start</button><button class="ghost sm" onclick="reresolveRec(${r.id})" title="Re-resolve the channel from the league's current mapping">re-resolve</button>` : ''}${stoppable ? `<button class="ghost sm" onclick="stopRec(${r.id})">stop</button>` : ''}${footage ? `<button class="ghost sm" onclick="recPreview(${r.id}, '${jsq(r.title || '')}')" title="Play whatever footage was captured before it failed">footage</button>` : ''}<button class="danger sm" onclick="delRec(${r.id})">delete</button>${kebab([
+      ${withActions ? `<td data-label="" class="row acts" style="gap:6px">${live ? `<button class="sm" onclick="recPreview(${r.id}, '${jsq(r.title || '')}')" title="Watch what's been captured so far — plays from disk, no provider slot">${I.play} watch</button>` : ''}${pendingish ? `<button class="sm" onclick="startRec(${r.id})" title="Start this recording now (early/manual)">start</button><button class="ghost sm" onclick="reresolveRec(${r.id})" title="Re-resolve the channel from the league's current mapping">re-resolve</button>` : ''}${stoppable ? `<button class="ghost sm" onclick="stopRec(${r.id})">stop</button>` : ''}${footage ? `<button class="ghost sm" onclick="recPreview(${r.id}, '${jsq(r.title || '')}')" title="Play whatever footage was captured before it failed">footage</button>` : ''}${r.rescue && (r.rescue.state === 'Open' || r.rescue.state === 'Scheduled') ? `<button class="ghost sm" onclick="cancelRescue(${r.id})" title="Stop hunting for a re-air of this game">stop hunt</button>` : ''}<button class="danger sm" onclick="delRec(${r.id})">delete</button>${kebab([
         live && { label: 'Watch live capture', fn: `recPreview(${r.id}, '${jsq(r.title || '')}')` },
         pendingish && { label: 'Start now', fn: `startRec(${r.id})` },
         pendingish && { label: 'Re-resolve channel', fn: `reresolveRec(${r.id})` },
         stoppable && { label: 'Stop', fn: `stopRec(${r.id})` },
         footage && { label: 'Play captured footage', fn: `recPreview(${r.id}, '${jsq(r.title || '')}')` },
+        r.rescue && (r.rescue.state === 'Open' || r.rescue.state === 'Scheduled') && { label: 'Stop replay hunt', fn: `cancelRescue(${r.id})` },
         { label: 'Delete', fn: `delRec(${r.id})`, danger: true },
       ])}</td>` : ''}
     </tr>`;
   }).join('')}</tbody></table>`;
+}
+// Second-chance replay-rescue status line under a failed recording's State cell.
+function rescueLine(r) {
+  if (!r.rescue) return '';
+  const now = Math.floor(Date.now() / 1000);
+  if (r.rescue.state === 'Open') {
+    const mins = Math.round((r.rescue.nextSweepUtc - now) / 60);
+    return `<div class="muted" style="font-size:11px;margin-top:3px">🔎 Hunting for a replay — next guide check ${mins <= 0 ? 'shortly' : '~' + mins + 'm'}</div>`;
+  }
+  if (r.rescue.state === 'Scheduled') return `<div class="muted" style="font-size:11px;margin-top:3px">📺 Re-air found — a replay is scheduled</div>`;
+  if (r.rescue.state === 'GaveUp') return `<div class="muted" style="font-size:11px;margin-top:3px">No re-air appeared — replay hunt gave up</div>`;
+  return '';
+}
+async function cancelRescue(id) {
+  try { const r = await api.post(`/api/recordings/${id}/rescue/cancel`, {}); toast(r.cancelled ? 'Replay hunt stopped' : 'No active hunt', 'ok'); }
+  catch { toast('Could not stop the hunt', 'err'); }
+  render();
 }
 function notesList(notes) {
   const col = s => s === 'Critical' ? 'var(--crit)' : s === 'Warn' ? 'var(--warn)' : 'var(--dim)';
@@ -513,8 +561,8 @@ function leagueChips(leagues) {
 // ---- Library (what's physically on the drive: league → season → game, mirroring Plex/Jellyfin) ----
 PAGES.library = {
   title: 'Library',
-  actions: () => `<button class="ghost" onclick="libScan()">${I.refresh} Rescan disk</button>`,
-  menuActions: [{ label: 'Rescan disk', fn: 'libScan()' }],
+  actions: () => `<button class="ghost" onclick="retentionPreview()" title="Preview what the retention policy would delete (deletes nothing)">${I.check} Preview cleanup</button><button class="ghost" onclick="libScan()">${I.refresh} Rescan disk</button>`,
+  menuActions: [{ label: 'Preview retention cleanup', fn: 'retentionPreview()' }, { label: 'Rescan disk', fn: 'libScan()' }],
   async render(el) {
     el.innerHTML = `<div class="toolbar">
         <input id="libQ" placeholder="Search league / team / game…" style="min-width:200px"/>
@@ -651,10 +699,12 @@ function libTable(rows) {
       <td data-label="" class="row acts" style="gap:6px">
         ${missing ? '' : `<button class="sm" onclick="libWatch(${i.id})" title="Watch in the browser">${I.play} watch</button>`}
         ${!missing && i.unsorted ? `<button class="ghost sm" onclick="libImport(${i.id})" title="File into League/Season/Game (renames for Plex/Jellyfin)">import</button>` : ''}
+        ${missing ? '' : `<button class="ghost sm" onclick="libProtect(${i.id},${i.isProtected ? 'false' : 'true'})" title="${i.isProtected ? 'Protected from auto-delete — click to unprotect' : 'Protect from retention auto-delete'}">${i.isProtected ? '🛡 protected' : 'protect'}</button>`}
         <button class="danger sm" onclick="libDelete(${i.id})">${missing ? 'remove' : 'delete'}</button>
         ${kebab([
           !missing && { label: 'Watch', fn: `libWatch(${i.id})` },
           !missing && i.unsorted && { label: 'Import into a league', fn: `libImport(${i.id})` },
+          !missing && { label: i.isProtected ? 'Unprotect' : 'Protect from auto-delete', fn: `libProtect(${i.id},${i.isProtected ? 'false' : 'true'})` },
           { label: missing ? 'Remove entry' : 'Delete file from disk', fn: `libDelete(${i.id})`, danger: true },
         ])}
       </td></tr>`;
@@ -668,6 +718,37 @@ async function libScan() {
   if (r.skipped) return toast(`Scan skipped: ${r.skipped}`, 'err');
   toast(`Scan done — ${r.seen} file${r.seen === 1 ? '' : 's'} on disk, ${r.adopted} adopted, ${r.healed} healed, ${r.missing} newly missing`, 'ok');
   render();
+}
+async function libProtect(id, on) {
+  try { await api.put(`/api/library/${id}/protect`, { protected: on }); toast(on ? 'Protected from auto-delete' : 'Protection removed', 'ok'); render(); }
+  catch { toast('Could not update protection', 'err'); }
+}
+// Retention dry-run: show exactly what the current policy would delete, with a confirm to actually run it. The
+// confirm posts the reviewed victim ids back (audit RET-02) — the server deletes nothing the user didn't see and
+// 409s if the plan drifted (a new game landed, protection/policy changed) so we re-preview instead.
+async function retentionPreview() {
+  let data;
+  try { data = await api.get('/api/retention/preview'); } catch { return toast('Could not load the preview', 'err'); }
+  if (data.error) return toast(data.error, 'err');
+  if (!data.totalItems) return modal(`<h2>Retention cleanup</h2><div class="note">Nothing to delete — no league's policy has anything to evict right now. Set a policy in Settings → Storage, or per-league on the Leagues page.</div><div class="foot"><button onclick="closeModals()">Close</button></div>`, 'min(560px,94vw)');
+  window._retentionIds = data.leagues.flatMap(l => l.items.map(v => v.id));
+  const rows = data.leagues.map(l => `<div style="margin-top:10px"><b>${esc(l.league)}</b> <span class="muted">— ${esc(l.detail)} · ${l.items.length} game${l.items.length === 1 ? '' : 's'} · ${gb(l.bytes)}</span>
+    <ul style="margin:6px 0 0;padding-left:18px">${l.items.map(v => `<li class="muted" style="font-size:12px">${esc(v.title)} <span style="opacity:.7">(${dtime(v.startUtc)}, ${gb(v.bytes)}${v.watched ? ', watched' : ''})</span></li>`).join('')}</ul></div>`).join('');
+  modal(`<h2>Retention cleanup — dry run</h2>
+    <div class="note warn">This would delete <b>${data.totalItems}</b> recording${data.totalItems === 1 ? '' : 's'} and free <b>${gb(data.totalBytes)}</b>. Protected recordings and unsorted files are never touched.</div>
+    <div style="max-height:50vh;overflow:auto">${rows}</div>
+    <div class="foot"><button class="ghost" onclick="closeModals()">Cancel</button><button class="danger" onclick="retentionRun()">Delete these now</button></div>`, 'min(680px,94vw)');
+}
+async function retentionRun() {
+  closeModals();
+  const ids = window._retentionIds || [];
+  if (!ids.length) return;
+  try {
+    const r = await api.post('/api/retention/run', { ids });
+    if (r.planChanged) { toast('The library changed since the preview — nothing was deleted. Here’s the fresh plan.', 'err'); return retentionPreview(); }
+    if (r.error) return toast(r.error, 'err');
+    toast(`Removed ${r.deleted} recording${r.deleted === 1 ? '' : 's'}, freed ${gb(r.bytesFreed)}`, 'ok'); render();
+  } catch { toast('Cleanup failed', 'err'); }
 }
 function libImport(id) {
   const i = (window._libItems || {})[id]; if (!i) return;
@@ -760,7 +841,7 @@ PAGES.channels = {
           : `<button class="ghost sm" title="${c.hidden ? 'Show this channel in lists again' : 'Hide this channel from every list (mappings keep working)'}" onclick="chanHide(${c.id},${!c.hidden})">${c.hidden ? 'Unhide' : 'Hide'}</button>`;
         return `
         <tr><td data-label="" class="ch-fav"><button class="favbtn${c.favorite ? ' on' : ''}" title="${c.favorite ? 'Un-favourite' : 'Favourite — sorts first in every channel list'}" aria-label="${c.favorite ? 'Un-favourite' : 'Favourite'}" aria-pressed="${!!c.favorite}" onclick="chanFav(${c.id},${!c.favorite})">${c.favorite ? '★' : '☆'}</button></td>
-        <td data-label="">${esc(c.name)}</td><td data-label="Group" class="muted">${esc(c.group || '')}</td><td data-label="Source" class="muted">${esc(c.sourceLabel)}</td><td data-label="Quality" class="mono muted">${esc(c.quality || '')}</td>
+        <td data-label=""><span class="ch-name">${chLogo(c.logo)}${esc(c.name)}</span></td><td data-label="Group" class="muted">${esc(c.group || '')}</td><td data-label="Source" class="muted">${esc(c.sourceLabel)}</td><td data-label="Quality" class="mono muted">${esc(c.quality || '')}</td>
         <td data-label="" class="row acts" style="gap:6px;flex-wrap:nowrap">
           <button class="play-btn sm" title="Watch live preview" onclick="openPreview(${c.id},'${jsq(c.name)}')">${I.play} Watch</button>
           <button class="ghost sm" onclick="scheduleFor(${c.id})">${I.plus} Schedule</button>
@@ -951,7 +1032,7 @@ function renderGuide(wrap, g) {
       return `<div class="${cls}" style="left:${left}px;width:${w}px" data-ch="${c.channelId}" data-start="${p.start}" data-stop="${p.stop}" data-title="${esc(p.Title || p.title || '')}" title="${esc(p.Title || p.title || '')} · ${hhmm(p.start)}-${hhmm(p.stop)}"><span class="g-pt">${hhmm(p.start)}</span> ${esc(p.Title || p.title || '')}</div>`;
     }).join('');
     const body = blocks || `<div class="g-empty">no guide data</div>`;
-    return `<div class="g-row"><div class="g-ch" title="Watch ${esc(c.name)}" onclick="chanTap(${c.channelId},'${jsq(c.name)}')">${I.play}<span>${esc(c.name)}</span></div><div class="g-track" style="width:${trackW}px">${body}</div></div>`;
+    return `<div class="g-row"><div class="g-ch" title="Watch ${esc(c.name)}" onclick="chanTap(${c.channelId},'${jsq(c.name)}')">${c.logo ? chLogo(c.logo) : I.play}<span>${esc(c.name)}</span></div><div class="g-track" style="width:${trackW}px">${body}</div></div>`;
   }).join('');
 
   wrap.innerHTML = `<div class="guide-scroll"><div class="guide-inner" style="--gch:${chCol}px;width:${chCol + trackW}px">
@@ -1030,6 +1111,11 @@ PAGES.leagues = {
     const maps0 = await api.get('/api/mappings');
     if (!Array.isArray(maps0)) { el.innerHTML = errorBox((maps0 && maps0.error) ? `Couldn't load channel mappings: ${maps0.error}` : "Couldn't load channel mappings."); return; }
     const maps = maps0;
+    // Render most-important-first so the page matches the Priority dialog: higher Priority int wins (the stored value,
+    // the conflict planner's "higher wins", and the modal all agree), sport→name breaks ties so leagues that were
+    // never ranked keep their old alphabetical arrangement below the ranked ones.
+    const orderedLeagues = ls.slice().sort((a, b) =>
+      ((b.priority || 0) - (a.priority || 0)) || (a.sport || '').localeCompare(b.sport || '') || a.name.localeCompare(b.name));
     // Bucket mappings by league once; each card slices its own whole-league / per-team groups.
     const byLeague = {};
     maps.forEach(m => { (byLeague[m.leagueId] = byLeague[m.leagueId] || []).push(m); });
@@ -1043,7 +1129,7 @@ PAGES.leagues = {
         <div style="margin-top:6px"><b>National broadcasts.</b> Also map the national channels (FOX, ESPN, …) to the league, unpinned. With <b>Guide-match channel pick</b> on (Settings → Scheduling &amp; EPG), DVarr re-checks each mapped channel's guide from 48 hours out and records from the channel that actually shows the game — the Scheduled list updates as soon as the guide lists it.</div>
         <div class="muted" style="margin-top:6px;font-size:12px;line-height:1.5">All fallbacks must be on the <b>same provider login</b> as the primary (one stream per login). With <b>content check</b> on (Settings), DVarr also fails over when a channel is alive but stuck on a dead <b>black or frozen</b> slate. It does <b>not</b> watch the picture to decide whether the “right” match is on — that relies on your ranks, the EPG, and pre/post-padding, which is exactly why a pre-show/intro is captured rather than skipped.</div>
       </div>
-      <div class="section"><h2>Leagues ${ls.length ? `<span class="count-pill">${ls.length}</span>` : ''}</h2>${ls.length ? `<div class="lg-acc" id="lgAcc">${ls.map(l => renderLeagueCard(l, byLeague[l.id] || [])).join('')}</div>` : emptyBox('No leagues yet. Add one and pin a channel to start auto-recording.')}</div></div>`;
+      <div class="section"><h2>Leagues ${ls.length ? `<span class="count-pill">${ls.length}</span>` : ''}</h2>${ls.length ? `<div class="lg-acc" id="lgAcc">${orderedLeagues.map(l => renderLeagueCard(l, byLeague[l.id] || [])).join('')}</div>` : emptyBox('No leagues yet. Add one and pin a channel to start auto-recording.')}</div></div>`;
     wireLeagueDnd($('#lgAcc'));
   },
 };
@@ -1526,6 +1612,36 @@ PAGES.activity = {
   },
 };
 
+// ---- Logs (in-app viewer of recent server log lines; in-memory ring buffer, cleared on restart) ----
+PAGES.logs = {
+  title: 'Logs',
+  actions: () => `<button class="ghost" onclick="render()">${I.refresh} Refresh</button>`,
+  menuActions: [{ label: 'Refresh', fn: 'render()' }],
+  async render(el) {
+    el.innerHTML = `<div class="toolbar">
+        <select id="logLevel"><option value="">All levels</option><option value="Information">Info+</option><option value="Warning">Warning+</option><option value="Error">Error+</option></select>
+        <input id="logQ" class="grow" placeholder="filter by text (message or category)…"/>
+        <label class="muted" style="display:inline-flex;align-items:center;gap:6px;font-size:12px"><input type="checkbox" id="logAuto" checked style="width:auto"/> auto-refresh</label>
+      </div>
+      <div class="note muted" style="font-size:12px">Recent server activity (newest first), kept in memory only — it resets when DVarr restarts. Handy for debugging a recording or a provider issue without opening the container logs.</div>
+      <div id="logWrap" class="loading">…</div>`;
+    const gen = render._seq;
+    const draw = async () => {
+      const level = $('#logLevel').value, q = $('#logQ').value;
+      const rows = await api.get(`/api/logs?take=800${level ? `&level=${encodeURIComponent(level)}` : ''}${q ? `&q=${encodeURIComponent(q)}` : ''}`);
+      if (gen !== render._seq || !Array.isArray(rows)) return;
+      $('#logWrap').innerHTML = rows.length
+        ? `<table class="rtable logtable"><tbody>${rows.map(r => `<tr class="log-${esc((r.level || '').toLowerCase())}"><td class="mono muted" style="white-space:nowrap">${dtime(r.ts)}</td><td class="mono log-lvl">${esc(r.level)}</td><td class="mono muted" style="white-space:nowrap">${esc(r.category)}</td><td class="log-msg">${esc(r.message)}</td></tr>`).join('')}</tbody></table>`
+        : emptyBox('No log lines match. (The buffer clears on restart.)');
+    };
+    $('#logLevel').addEventListener('change', draw);
+    let qt; $('#logQ').addEventListener('input', () => { clearTimeout(qt); qt = setTimeout(draw, 300); });
+    await draw();
+    // Light auto-refresh (every 4s) while the toggle is on and this page is still current.
+    const timer = setInterval(() => { if (gen === render._seq && $('#logAuto') && $('#logAuto').checked) draw(); else if (gen !== render._seq) clearInterval(timer); }, 4000);
+  },
+};
+
 // ---- Conflicts (credit-aware planning) ----
 PAGES.conflicts = {
   title: 'Conflicts',
@@ -1577,8 +1693,8 @@ window.bumpRec = async (id) => { const r = await api.post(`/api/recordings/${id}
 // still render (under "Advanced") so a new backend setting is never hidden. The flat PUT payload is unchanged.
 const SETTINGS_GROUPS = ['Recording', 'Reliability', 'Scheduling', 'Guide', 'TheSportsDB', 'Integrations', 'Display'];
 // v1.20.0: the functional groups roll up into 5 top-level Settings tabs (laid out in columns/rows, not one long scroll).
-const SETTINGS_TABS = ['Recording', 'Reliability', 'Scheduling & EPG', 'Data sources', 'Advanced'];
-const GROUP_TAB = { Recording: 'Recording', Reliability: 'Reliability', Scheduling: 'Scheduling & EPG', Guide: 'Scheduling & EPG', TheSportsDB: 'Data sources', Integrations: 'Data sources', Display: 'Data sources', Advanced: 'Advanced' };
+const SETTINGS_TABS = ['Recording', 'Reliability', 'Scheduling & EPG', 'Data sources', 'Storage', 'Advanced'];
+const GROUP_TAB = { Recording: 'Recording', Reliability: 'Reliability', Scheduling: 'Scheduling & EPG', Guide: 'Scheduling & EPG', TheSportsDB: 'Data sources', Integrations: 'Data sources', Display: 'Data sources', Storage: 'Storage', Advanced: 'Advanced' };
 const SETTINGS_META = {
   max_global_concurrent_recordings: { g: 'Recording', t: 'Max simultaneous recordings', h: 'The most recordings DVarr will run at once across all logins.', ty: 'int' },
   default_pre_pad_s: { g: 'Recording', t: 'Pre-roll padding (seconds)', h: 'How long before an event starts to begin recording.', ty: 'int' },
@@ -1586,6 +1702,10 @@ const SETTINGS_META = {
   retry_at_event_start: { g: 'Recording', t: 'Retry at event start', h: 'If a recording captures nothing during pre-roll (the channel isn’t live yet), make one fresh attempt at the real start time.', ty: 'bool' },
   auto_stop_enabled: { g: 'Recording', t: 'Smart auto-stop', h: 'Near a live recording’s scheduled end, watch the match status and extend while it’s still in play (extra time, penalty shoot-outs) — never shortens the scheduled window.', ty: 'bool' },
   chapter_marks_enabled: { g: 'Recording', t: 'Chapter markers', h: 'Track the match status while recording and embed chapters (Kick-off, Half-time, Extra time, Penalty shoot-out, Full time) into the finished file — Plex, Jellyfin, Kodi and VLC all read them natively.', ty: 'bool' },
+  replay_rescue_enabled: { g: 'Recording', t: 'Second-chance replay rescue', h: 'When a game fails to record (dead feed, missed window, or an unresolved conflict), hunt the guide for a re-air and record it automatically as a low-priority replay that never bumps a live game.', ty: 'bool' },
+  replay_rescue_whole_source: { g: 'Recording', t: 'Search the whole provider for re-airs', h: 'Widen the replay search from the league’s mapped channels to every channel on those providers. Finds more re-airs; may match less precisely.', ty: 'bool' },
+  replay_rescue_give_up_days: { g: 'Recording', t: 'Replay hunt give-up (days)', h: 'Stop hunting for a re-air this many days after the game — after which it’s considered lost.', ty: 'int' },
+  replay_rescue_interval_s: { g: 'Recording', t: 'Replay sweep interval (seconds)', h: 'How often DVarr re-checks the guide for re-airs of failed games.', ty: 'int' },
   bitrate_floor_enabled: { g: 'Reliability', t: 'Bitrate-floor placeholder detection', h: 'Fail over when a stream keeps feeding data but far too little for real content — a provider “channel offline” slate. Uses the per-tier floors below. Opt-in; needs no GPU.', ty: 'bool' },
   bitrate_floor_kbps_sd: { g: 'Reliability', t: 'SD bitrate floor (kbps)', h: 'When placeholder detection is on: an SD channel steadily below this looks like a slate and fails over. Keep it well under a real SD stream (~1 Mbps+).', ty: 'int' },
   bitrate_floor_kbps_hd: { g: 'Reliability', t: 'HD bitrate floor (kbps)', h: 'Floor for HD channels (720p/1080p) when placeholder detection is on. Real HD is several Mbps, so a low value only catches slates.', ty: 'int' },
@@ -1606,6 +1726,7 @@ const SETTINGS_META = {
   epg_future_window_d: { g: 'Guide', t: 'Guide lookahead (days)', h: 'How many days of upcoming guide data to keep.', ty: 'int' },
   epg_max_programmes: { g: 'Guide', t: 'Guide safety cap', h: 'Max programmes stored per source to prevent runaway database growth.', ty: 'int' },
   epg_repick_enabled: { g: 'Guide', t: 'Guide-match channel pick', h: 'Once a recording is within 48 hours of start, re-check each mapped channel’s guide — refreshing the source’s EPG first if it’s more than 12 hours old — and record from the channel that actually shows the event. Manual channel choices are never moved.', ty: 'bool' },
+  national_fallback_enabled: { g: 'Guide', t: 'Find nationally-televised games', h: 'When a monitored game airs on a channel you didn’t map (e.g. it moved to ESPN) and none of your mapped channels show it in the guide, search the whole provider for the channel actually carrying the matchup (both teams) and record there. Same login only.', ty: 'bool' },
   epg_auto_sync_enabled: { g: 'Guide', t: 'Auto-sync EPG daily', h: 'Automatically refresh every source’s TV guide once a day at the time below.', ty: 'bool' },
   epg_auto_sync_time: { g: 'Guide', t: 'EPG sync time', h: 'Time of day (24-hour) to auto-refresh the guide, in the timezone below.', ty: 'time' },
   epg_auto_sync_offset_minutes: { g: 'Guide', t: 'EPG sync timezone', h: 'Timezone for the sync time — a fixed offset (no daylight-saving adjustment).', ty: 'select', opts: [
@@ -1621,6 +1742,18 @@ const SETTINGS_META = {
   ha_webhook_url: { g: 'Integrations', t: 'Home Assistant webhook', h: 'Webhook URL to push recording state changes to Home Assistant. Blank = off.', ty: 'url' },
   public_base_url: { g: 'Integrations', t: 'Public base URL', h: 'Externally-reachable URL of this DVarr (e.g. https://dvr.example.com), used to build the away-from-home calendar-feed link. Blank = off.', ty: 'url' },
   timezone_display: { g: 'Display', t: 'Display timezone', h: 'Timezone used to show every time in the app and to date recording files (IANA name, e.g. Australia/Brisbane or America/New_York).', ty: 'text' },
+  disk_min_free_gb: { g: 'Storage', t: 'Media free-space floor (GB)', h: 'Warn when the media drive drops below this many GB free, or when a new recording is projected to. 0 = off. Never blocks a recording — it only alerts you.', ty: 'int' },
+  disk_min_free_segments_gb: { g: 'Storage', t: 'Segments free-space floor (GB)', h: 'Same warning for the in-flight capture scratch (/segments). Only reported separately from the media floor when segments live on a different drive. 0 = off.', ty: 'int' },
+  retention_default_mode: { g: 'Storage', t: 'Retention policy (default)', h: 'Automatically delete old finished recordings. Applies to every league unless a league sets its own policy. Protected recordings and unsorted files are never deleted. Use “Preview cleanup” on the Library page before trusting a new policy.', ty: 'select', opts: [
+    { v: 'keep_all', l: 'Keep everything (no auto-delete)' },
+    { v: 'keep_last_n', l: 'Keep the newest N games' },
+    { v: 'keep_days', l: 'Keep the last N days' },
+    { v: 'gb_cap', l: 'Keep under a GB cap' },
+    { v: 'watched', l: 'Delete after watched (needs the media-server webhook)' },
+  ] },
+  retention_keep_last: { g: 'Storage', t: 'Keep newest N games', h: 'For the “keep the newest N games” policy — how many of the most recent games to keep per league.', ty: 'int' },
+  retention_keep_days: { g: 'Storage', t: 'Keep last N days', h: 'For the “keep the last N days” policy — delete games older than this many days.', ty: 'int' },
+  retention_gb_cap: { g: 'Storage', t: 'Keep under (GB)', h: 'For the “GB cap” policy — keep the newest games up to this many GB per league, deleting older ones.', ty: 'int' },
 };
 function settingField(k, v) {
   const m = SETTINGS_META[k] || { t: k, h: '', ty: (v === 'true' || v === 'false') ? 'bool' : 'text' };
@@ -1639,7 +1772,8 @@ function settingField(k, v) {
 PAGES.settings = {
   title: 'Settings',
   async render(el) {
-    const s = await api.get('/api/settings');
+    // Webhook URLs ride along for the Storage pane (token-authenticated — the token IS the media server's login).
+    const [s, wh] = await Promise.all([api.get('/api/settings'), api.get('/api/webhooks/urls').catch(() => null)]);
     // Internal bookkeeping keys — persisted server-side but not user settings; never render them.
     const HIDDEN = ['epg_auto_sync_last'];
     // Bucket every setting into one of the 5 tabs (unknown keys → Advanced, so a new backend setting is never hidden).
@@ -1651,7 +1785,7 @@ PAGES.settings = {
     const PLEX_TAB = 'Plex';
     const tabs = [...SETTINGS_TABS.filter(t => buckets[t].length), PLEX_TAB];
     const nav = `<div class="tab-nav">${tabs.map((t, i) => `<button class="tab-btn${i === 0 ? ' active' : ''}" data-tab="${esc(t)}">${esc(t)}</button>`).join('')}</div>`;
-    const panes = tabs.map((t, i) => `<div class="tab-pane${i === 0 ? ' active' : ''}" data-tab="${esc(t)}">${t === PLEX_TAB ? plexSettingsPane() : `<div class="set-grid">${buckets[t].map(k => settingField(k, s[k])).join('')}</div>`}</div>`).join('');
+    const panes = tabs.map((t, i) => `<div class="tab-pane${i === 0 ? ' active' : ''}" data-tab="${esc(t)}">${t === PLEX_TAB ? plexSettingsPane() : `<div class="set-grid">${buckets[t].map(k => settingField(k, s[k])).join('')}</div>${t === 'Storage' ? webhookUrlsBlock(wh) : ''}`}</div>`).join('');
     el.innerHTML = `<div class="settings-wrap">${nav}${panes}
       <div class="row" style="margin:18px 0 28px"><button onclick="saveSettings()">Save settings</button><span id="setMsg" class="muted"></span></div></div>`;
     el.querySelectorAll('.tab-btn').forEach(b => b.addEventListener('click', () => {
@@ -1660,6 +1794,19 @@ PAGES.settings = {
     }));
   },
 };
+
+// Settings → Storage: the tokenized Plex/Jellyfin "watched" webhook URLs for the delete-after-watched policy.
+// The token is the media server's whole login for this surface — treat the URL like a password.
+function webhookUrlsBlock(wh) {
+  if (!wh || !wh.plex) return '';
+  return `<div class="note" style="margin-top:16px;max-width:720px"><b>Media-server “watched” webhooks.</b>
+    <div class="muted" style="font-size:12px;margin:4px 0 8px">For the “Delete after watched” policy: point Plex (Settings → Webhooks) or Jellyfin (Webhook plugin, “Playback Stop” / “User Data Saved”) at its URL below. The token in the URL authenticates your media server — keep it private. Use a LAN-reachable address (swap in the server's LAN IP if you're viewing DVarr through the public domain).</div>
+    <label class="field" style="margin-bottom:6px">Plex
+      <div class="copy-row"><input id="whPlexUrl" readonly value="${esc(location.origin + wh.plex)}"/><button class="ghost sm" onclick="copyText($('#whPlexUrl').value,'#whPlexUrl')">Copy</button></div></label>
+    <label class="field">Jellyfin
+      <div class="copy-row"><input id="whJellyUrl" readonly value="${esc(location.origin + wh.jellyfin)}"/><button class="ghost sm" onclick="copyText($('#whJellyUrl').value,'#whJellyUrl')">Copy</button></div></label>
+  </div>`;
+}
 
 // Settings → Plex: info-only pane. The provider URL (location.origin + '/plex') + how the Custom Metadata Provider
 // works + set-up steps, all grounded in PlexEndpoints.cs (the /plex agent) and MediaImportService.cs (the on-disk
@@ -1992,7 +2139,10 @@ function scheduleFor(channelId) {
 // original recording row is long gone). Both share the identical sport → league → game picker.
 async function openImportModal(id, startUtc, title, kind = 'rec') {
   const sports = await api.get('/api/tsdb/sports');
-  const dateStr = new Date(startUtc * 1000).toISOString().slice(0, 10);
+  // Date in the DISPLAY timezone, not UTC — the endpoint only reads the year, so a late-evening local recording that
+  // is the previous day in UTC would otherwise pull the wrong season at a 31 Dec / 1 Jan boundary.
+  const dp = tzParts(startUtc);
+  const dateStr = `${dp.y}-${String(dp.m + 1).padStart(2, '0')}-${String(dp.d).padStart(2, '0')}`;
   modal(`<h2>Import recording</h2>
     <div class="muted" style="margin-bottom:10px">${esc(title || ('Recording #' + id))} · ${dtime(startUtc)}</div>
     <div class="fields">
@@ -2253,6 +2403,10 @@ async function openLeagueModal(id) {
         <option value="fixed" ${(x?.autoStopMode || 'auto') === 'fixed' ? 'selected' : ''}>Fixed window</option>
       </select></label>
       <label class="field" id="lAutoStopMaxWrap" style="${(x?.autoStopMode || 'auto') === 'fixed' ? 'display:none' : ''}">Max extension (minutes)<input id="lAutoStopMax" type="number" min="0" placeholder="60" value="${x?.autoStopMaxExtendS ? Math.round(x.autoStopMaxExtendS / 60) : ''}"/></label>
+      <label class="field">Retention<select id="lRetMode">${['', 'keep_all', 'keep_last_n', 'keep_days', 'gb_cap', 'watched'].map(v => `<option value="${v}" ${(x?.retentionMode || '') === v ? 'selected' : ''}>${({ '': 'Use the global default', keep_all: 'Keep everything', keep_last_n: 'Keep the newest N games', keep_days: 'Keep the last N days', gb_cap: 'Keep under a GB cap', watched: 'Delete after watched' })[v]}</option>`).join('')}</select></label>
+      <label class="field" id="lRetLastWrap" style="display:none">Keep newest N games<input id="lRetLast" type="number" min="0" placeholder="20" value="${x?.retentionKeepLast || ''}"/></label>
+      <label class="field" id="lRetDaysWrap" style="display:none">Keep last N days<input id="lRetDays" type="number" min="0" placeholder="90" value="${x?.retentionKeepDays || ''}"/></label>
+      <label class="field" id="lRetGbWrap" style="display:none">Keep under (GB)<input id="lRetGb" type="number" min="0" placeholder="500" value="${x?.retentionGbCap || ''}"/></label>
       <label class="field">Calendar colour<input type="hidden" id="lColor" value="${esc(x?.color || '')}"/>
         <div class="swatches" id="lSwatches">${LEAGUE_COLORS.map(c => `<span class="swatch${(x?.color || '').toLowerCase() === c ? ' sel' : ''}" data-c="${c}" style="background:${c}" title="${c}"></span>`).join('')}</div></label>
       <label class="field" style="flex-direction:row;align-items:center;gap:8px"><input id="lMon" type="checkbox" ${(!x || x.monitored) ? 'checked' : ''} style="width:auto"/> Monitored — auto-record this league's events</label>
@@ -2297,6 +2451,9 @@ async function openLeagueModal(id) {
   $('#lAutoStop').addEventListener('change', () => { $('#lAutoStopMaxWrap').style.display = $('#lAutoStop').value === 'auto' ? '' : 'none'; });
   // Mark a user-typed max-extension so onLeaguePicked's motorsport prefill never overwrites (or later clears) it.
   $('#lAutoStopMax').addEventListener('input', () => { const el = $('#lAutoStopMax'); el.dataset.userEdited = 'true'; delete el.dataset.prefilled; });
+  // Per-league retention: show only the parameter its mode needs (blank mode = inherit the global default).
+  const syncRet = () => { const m = $('#lRetMode').value; $('#lRetLastWrap').style.display = m === 'keep_last_n' ? '' : 'none'; $('#lRetDaysWrap').style.display = m === 'keep_days' ? '' : 'none'; $('#lRetGbWrap').style.display = m === 'gb_cap' ? '' : 'none'; };
+  $('#lRetMode').addEventListener('change', syncRet); syncRet();
 
   const savedTeamIds = new Set((x?.monitoredTeams || []).map(t => String(t.id)));
   const savedSessions = new Set(x?.monitoredSessions || []);
@@ -2411,6 +2568,10 @@ async function submitLeague(id) {
     eventDurationOverrideS: (() => { const v = parseInt($('#lDuration').value); return v > 0 ? v * 60 : 0; })(),
     autoStopMode: $('#lAutoStop').value,
     autoStopMaxExtendS: (parseInt($('#lAutoStopMax')?.value) > 0 ? parseInt($('#lAutoStopMax').value) * 60 : 0), // 0 = clear to default
+    retentionMode: $('#lRetMode') ? $('#lRetMode').value : '',
+    retentionKeepLast: parseInt($('#lRetLast')?.value) > 0 ? parseInt($('#lRetLast').value) : 0,
+    retentionKeepDays: parseInt($('#lRetDays')?.value) > 0 ? parseInt($('#lRetDays').value) : 0,
+    retentionGbCap: parseInt($('#lRetGb')?.value) > 0 ? parseInt($('#lRetGb').value) : 0,
 
     monitoredTeams, monitoredSessions, sessionDurations,
   };
@@ -2578,10 +2739,11 @@ window.addEventListener('keydown', e => {
 });
 window.render = render; window.openTestModal = openTestModal; window.submitTest = submitTest;
 window.openScheduleModal = openScheduleModal; window.submitSchedule = submitSchedule; window.scheduleFor = scheduleFor; window.scheduleFromGuide = scheduleFromGuide;
-window.openPreview = openPreview; window.stopRec = stopRec; window.startRec = startRec; window.delRec = delRec; window.reresolveRec = reresolveRec; window.reresolveLeague = reresolveLeague;
+window.openPreview = openPreview; window.stopRec = stopRec; window.startRec = startRec; window.delRec = delRec; window.reresolveRec = reresolveRec; window.reresolveLeague = reresolveLeague; window.cancelRescue = cancelRescue;
 window.recToggle = recToggle; window.recToggleAll = recToggleAll; window.bulkStart = bulkStart; window.bulkResolve = bulkResolve; window.bulkStop = bulkStop; window.bulkDelete = bulkDelete; window.runPendingDelete = runPendingDelete;
 window.openImportModal = openImportModal; window.submitImport = submitImport;
 window.libScan = libScan; window.libImport = libImport; window.libDelete = libDelete; window.doLibDelete = doLibDelete;
+window.libProtect = libProtect; window.retentionPreview = retentionPreview; window.retentionRun = retentionRun;
 window.libWatch = libWatch; window.recPreview = recPreview; window.openHlsPlayer = openHlsPlayer; window.libToggle = libToggle;
 window.ingest = ingest; window.doIngest = doIngest; window.saveSettings = saveSettings; window.closeModals = closeModals;
 window.toggleKebab = toggleKebab; window.closeKebabs = closeKebabs;

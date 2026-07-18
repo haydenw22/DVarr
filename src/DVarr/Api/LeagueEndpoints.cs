@@ -31,6 +31,8 @@ public static class LeagueEndpoints
                     l.ScheduleHorizonDays, eventDurationOverrideS = l.EventDurationOverrideS, monitoredTeams = ParseTeams(l.MonitoredTeamsJson),
                     monitoredSessions = ParseSessions(l.MonitoredSessionsJson), sessionDurations = SettingsService.ParseSessionDurations(l.SessionDurationsJson),
                     autoStopMode = l.AutoStopMode ?? "auto", autoStopMaxExtendS = l.AutoStopMaxExtendS,
+                    retentionMode = l.RetentionMode, retentionKeepLast = l.RetentionKeepLast,
+                    retentionKeepDays = l.RetentionKeepDays, retentionGbCap = l.RetentionGbCap,
                     priority = l.Priority,
                     lastSync = l.LastEventSyncUtc, events, mappings = maps,
                 });
@@ -73,6 +75,11 @@ public static class LeagueEndpoints
                 // Auto-stop: only the explicit opt-out ("fixed") is persisted; anything else = null = Auto (the default).
                 AutoStopMode = req.AutoStopMode == "fixed" ? "fixed" : null,
                 AutoStopMaxExtendS = req.AutoStopMaxExtendS is > 0 ? req.AutoStopMaxExtendS : null,
+                // Retention chosen on the create form counts too (audit RET-04) — same normalization as the edit path.
+                RetentionMode = NormalizeRetentionMode(req.RetentionMode),
+                RetentionKeepLast = req.RetentionKeepLast is > 0 ? req.RetentionKeepLast : null,
+                RetentionKeepDays = req.RetentionKeepDays is > 0 ? req.RetentionKeepDays : null,
+                RetentionGbCap = req.RetentionGbCap is > 0 ? req.RetentionGbCap : null,
                 Monitored = req.Monitored ?? true, CreatedUtc = now,
             };
             await gate.WriteAsync(async () => { db.Leagues.Add(l); await db.SaveChangesAsync(); });
@@ -203,6 +210,12 @@ public static class LeagueEndpoints
                 // Auto-stop: omitting the field leaves the mode unchanged; anything but "fixed" normalizes to Auto (null).
                 if (req.AutoStopMode != null) l.AutoStopMode = req.AutoStopMode == "fixed" ? "fixed" : null;
                 if (req.AutoStopMaxExtendS.HasValue) l.AutoStopMaxExtendS = req.AutoStopMaxExtendS > 0 ? req.AutoStopMaxExtendS : null; // 0/blank clears → sport default
+                // Retention: an empty/"inherit"/unknown mode clears the column (inherit the global default); a recognised
+                // mode sets it. Params clear on 0/blank, set on >0.
+                if (req.RetentionMode != null) l.RetentionMode = NormalizeRetentionMode(req.RetentionMode);
+                if (req.RetentionKeepLast.HasValue) l.RetentionKeepLast = req.RetentionKeepLast > 0 ? req.RetentionKeepLast : null;
+                if (req.RetentionKeepDays.HasValue) l.RetentionKeepDays = req.RetentionKeepDays > 0 ? req.RetentionKeepDays : null;
+                if (req.RetentionGbCap.HasValue) l.RetentionGbCap = req.RetentionGbCap > 0 ? req.RetentionGbCap : null;
                 await db.SaveChangesAsync();
             });
             return Results.Json(new { l.Id, updated = true });
@@ -505,6 +518,14 @@ public static class LeagueEndpoints
         });
     }
 
+    // Retention: an empty/"inherit"/unknown mode stores null (inherit the global default); a recognised mode sticks.
+    // Shared by create and edit (audit RET-04) so a policy chosen on the add form is never silently discarded.
+    private static string? NormalizeRetentionMode(string? mode)
+    {
+        var m = mode?.Trim();
+        return m is "keep_all" or "keep_last_n" or "keep_days" or "gb_cap" or "watched" ? m : null;
+    }
+
     // Only persist a strict #rrggbb hex (the API is the trust boundary — it's interpolated into a style attr client-side).
     private static string? ValidColor(string? c)
         => !string.IsNullOrWhiteSpace(c) && System.Text.RegularExpressions.Regex.IsMatch(c.Trim(), "^#[0-9a-fA-F]{6}$") ? c.Trim() : null;
@@ -572,7 +593,7 @@ public static class LeagueEndpoints
 }
 
 public sealed record TeamRef(string Id, string? Name);
-public sealed record LeagueUpsert(string? Sport, string? Name, string? Provider, string? ExternalLeagueId, string? IcsUrl, int? ScheduleHorizonDays, bool? Monitored, string? Color, int? EventDurationOverrideS, List<TeamRef>? MonitoredTeams, List<string>? MonitoredSessions, Dictionary<string, int>? SessionDurations, string? AutoStopMode, int? AutoStopMaxExtendS);
+public sealed record LeagueUpsert(string? Sport, string? Name, string? Provider, string? ExternalLeagueId, string? IcsUrl, int? ScheduleHorizonDays, bool? Monitored, string? Color, int? EventDurationOverrideS, List<TeamRef>? MonitoredTeams, List<string>? MonitoredSessions, Dictionary<string, int>? SessionDurations, string? AutoStopMode, int? AutoStopMaxExtendS, string? RetentionMode = null, int? RetentionKeepLast = null, int? RetentionKeepDays = null, int? RetentionGbCap = null);
 public sealed record EventCreate(int LeagueId, string? Title, long StartUtc, long? EndUtc, bool? Monitored);
 public sealed record MonitorReq(bool Monitored);
 public sealed record MappingCreate(int LeagueId, int ChannelId, int? Rank, bool? Pinned, string? TeamId, string? TeamName);

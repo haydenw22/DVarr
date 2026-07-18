@@ -5,7 +5,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace DVarr.Services.Events;
 
-public sealed record ResolvedChannel(int ChannelId, int SourceId, int StreamId, string ChannelName, double Score, int Rank, double EpgScore = 0);
+public sealed record ResolvedChannel(int ChannelId, int SourceId, int StreamId, string ChannelName, double Score, int Rank, double EpgScore = 0, bool Pinned = false);
 public sealed record ResolveResult(bool Ok, ResolvedChannel? Primary, List<ResolvedChannel> Fallbacks, double Confidence, string? Reason);
 
 /// <summary>
@@ -23,6 +23,9 @@ public sealed class ResolverService
     // A team-scoped mapping matching one of the event's teams dominates every league-wide mapping (pinned or not),
     // while pin/rank/EPG keep their existing order WITHIN the team-scoped set. Far above PinFloor + EpgBonusMax.
     private const double TeamFloor = 10000;
+    // A single-team / generic EPG match (a team-branded channel that mentions the team but not the opponent) earns
+    // at most this many points — below the 5-point rank step, so it can never leapfrog the user's channel order.
+    private const double WeakEpgCap = 3;
 
     private readonly DVarrDbContext _db;
     private readonly ILogger<ResolverService> _log;
@@ -49,6 +52,9 @@ public sealed class ResolverService
         // Off-limits guard: never resolve to a channel on a disabled source, so the auto-scheduler can't even
         // create a Pending recording that would later try to contact it.
         var disabledSources = (await _db.Sources.Where(s => !s.Enabled).Select(s => s.Id).ToListAsync(ct)).ToHashSet();
+
+        // The two teams of this event (for the "does the guide show THIS game, not just this team" test below).
+        var (sideA, sideB) = EventSides(ev.Title);
 
         var scored = new List<ResolvedChannel>();
         foreach (var m in maps)
@@ -78,12 +84,25 @@ public sealed class ResolverService
                     .Select(p => p.Title).Take(50).ToListAsync(ct);
                 if (progTitles.Count > 0)
                 {
-                    epgSim = progTitles.Max(t => Similarity(t, ev.Title));
-                    score += epgSim * EpgBonusMax;
+                    // Distinguish a programme that shows THIS game (BOTH teams) from one that merely mentions the
+                    // followed team: a team-branded channel ("US: New York Mets") matches every Mets game on the team
+                    // name alone (~0.4) and used to hijack the pick from the real regional network when that network
+                    // wasn't carrying the game. Only a both-team match earns the rank-overriding bonus AND a non-zero
+                    // EpgScore (which the arm-window re-pick keys off); a single-team/generic match earns at most
+                    // WeakEpgCap — below the rank step, so it can't reorder the ladder.
+                    double strong = 0, weak = 0;
+                    foreach (var t in progTitles)
+                    {
+                        var sim = Similarity(t, ev.Title);
+                        if (ShowsBothTeams(t, sideA, sideB)) strong = Math.Max(strong, sim);
+                        else weak = Math.Max(weak, sim);
+                    }
+                    epgSim = strong; // only a real-game (both-team) match counts as "this channel shows the event"
+                    score += strong > 0 ? strong * EpgBonusMax : Math.Min(weak * EpgBonusMax, WeakEpgCap);
                 }
             }
 
-            scored.Add(new ResolvedChannel(ch.Id, ch.SourceId, ch.StreamId, ch.Name, score, m.Rank, epgSim));
+            scored.Add(new ResolvedChannel(ch.Id, ch.SourceId, ch.StreamId, ch.Name, score, m.Rank, epgSim, m.Pinned));
         }
         if (scored.Count == 0) return new ResolveResult(false, null, new(), 0, "mapped channels are missing or disabled");
 
@@ -146,8 +165,9 @@ public sealed class ResolverService
 
     private static readonly Regex NonAlnum = new(@"[^a-z0-9 ]", RegexOptions.Compiled);
 
-    /// <summary>Token-set Jaccard similarity 0..1 on normalised titles (lightweight fuzzy match).</summary>
-    internal static double Similarity(string? a, string? b)
+    /// <summary>Token-set Jaccard similarity 0..1 on normalised titles (lightweight fuzzy match). Public so the
+    /// replay-rescue sweep can score EPG programme titles against a failed event's title with the same metric.</summary>
+    public static double Similarity(string? a, string? b)
     {
         var ta = Tokens(a); var tb = Tokens(b);
         if (ta.Count == 0 || tb.Count == 0) return 0;
@@ -161,5 +181,33 @@ public sealed class ResolverService
         if (string.IsNullOrWhiteSpace(s)) return new();
         var n = NonAlnum.Replace(s.ToLowerInvariant(), " ");
         return n.Split(' ', StringSplitOptions.RemoveEmptyEntries).Where(t => t.Length > 1).ToHashSet();
+    }
+
+    private static readonly string[] VsSeparators = { " vs ", " vs. ", " v ", " @ ", " x ", " - ", " – " };
+
+    /// <summary>Split an event title "Home vs Away" into each side's significant tokens, for a "does this programme
+    /// show THIS game (both teams), not just this team" test. With no separator both sides get the whole title's
+    /// tokens (single-name events — motorsport etc. — still match on their own tokens); the two returned sets are the
+    /// SAME instance in that case, so a caller can detect a single-sided title via ReferenceEquals.</summary>
+    public static (HashSet<string> A, HashSet<string> B) EventSides(string? title)
+    {
+        if (string.IsNullOrWhiteSpace(title)) { var empty = new HashSet<string>(); return (empty, empty); }
+        foreach (var sep in VsSeparators)
+        {
+            var i = title.IndexOf(sep, StringComparison.OrdinalIgnoreCase);
+            if (i > 0 && i + sep.Length < title.Length) return (Tokens(title[..i]), Tokens(title[(i + sep.Length)..]));
+        }
+        var all = Tokens(title);
+        return (all, all);
+    }
+
+    /// <summary>True when a programme title shares at least one significant token with BOTH sides of the event — i.e.
+    /// it plausibly shows this specific matchup, not just one of the teams generically.</summary>
+    public static bool ShowsBothTeams(string? progTitle, HashSet<string> sideA, HashSet<string> sideB)
+    {
+        if (sideA.Count == 0 && sideB.Count == 0) return false;
+        var t = Tokens(progTitle);
+        if (t.Count == 0) return false;
+        return (sideA.Count == 0 || sideA.Overlaps(t)) && (sideB.Count == 0 || sideB.Overlaps(t));
     }
 }

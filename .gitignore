@@ -35,6 +35,9 @@ secrets.json
 # Internal build diary (contains deployment specifics) — local only
 DECISIONS.md
 
+# Internal application audits — local only
+/Codex/
+
 # Local tooling config
 .claude/
 **/.claude/

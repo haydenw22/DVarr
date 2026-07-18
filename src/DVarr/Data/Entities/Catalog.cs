@@ -45,6 +45,10 @@ public class Channel
     public int? TvArchiveDuration { get; set; }
     public string? DetectedQuality { get; set; }
 
+    /// <summary>Channel logo/icon URL from the provider (Xtream <c>stream_icon</c>), refreshed on each ingest. Shown
+    /// next to the channel in the Channels page and Guide to make the right channel easier to spot. Null = no icon.</summary>
+    public string? LogoUrl { get; set; }
+
     public bool Enabled { get; set; } = true;
 
     /// <summary>User pref: favourite channels sort to the top of every channel list/picker. Survives re-ingest

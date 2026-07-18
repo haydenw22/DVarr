@@ -73,7 +73,7 @@ main#view { padding:26px; background:var(--content); flex:1; }
 
 /* KPI stat cards (dashboard row 1) */
 .kpi-row { display:grid; gap:14px; grid-template-columns:repeat(2,minmax(0,1fr)); margin-bottom:22px; }
-@media (min-width:980px) { .kpi-row { grid-template-columns:repeat(4,minmax(0,1fr)); } }
+@media (min-width:980px) { .kpi-row { grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); } }
 .kpi { position:relative; display:flex; gap:14px; align-items:center; background:var(--card-grad); border:1px solid var(--line); border-radius:14px; padding:16px; min-width:0; overflow:hidden; box-shadow:var(--shadow); }
 .kpi::after { content:""; position:absolute; left:0; right:0; bottom:0; height:2px; background:var(--acc); opacity:.9; }
 .kpi.ok::after { background:var(--ok); }
@@ -252,12 +252,30 @@ label.field { display:flex; flex-direction:column; gap:5px; font-size:12px; colo
 
 .lg-chrow { display:flex; align-items:center; gap:11px; padding:8px 11px; background:var(--chip-bg); border:1px solid var(--line2); border-radius:10px; }
 .lg-chrow.dragging { opacity:.55; outline:1px dashed var(--acc); }
+/* In-app log viewer table: compact monospace rows, wrapping message, level-coloured tags. */
+.logtable td { font-size:12px; padding:4px 8px; vertical-align:top; }
+.logtable .log-lvl { font-weight:600; }
+.logtable .log-msg { white-space:pre-wrap; word-break:break-word; }
+.logtable tr.log-warning .log-lvl { color:var(--warn); }
+.logtable tr.log-error .log-lvl, .logtable tr.log-critical .log-lvl { color:var(--bad, #ef4444); }
+.logtable tr.log-information .log-lvl { color:var(--dim); }
+
+/* Channel logo (provider icon) in the Channels table + Guide row. object-fit:contain so wide/tall logos aren't
+   distorted; a subtle tile keeps a white logo readable on the dark row. */
+.ch-name { display:inline-flex; align-items:center; gap:8px; min-width:0; }
+.ch-logo { width:22px; height:22px; object-fit:contain; border-radius:4px; background:rgba(255,255,255,.05); flex:0 0 auto; }
+.g-ch .ch-logo { width:20px; height:20px; }
 .lg-grip { flex:0 0 auto; display:inline-flex; color:var(--dim2); cursor:grab; padding:2px; border-radius:6px; }
 .lg-grip:hover { color:var(--txt); background:rgba(59,130,246,.08); }
 .lg-grip:active { cursor:grabbing; }
 .lg-grip svg { width:16px; height:16px; }
 /* Keyboard/touch reorder buttons — an accessible alternative to the drag grip (audit UI-LG-03). */
-.lg-move { flex:0 0 auto; display:inline-flex; flex-direction:column; gap:1px; }
+/* Default (any non-touch device): the drag grip is the primary control; the ▲▼ buttons tuck away and reveal on row
+   hover or keyboard focus, so rows aren't cluttered with two controls for the same job. width:0 (not display:none)
+   keeps them tabbable. Touch devices override this below to show ▲▼ always. */
+.lg-move { flex:0 0 auto; display:inline-flex; flex-direction:column; gap:1px; width:0; opacity:0; overflow:hidden; margin-left:-11px; transition:opacity .12s ease; }
+.lg-chrow:hover .lg-move, .lg-chrow:focus-within .lg-move,
+.prio-row:hover .lg-move, .prio-row:focus-within .lg-move { width:auto; opacity:1; margin-left:0; }
 .lg-moveb { width:20px; height:15px; padding:0; line-height:1; font-size:10px; display:flex; align-items:center; justify-content:center; color:var(--dim2); background:transparent; border:1px solid var(--line2); border-radius:5px; cursor:pointer; }
 .lg-moveb:hover { color:var(--txt); border-color:var(--acc); background:rgba(59,130,246,.08); }
 .lg-chrow-main { flex:1 1 auto; min-width:0; }
@@ -273,16 +291,11 @@ label.field { display:flex; flex-direction:column; gap:5px; font-size:12px; colo
 .lg-pintog.on { color:var(--warn); border-color:rgba(245,158,11,.4); background:rgba(245,158,11,.08); }
 .lg-pintog.on:hover { background:rgba(245,158,11,.16); color:#fbbf24; }
 
-/* Reorder affordances: on mouse/trackpad devices the drag grip is the primary control and the ▲▼ buttons only
-   fade in on row hover (or keyboard focus — width:0 clipping keeps them tabbable, unlike display:none), so rows
-   aren't cluttered with two controls for the same job. Touch devices get the opposite: ▲▼ always (HTML5 drag
-   doesn't fire on touch) and no grip. */
-@media (hover:hover) and (pointer:fine){
-  .lg-move { width:0; opacity:0; overflow:hidden; margin-left:-11px; transition:opacity .12s ease; }
-  .lg-chrow:hover .lg-move, .lg-chrow:focus-within .lg-move,
-  .prio-row:hover .lg-move, .prio-row:focus-within .lg-move { width:auto; opacity:1; margin-left:0; }
-}
-@media (hover:none){
+/* Touch (no hover, OR a coarse pointer): show the ▲▼ buttons permanently and drop the grip — HTML5 drag doesn't fire
+   on touch. Matching EITHER condition covers touchscreen laptops that report hover:hover + pointer:coarse, which the
+   old two-query pair fell between (leaving both controls visible). */
+@media (hover:none), (pointer:coarse){
+  .lg-move { width:auto; opacity:1; margin-left:0; }
   .lg-grip { display:none; }
 }
 
