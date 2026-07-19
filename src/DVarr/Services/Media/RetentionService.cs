@@ -35,6 +35,7 @@ public sealed class RetentionService
         var gLast = await _settings.GetIntAsync("retention_keep_last");
         var gDays = await _settings.GetIntAsync("retention_keep_days");
         var gGb = await _settings.GetIntAsync("retention_gb_cap");
+        var watchedCfg = await LoadWatchedConfigAsync();
         var now = EpochTime.Now();
 
         var leagues = await _db.Leagues.AsNoTracking()
@@ -60,7 +61,7 @@ public sealed class RetentionService
                 .ToListAsync(ct);
             if (items.Count == 0) continue;
 
-            var (victims, detail) = SelectVictims(mode, items, keepLast, keepDays, gbCap, now);
+            var (victims, detail) = SelectVictims(mode, items, keepLast, keepDays, gbCap, now, watchedCfg);
             plans.Add(new LeagueRetentionPlan(l.Id, l.Name, mode, detail,
                 victims.Select(i => new RetentionVictim(i.Id, i.Title, i.ShowName, i.StartUtc, i.FileBytes, i.WatchedUtc != null)).ToList(),
                 victims.Sum(i => i.FileBytes)));
@@ -115,32 +116,73 @@ public sealed class RetentionService
         return (deleted, freed, false);
     }
 
-    /// <summary>Immediately evict specific just-watched items whose effective retention mode is "watched" (and which
-    /// aren't protected/unsorted). Called from the watched webhook so delete-after-watched acts the moment you finish
-    /// a game instead of waiting for the once-a-day sweep. Items under any other policy are ignored — they wait for
-    /// the scheduled sweep. Returns how many were removed.</summary>
-    public async Task<int> EvictWatchedAsync(IReadOnlyCollection<int> itemIds, CancellationToken ct = default)
+    /// <summary>The "delete after watched" safety window: threshold the media server flags a game watched at (a
+    /// POSITION %, not true end-of-play), the buffer added past the estimated finish, and a flat fallback delay used
+    /// only when a file's runtime is unknown so the estimate can't be computed.</summary>
+    private readonly record struct WatchedRetentionConfig(int ThresholdPct, int BufferMinutes, int FallbackDelayMinutes);
+
+    private async Task<WatchedRetentionConfig> LoadWatchedConfigAsync()
     {
-        if (itemIds.Count == 0) return 0;
-        // Instant delete-after-watched can be turned off — then a watched game is only flagged, and the daily sweep
-        // (retention_sweep_time) removes it instead.
-        if (!await _settings.GetBoolAsync("retention_watched_instant")) return 0;
+        var threshold = await _settings.GetIntAsync("retention_watched_threshold_pct");
+        if (threshold is <= 0 or >= 100) threshold = 90;                 // must leave a non-empty tail
+        var buffer = await _settings.GetIntAsync("retention_watched_buffer_minutes");
+        if (buffer < 0) buffer = 15;
+        var delay = await _settings.GetIntAsync("retention_watched_delay_minutes");
+        if (delay < 0) delay = 60;
+        return new WatchedRetentionConfig(threshold, buffer, delay);
+    }
+
+    /// <summary>Epoch before which a just-watched game must NOT be deleted. The media server flags "watched" at a
+    /// position threshold (~90%), so the un-watched tail ≈ DurationS × (100 − threshold%); the earliest safe delete
+    /// is WatchedUtc + that tail + the buffer. When the runtime is unknown (probe failed) the tail can't be sized, so
+    /// a flat fallback delay applies instead.</summary>
+    private static long WatchedDeleteEarliest(long watchedUtc, int? durationS, WatchedRetentionConfig cfg)
+    {
+        long tailS = durationS is int d && d > 0
+            ? (long)Math.Round(d * (100 - cfg.ThresholdPct) / 100.0) + cfg.BufferMinutes * 60L
+            : cfg.FallbackDelayMinutes * 60L;
+        return watchedUtc + tailS;
+    }
+
+    /// <summary>Delete "delete after watched" games whose safety window has elapsed — the estimated end-of-play plus
+    /// the buffer (see <see cref="WatchedDeleteEarliest"/>). Called every schedule tick so a finished game is cleaned
+    /// up within minutes, but NEVER before the viewer would have reached the end (the media server flags watched at a
+    /// ~90% position, not at true end-of-play — deleting on that signal wiped files mid-watch). Items under any other
+    /// policy are left to the scheduled sweep. Returns how many were removed.</summary>
+    public async Task<int> EvictWatchedDueAsync(CancellationToken ct = default)
+    {
+        var cfg = await LoadWatchedConfigAsync();
         var globalMode = (await _settings.GetAsync("retention_default_mode") ?? "keep_all").Trim();
         var now = EpochTime.Now();
+
+        // Cheap filtered read — watched, filed, unprotected candidates; the per-item league-mode + window checks run
+        // in memory. Protected/unsorted are excluded here AND re-checked under a fresh read before each delete.
+        var candidates = await _db.LibraryItems.AsNoTracking()
+            .Where(i => i.Status == LibraryItemStatus.Ok && !i.Protected && !i.Unsorted && i.WatchedUtc != null)
+            .Select(i => new { i.Id, i.LeagueId, i.WatchedUtc, i.DurationS })
+            .ToListAsync(ct);
+        if (candidates.Count == 0) return 0;
+
+        // Effective mode = the item's league policy, else the global default. Keep only "watched" items whose safety
+        // window has passed.
+        var leagueModes = await _db.Leagues.AsNoTracking()
+            .Where(l => l.RetentionMode != null && l.RetentionMode != "")
+            .ToDictionaryAsync(l => l.Id, l => l.RetentionMode!.Trim(), ct);
+        var dueIds = new List<int>();
+        foreach (var c in candidates)
+        {
+            var mode = c.LeagueId is int lid && leagueModes.TryGetValue(lid, out var lm) ? lm : globalMode;
+            if (mode != "watched") continue;
+            if (now >= WatchedDeleteEarliest(c.WatchedUtc!.Value, c.DurationS, cfg)) dueIds.Add(c.Id);
+        }
+        if (dueIds.Count == 0) return 0;
+
         int deleted = 0;
-        foreach (var id in itemIds)
+        foreach (var id in dueIds)
         {
             ct.ThrowIfCancellationRequested();
             var item = await _db.LibraryItems.FindAsync(new object?[] { id }, ct);
-            if (item is null || item.Status != LibraryItemStatus.Ok || item.Protected || item.Unsorted) continue;
-            // Effective mode = the item's league policy, else the global default. Only "watched" evicts on the spot.
-            var mode = globalMode;
-            if (item.LeagueId is { } lid)
-            {
-                var lm = await _db.Leagues.AsNoTracking().Where(l => l.Id == lid).Select(l => l.RetentionMode).FirstOrDefaultAsync(ct);
-                if (!string.IsNullOrWhiteSpace(lm)) mode = lm!.Trim();
-            }
-            if (mode != "watched") continue;
+            if (item is null || item.Status != LibraryItemStatus.Ok || item.Protected || item.Unsorted) continue; // re-check under a fresh read
             await _playback.StopAsync(id); // never delete a file out from under its own playback session
             var err = _lib.DeleteItemFiles(item);
             if (err is not null) { _log.LogWarning("[Retention] delete-after-watched failed for {Id}: {Err}", id, err); continue; }
@@ -164,7 +206,7 @@ public sealed class RetentionService
     /// <summary>Pick the eviction candidates for one league's items (newest-first) under a mode. Protected items are
     /// excluded BEFORE this runs (RET-01) — keep-N slots and the GB budget only ever count unprotected items.</summary>
     private static (List<LibraryItem> Victims, string Detail) SelectVictims(string mode, List<LibraryItem> itemsDesc,
-        int keepLast, int keepDays, int gbCap, long now)
+        int keepLast, int keepDays, int gbCap, long now, WatchedRetentionConfig watchedCfg)
     {
         switch (mode)
         {
@@ -192,7 +234,9 @@ public sealed class RetentionService
                 return (victims, $"keep the newest {capGb} GB");
             }
             case "watched":
-                return (itemsDesc.Where(i => i.WatchedUtc != null).ToList(), "delete after watched");
+                // Only games PAST their safety window (estimated finish + buffer) — never a game the viewer may still
+                // be finishing. Mirrors the per-tick EvictWatchedDueAsync so the dry-run preview and the sweep agree.
+                return (itemsDesc.Where(i => i.WatchedUtc is long w && now >= WatchedDeleteEarliest(w, i.DurationS, watchedCfg)).ToList(), "delete after watched");
             default:
                 return (new List<LibraryItem>(), "keep everything");
         }

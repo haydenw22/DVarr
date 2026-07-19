@@ -158,11 +158,18 @@ public sealed class SettingsService
         ["retention_keep_last"] = "20",
         ["retention_keep_days"] = "90",
         ["retention_gb_cap"] = "500",
-        // "Delete after watched": ON = remove a game the instant your media server reports it watched; OFF = just flag
-        // it and let the daily cleanup delete it. The daily cleanup runs once per day at retention_sweep_time (LOCAL to
-        // your Display timezone) and applies every league's policy. retention_sweep_last is an internal fire stamp
-        // (the last local date it ran — must stay in Defaults or EnsureDefaults would prune the row each boot).
-        ["retention_watched_instant"] = "true",
+        // "Delete after watched" SAFETY WINDOW. Media servers flag a game "watched" at a POSITION threshold (Jellyfin/
+        // Plex default 90%), NOT at true end-of-play — so deleting the instant that signal arrives can wipe a file the
+        // viewer is still finishing. Instead DVarr defers: it estimates the un-watched tail from the file's own probed
+        // runtime — tail = DurationS × (100 − threshold%) — and won't delete until WatchedUtc + tail + buffer. So a
+        // 2h game flagged at 90% survives ≥ (12 min tail + 15 min buffer) past the signal. When a file's runtime is
+        // unknown (probe failed) the math can't run, so it falls back to a flat delay. Deletion is carried out by the
+        // per-tick watched check and the daily sweep (retention_sweep_time, LOCAL to your Display timezone); both honour
+        // this window. retention_sweep_last is an internal fire stamp (the last local date the daily sweep ran — must
+        // stay in Defaults or EnsureDefaults would prune the row each boot).
+        ["retention_watched_buffer_minutes"] = "15",
+        ["retention_watched_threshold_pct"] = "90",
+        ["retention_watched_delay_minutes"] = "60",
         ["retention_sweep_time"] = "03:00",
         ["retention_sweep_last"] = "",
         ["timezone_display"] = "Australia/Brisbane",

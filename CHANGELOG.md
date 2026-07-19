@@ -12,6 +12,16 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.41.6] — 2026-07-20
+Fixes a serious “delete after watched” bug that could delete a game **while you were still watching it**, and replaces the blunt instant-delete with a runtime-aware safety window.
+
+### Fixed
+- **“Delete after watched” no longer deletes a game you’re still watching.** Media servers flag a game *watched* when playback passes a position threshold (~90% of its length) — **not** when it actually ends — and DVarr deleted the file the instant that signal arrived. On a near-finished game that wiped the recording mid-play (and then logged a burst of *“no matching library file”* as the server kept reporting the now-deleted item). DVarr now **defers** the delete instead of acting on the raw signal.
+
+### Changed
+- **Watched games are kept until you’d realistically have finished — plus a buffer.** DVarr estimates the un-watched tail from the file’s own length (a game flagged watched at 90% has ~10% left) and won’t delete until that estimated finish **plus a keep-for buffer (default 15 min)** has passed. A 2-hour game flagged watched therefore survives at least ~27 minutes after the signal — comfortably past the real end. The delete is then carried out within minutes by the retention check, with the daily cleanup as a backstop.
+- New **Settings → Storage** controls: **Watched: keep-for buffer** (default 15 min — the one most people will touch), **server’s played %** (advanced, default 90 — set it to match your media server), and a **fallback delay** (advanced, used only when a file’s length can’t be read). These replace the 1.41.5 *“delete watched games instantly”* toggle, which is retired.
+
 ## [1.41.5] — 2026-07-19
 Decide *when* watched games get deleted — the instant your media server marks them, or during a daily cleanup at a time you choose.
 

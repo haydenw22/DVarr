@@ -1775,8 +1775,10 @@ const SETTINGS_META = {
   retention_keep_last: { g: 'Storage', t: 'Keep newest N games', h: 'For the “keep the newest N games” policy — how many of the most recent games to keep per league.', ty: 'int' },
   retention_keep_days: { g: 'Storage', t: 'Keep last N days', h: 'For the “keep the last N days” policy — delete games older than this many days.', ty: 'int' },
   retention_gb_cap: { g: 'Storage', t: 'Keep under (GB)', h: 'For the “GB cap” policy — keep the newest games up to this many GB per league, deleting older ones.', ty: 'int' },
-  retention_watched_instant: { g: 'Storage', t: 'Delete watched games instantly', h: 'For the “Delete after watched” policy — remove a game the moment your media server reports it watched. Turn this off to just flag watched games and let the daily cleanup delete them instead.', ty: 'bool' },
-  retention_sweep_time: { g: 'Storage', t: 'Daily cleanup time', h: 'Local time of day the automatic cleanup runs — it applies every league’s retention policy and clears any watched games queued while instant delete is off.', ty: 'time' },
+  retention_watched_buffer_minutes: { g: 'Storage', t: 'Watched: keep-for buffer (min)', h: 'For the “Delete after watched” policy — extra minutes to keep a game past when DVarr estimates you’d have finished it. Your media server flags a game watched at ~90% (not the real end), so DVarr waits out the last ~10% (from the file’s length) plus this buffer before deleting. Stops a game being deleted while you’re still finishing it.', ty: 'int' },
+  retention_watched_threshold_pct: { g: 'Storage', t: 'Watched: server’s played % (advanced)', h: 'The percentage at which your media server flags a game watched — Jellyfin and Plex default to 90. DVarr uses it to work out how much of the game you had left. Only change this if you’ve changed the threshold in your media server.', ty: 'int' },
+  retention_watched_delay_minutes: { g: 'Storage', t: 'Watched: fallback delay (min, advanced)', h: 'Fallback only — used when a game’s length can’t be read, so the estimate can’t run. DVarr then waits this many minutes after the watched signal before deleting.', ty: 'int' },
+  retention_sweep_time: { g: 'Storage', t: 'Daily cleanup time', h: 'Local time of day the automatic cleanup runs — it applies every league’s retention policy and is the daily backstop for deleting watched games past their keep-for window.', ty: 'time' },
 };
 function settingField(k, v) {
   const m = SETTINGS_META[k] || { t: k, h: '', ty: (v === 'true' || v === 'false') ? 'bool' : 'text' };

@@ -190,9 +190,9 @@ public sealed class AutoScheduleService : BackgroundService
 
         // 0c) Retention sweep: evict old finished recordings per each league's policy (unprotected-oldest first,
         //     reusing the safe delete-with-files primitive). No-op unless a non-keep_all policy is configured. Fires
-        //     once per LOCAL day (the Display timezone) at retention_sweep_time, and clears any delete-after-watched
-        //     games flagged while instant delete was off. The stamp advances only on SUCCESS (audit RET-05) — a
-        //     failed sweep (locked db, unmounted drive) retries next tick, not tomorrow.
+        //     once per LOCAL day (the Display timezone) at retention_sweep_time; watched games past their safety
+        //     window are swept here too, as a daily backstop to the per-tick check in 0d. The stamp advances only on
+        //     SUCCESS (audit RET-05) — a failed sweep (locked db, unmounted drive) retries next tick, not tomorrow.
         try
         {
             var localNow = EpochTime.ToDisplay(now);
@@ -207,6 +207,16 @@ public sealed class AutoScheduleService : BackgroundService
             }
         }
         catch (Exception ex) { _log.LogWarning(ex, "[AutoSchedule] retention sweep failed (retrying next tick after the scheduled time)"); }
+
+        // 0d) Delete-after-watched: remove watched games whose safety window (estimated finish + buffer) has passed.
+        //     Checked EVERY tick so a finished game clears within minutes — but never before the viewer would have
+        //     reached the end (the media server flags watched at a ~90% position, not true end-of-play).
+        try
+        {
+            var n = await scope.ServiceProvider.GetRequiredService<DVarr.Services.Media.RetentionService>().EvictWatchedDueAsync(ct);
+            if (n > 0) _log.LogInformation("[AutoSchedule] delete-after-watched removed {N} game(s) past their safety window", n);
+        }
+        catch (Exception ex) { _log.LogWarning(ex, "[AutoSchedule] watched-delete check failed"); }
 
         // 1) Refresh events for monitored, non-manual leagues whose data is stale.
         var dueLeagues = await db.Leagues

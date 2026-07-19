@@ -25,7 +25,7 @@ public static class WebhookEndpoints
     public static void MapWebhookApi(this WebApplication app)
     {
         // Plex: multipart/form-data with a `payload` JSON field. media.scrobble fires at ~90% watched.
-        app.MapPost("/api/webhooks/plex", async (HttpRequest req, DVarrDbContext db, DbWriteGate gate, RetentionService retention, ILoggerFactory lf) =>
+        app.MapPost("/api/webhooks/plex", async (HttpRequest req, DVarrDbContext db, DbWriteGate gate, ILoggerFactory lf) =>
         {
             if (!await TokenValidAsync(req, db)) return Results.Unauthorized();
             if (req.ContentLength is > PlexMaxBodyBytes) return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
@@ -49,11 +49,10 @@ public static class WebhookEndpoints
                         var episode = IntField(meta, "index");
                         var (result, fresh) = await MarkWatchedAsync(db, gate, path, series, season, episode, log);
                         if (result == WatchResult.Marked)
-                        {
+                            // Just flag it — the retention tick/sweep delete it later, once past the watched safety
+                            // window (never mid-watch: the server scrobbles at ~90% position, not true end-of-play).
                             log.LogInformation("[Webhook] plex scrobble '{Title}' (series={Series} S{Season}E{Episode}, path={Path}) → {N} item(s) marked watched",
                                 title ?? "?", series ?? "?", season, episode, path ?? "(none)", fresh.Count);
-                            await retention.EvictWatchedAsync(fresh);
-                        }
                         else if (result == WatchResult.NoMatch)
                             log.LogInformation("[Webhook] plex scrobble '{Title}' (series={Series} S{Season}E{Episode}, path={Path}) → no matching library file",
                                 title ?? "?", series ?? "?", season, episode, path ?? "(none)");
@@ -66,7 +65,7 @@ public static class WebhookEndpoints
 
         // Jellyfin (Webhook plugin): JSON body. Treat any payload flagged played/played-to-completion as watched
         // (the plugin's templates vary: PlaybackStop + PlayedToCompletion, or a UserDataSaved with Played).
-        app.MapPost("/api/webhooks/jellyfin", async (HttpRequest req, DVarrDbContext db, DbWriteGate gate, RetentionService retention, ILoggerFactory lf) =>
+        app.MapPost("/api/webhooks/jellyfin", async (HttpRequest req, DVarrDbContext db, DbWriteGate gate, ILoggerFactory lf) =>
         {
             if (!await TokenValidAsync(req, db)) return Results.Unauthorized();
             if (req.ContentLength is > JellyfinMaxBodyBytes) return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
@@ -89,11 +88,10 @@ public static class WebhookEndpoints
                         var episode = IntField(root, "EpisodeNumber");
                         var (result, fresh) = await MarkWatchedAsync(db, gate, path, series, season, episode, log);
                         if (result == WatchResult.Marked)
-                        {
+                            // Just flag it — the retention tick/sweep delete it later, once past the watched safety
+                            // window (never mid-watch: Jellyfin marks played at ~90% position, not true end-of-play).
                             log.LogInformation("[Webhook] jellyfin '{Title}' (series={Series} S{Season}E{Episode}, path={Path}) → {N} item(s) marked watched",
                                 title ?? "?", series ?? "?", season, episode, path ?? "(none)", fresh.Count);
-                            await retention.EvictWatchedAsync(fresh);
-                        }
                         else if (result == WatchResult.NoMatch)
                             log.LogInformation("[Webhook] jellyfin '{Title}' (series={Series} S{Season}E{Episode}, path={Path}) → no matching library file",
                                 title ?? "?", series ?? "?", season, episode, path ?? "(none)");
