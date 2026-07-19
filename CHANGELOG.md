@@ -12,6 +12,16 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.41.3] — 2026-07-18
+Delete-after-watched now works with Jellyfin, plus quieter logs.
+
+### Fixed
+- **"Delete after watched" now matches Jellyfin recordings.** The watched webhook matched only by **file path**, but Jellyfin's webhook — especially a "mark watched" (User Data Saved) event — usually sends no path, so nothing matched and nothing was ever deleted (`[Webhook] jellyfin … → 0 item(s) marked watched`). DVarr now falls back to the **series + season + episode** the media server reports, which maps 1:1 to how DVarr files recordings (`League / Season / Game`); it also logs the incoming series/episode/path on every webhook so a miss is diagnosable at a glance. Works for Plex too (grandparent-title / season / episode). Matches still refuse ambiguity — a key that resolves to more than one library file is skipped, never guessed.
+- **Two harmless "row-limiting without OrderBy" EF warnings silenced.** The Logs page surfaced two database-layer warnings from the channel-picking guide-title lookups — cosmetic (DVarr scans the whole result regardless of order, so nothing was ever mis-picked). Both queries now carry an explicit sort: no behaviour change, quieter logs.
+
+### Docs
+- README: added a **delete-after-watched (Plex / Jellyfin webhook)** setup guide under *Full setup guide → Optional extras* — Generic Destination, Playback Stop + User Data Saved, the tokenized URL, and how to verify it in Logs.
+
 ## [1.41.2] — 2026-07-18
 Channel-picking and replay-matching made evidence-based. v1.41's new automation decided *where* to record and *what counts as the same game* on token overlap that could be fooled by shared words and premature guide data — this release makes every one of those decisions prove itself first.
 

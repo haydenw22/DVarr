@@ -81,7 +81,7 @@ public sealed class ResolverService
                 // Programme.EpgChannelId is COLLATE NOCASE → this == is case-insensitive AND uses the (SourceId,EpgChannelId,StartUtc) index.
                 var progTitles = await _db.Programmes
                     .Where(p => p.SourceId == ch.SourceId && p.EpgChannelId == eid && p.StartUtc <= winEnd && p.StopUtc >= ev.StartUtc)
-                    .Select(p => p.Title).Take(50).ToListAsync(ct);
+                    .OrderBy(p => p.StartUtc).Select(p => p.Title).Take(50).ToListAsync(ct);
                 if (progTitles.Count > 0)
                 {
                     // Distinguish a programme that shows THIS game (BOTH teams) from one that merely mentions the

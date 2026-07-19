@@ -167,7 +167,7 @@ public sealed class EpgRepickService
         var winEnd = ev.EndUtc ?? ev.StartUtc + 7200;
         var titles = await _db.Programmes.AsNoTracking()
             .Where(p => p.SourceId == sourceId && effIds.Contains(p.EpgChannelId) && p.StopUtc > winStart && p.StartUtc < winEnd)
-            .Select(p => p.Title).Take(200).ToListAsync(ct);
+            .OrderBy(p => p.StartUtc).Select(p => p.Title).Take(200).ToListAsync(ct);
         return titles.Any(t => t is not null && PlaceholderRx.IsMatch(t));
     }
 

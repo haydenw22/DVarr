@@ -12,8 +12,8 @@ namespace DVarr.Api;
 /// "delete after watched" retention mode can act. The two POST endpoints are login-exempt (a media server can't
 /// present DVarr's login — see BasicAuthMiddleware) but carry their OWN per-install secret token in the URL
 /// (<c>?token=…</c>, generated once into Secrets and shown under Settings → Storage), mirroring the calendar feed
-/// (audit SEC-08): without it every request is 401 and nothing is written. Matching is path-based and refuses
-/// ambiguity — an unauthenticated or sloppy payload can never feed the auto-delete plan.
+/// (audit SEC-08): without it every request is 401 and nothing is written. Matching is by file path or the
+/// reported series/episode, and refuses ambiguity — an unauthenticated or sloppy payload can never feed the auto-delete plan.
 /// </summary>
 public static class WebhookEndpoints
 {
@@ -43,8 +43,12 @@ public static class WebhookEndpoints
                         var meta = root.TryGetProperty("Metadata", out var m) ? m : default;
                         var path = FirstString(meta, "file") ?? DeepFilePath(meta);
                         var title = FirstString(meta, "title");
-                        var n = await MarkWatchedAsync(db, gate, path, log);
-                        log.LogInformation("[Webhook] plex scrobble '{Title}' → {N} item(s) marked watched", title ?? "?", n);
+                        var series = FirstString(meta, "grandparentTitle");
+                        var season = IntField(meta, "parentIndex");
+                        var episode = IntField(meta, "index");
+                        var n = await MarkWatchedAsync(db, gate, path, series, season, episode, log);
+                        log.LogInformation("[Webhook] plex scrobble '{Title}' (series={Series} S{Season}E{Episode}, path={Path}) → {N} item(s) marked watched",
+                            title ?? "?", series ?? "?", season, episode, path ?? "(none)", n);
                     }
                 }
             }
@@ -72,8 +76,12 @@ public static class WebhookEndpoints
                         var path = FirstString(root, "ItemPath") ?? FirstString(root, "Path")
                                    ?? (root.TryGetProperty("Item", out var it) ? FirstString(it, "Path") : null);
                         var title = FirstString(root, "Name") ?? FirstString(root, "ItemName");
-                        var n = await MarkWatchedAsync(db, gate, path, log);
-                        log.LogInformation("[Webhook] jellyfin '{Title}' → {N} item(s) marked watched", title ?? "?", n);
+                        var series = FirstString(root, "SeriesName");
+                        var season = IntField(root, "SeasonNumber");
+                        var episode = IntField(root, "EpisodeNumber");
+                        var n = await MarkWatchedAsync(db, gate, path, series, season, episode, log);
+                        log.LogInformation("[Webhook] jellyfin '{Title}' (series={Series} S{Season}E{Episode}, path={Path}) → {N} item(s) marked watched",
+                            title ?? "?", series ?? "?", season, episode, path ?? "(none)", n);
                     }
                 }
             }
@@ -120,33 +128,68 @@ public static class WebhookEndpoints
             Encoding.UTF8.GetBytes(provided), Encoding.UTF8.GetBytes(token));
     }
 
-    /// <summary>Mark the library item at <paramref name="path"/> watched. Exact path first, then a filename match
-    /// (a media server's mount path often differs from DVarr's) — but ONLY when the filename resolves to exactly one
-    /// row: a basename shared by several items is refused rather than guessed at (audit SEC-08), because watched
-    /// state can feed the auto-delete plan. Path-only — a title match is too ambiguous to base an auto-delete on.
-    /// Returns how many rows were flagged.</summary>
-    private static async Task<int> MarkWatchedAsync(DVarrDbContext db, DbWriteGate gate, string? path, ILogger log)
+    /// <summary>Mark the matching library item watched. Tries the on-disk PATH first (exact, then a unique filename —
+    /// a media server's mount path often differs from DVarr's), then falls back to the SERIES + SEASON + EPISODE the
+    /// server reports (SeriesName/SeasonNumber/EpisodeNumber ⇄ DVarr's ShowName/SeasonYear/EpisodeNum, its
+    /// League/Season/Game filing) — Jellyfin's "watched" webhook frequently carries no file path at all, so the
+    /// structured key is what actually lands. Every path refuses ambiguity: a key resolving to several rows is skipped,
+    /// not guessed at (audit SEC-08), because watched state can feed the auto-delete plan. Returns rows flagged.</summary>
+    private static async Task<int> MarkWatchedAsync(DVarrDbContext db, DbWriteGate gate, string? path,
+        string? series, int? season, int? episode, ILogger log)
     {
-        if (string.IsNullOrWhiteSpace(path)) return 0;
-        var ids = await db.LibraryItems.Where(i => i.FilePath == path).Select(i => i.Id).ToListAsync();
-        if (ids.Count == 0)
+        var ids = new List<int>();
+
+        // 1) By on-disk path: exact, then a UNIQUE filename match.
+        if (!string.IsNullOrWhiteSpace(path))
         {
-            var name = Path.GetFileName(path);
-            if (!string.IsNullOrWhiteSpace(name))
+            ids = await db.LibraryItems.Where(i => i.FilePath == path).Select(i => i.Id).ToListAsync();
+            if (ids.Count == 0)
             {
-                ids = await db.LibraryItems.Where(i => i.FilePath.EndsWith(name)).Select(i => i.Id).ToListAsync();
-                if (ids.Count > 1)
+                var name = Path.GetFileName(path);
+                if (!string.IsNullOrWhiteSpace(name))
                 {
-                    log.LogWarning("[Webhook] '{Name}' matches {N} library files — ambiguous, refusing to mark any watched", name, ids.Count);
-                    return 0;
+                    var byName = await db.LibraryItems.Where(i => i.FilePath.EndsWith(name)).Select(i => i.Id).ToListAsync();
+                    if (byName.Count > 1)
+                    {
+                        log.LogWarning("[Webhook] filename '{Name}' matches {N} library files — ambiguous, not marking watched", name, byName.Count);
+                        return 0;
+                    }
+                    ids = byName;
                 }
             }
         }
+
+        // 2) By series + season + episode (the reliable fallback when no path is sent). All three required; unique only.
+        if (ids.Count == 0 && !string.IsNullOrWhiteSpace(series) && season is > 0 && episode is > 0)
+        {
+            var s = series.Trim();
+            ids = await db.LibraryItems
+                .Where(i => i.SeasonYear == season!.Value && i.EpisodeNum == episode!.Value && i.ShowName == s)
+                .Select(i => i.Id).ToListAsync();
+            if (ids.Count == 0) // the media server's series casing can differ from DVarr's folder name
+                ids = await db.LibraryItems
+                    .Where(i => i.SeasonYear == season!.Value && i.EpisodeNum == episode!.Value && i.ShowName.ToLower() == s.ToLower())
+                    .Select(i => i.Id).ToListAsync();
+            if (ids.Count > 1)
+            {
+                log.LogWarning("[Webhook] '{Series}' S{Season}E{Episode} matches {N} library files — ambiguous, not marking watched", s, season, episode, ids.Count);
+                return 0;
+            }
+        }
+
         if (ids.Count == 0) return 0;
         var now = EpochTime.Now();
         await gate.WriteAsync(async () =>
-            await db.LibraryItems.Where(i => ids.Contains(i.Id)).ExecuteUpdateAsync(s => s.SetProperty(i => i.WatchedUtc, now)));
+            await db.LibraryItems.Where(i => ids.Contains(i.Id)).ExecuteUpdateAsync(x => x.SetProperty(i => i.WatchedUtc, now)));
         return ids.Count;
+    }
+
+    private static int? IntField(JsonElement el, string prop)
+    {
+        if (el.ValueKind != JsonValueKind.Object || !el.TryGetProperty(prop, out var v)) return null;
+        if (v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n)) return n;
+        if (v.ValueKind == JsonValueKind.String && int.TryParse(v.GetString(), out var s)) return s;
+        return null;
     }
 
     private static string? FirstString(JsonElement el, string prop)
