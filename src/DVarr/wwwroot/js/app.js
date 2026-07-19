@@ -471,6 +471,13 @@ PAGES.recordings = {
       const sort = ($('#recSort') || {}).value || 'evt_close';
       const byName = (a, b) => (a.title || '').localeCompare(b.title || '');
       const nowS = Math.floor(Date.now() / 1000);
+      // A recording capturing right now is the closest thing to "now" — float live/in-progress rows to the top of
+      // the DATE sorts so an in-progress game is never buried below upcoming windows (it started in the past, so the
+      // plain event-window comparators would otherwise sink it). Name sorts stay a pure A–Z.
+      const liveFirst = cmp => (a, b) => {
+        const aL = ACTIVE.includes(a.state), bL = ACTIVE.includes(b.state);
+        return aL !== bL ? (aL ? -1 : 1) : cmp(a, b);
+      };
       const byClosest = (a, b) => {
         const aPast = (a.startUtc || 0) <= nowS, bPast = (b.startUtc || 0) <= nowS;
         if (aPast !== bPast) return aPast ? 1 : -1;            // upcoming windows above past ones
@@ -480,8 +487,8 @@ PAGES.recordings = {
       rows = rows.slice().sort(
         sort === 'name_asc' ? byName
         : sort === 'name_desc' ? ((a, b) => byName(b, a))
-        : sort === 'evt_far' ? ((a, b) => (b.startUtc || 0) - (a.startUtc || 0))
-        : byClosest); // evt_close default
+        : sort === 'evt_far' ? liveFirst((a, b) => (b.startUtc || 0) - (a.startUtc || 0))
+        : liveFirst(byClosest)); // evt_close default
       // Keep the bulk selection to the currently VISIBLE rows only (audit UI-BULK-01): otherwise a row selected
       // under one filter stays in recSel after a filter hides it, and a bulk Stop/Delete would silently hit hidden
       // recordings. An SSE refresh keeps the same filter → same visible set → selections survive as before.
@@ -1713,8 +1720,7 @@ const SETTINGS_TABS = ['Recording', 'Reliability', 'Scheduling & EPG', 'Data sou
 const GROUP_TAB = { Recording: 'Recording', Reliability: 'Reliability', Scheduling: 'Scheduling & EPG', Guide: 'Scheduling & EPG', TheSportsDB: 'Data sources', Integrations: 'Data sources', Display: 'Data sources', Storage: 'Storage', Advanced: 'Advanced' };
 const SETTINGS_META = {
   max_global_concurrent_recordings: { g: 'Recording', t: 'Max simultaneous recordings', h: 'The most recordings DVarr will run at once across all logins.', ty: 'int' },
-  default_pre_pad_s: { g: 'Recording', t: 'Pre-roll padding (seconds)', h: 'How long before an event starts to begin recording.', ty: 'int' },
-  default_post_pad_s: { g: 'Recording', t: 'Post-roll padding (seconds)', h: 'How long after an event ends to keep recording.', ty: 'int' },
+  // Pre/post-roll padding + default & per-sport event length + auto-stop cap are edited in Settings → Recording profiles.
   retry_at_event_start: { g: 'Recording', t: 'Retry at event start', h: 'If a recording captures nothing during pre-roll (the channel isn’t live yet), make one fresh attempt at the real start time.', ty: 'bool' },
   auto_stop_enabled: { g: 'Recording', t: 'Smart auto-stop', h: 'Near a live recording’s scheduled end, watch the match status and extend while it’s still in play (extra time, penalty shoot-outs) — never shortens the scheduled window.', ty: 'bool' },
   chapter_marks_enabled: { g: 'Recording', t: 'Chapter markers', h: 'Track the match status while recording and embed chapters (Kick-off, Half-time, Extra time, Penalty shoot-out, Full time) into the finished file — Plex, Jellyfin, Kodi and VLC all read them natively.', ty: 'bool' },
@@ -1736,8 +1742,7 @@ const SETTINGS_META = {
   tick_interval_s: { g: 'Scheduling', t: 'Scheduler tick (seconds)', h: 'How often DVarr checks for due recordings.', ty: 'int' },
   auto_schedule_interval_s: { g: 'Scheduling', t: 'Auto-schedule interval (seconds)', h: 'How often DVarr scans monitored events and plans recordings.', ty: 'int' },
   event_sync_interval_s: { g: 'Scheduling', t: 'Event sync interval (seconds)', h: 'How often the fixture list is refreshed from TheSportsDB.', ty: 'int' },
-  default_event_duration_s: { g: 'Guide', t: 'Default event length (seconds)', h: 'Assumed length when the source gives no end time (7200 = 2 h). A per-league override always wins.', ty: 'int' },
-  event_duration_overrides_json: { g: 'Guide', t: 'Per-sport length overrides', h: 'Advanced: JSON of sport → seconds (e.g. motorsport = 3 h). Used when a league has no per-league override.', ty: 'json' },
+  // (default event length + the old per-sport length JSON moved to the Recording profiles tab)
   epg_past_window_h: { g: 'Guide', t: 'Guide history (hours)', h: 'How many hours of past guide data to keep.', ty: 'int' },
   epg_future_window_d: { g: 'Guide', t: 'Guide lookahead (days)', h: 'How many days of upcoming guide data to keep.', ty: 'int' },
   epg_max_programmes: { g: 'Guide', t: 'Guide safety cap', h: 'Max programmes stored per source to prevent runaway database growth.', ty: 'int' },
@@ -1791,17 +1796,20 @@ PAGES.settings = {
     // Webhook URLs ride along for the Storage pane (token-authenticated — the token IS the media server's login).
     const [s, wh] = await Promise.all([api.get('/api/settings'), api.get('/api/webhooks/urls').catch(() => null)]);
     // Internal bookkeeping keys — persisted server-side but not user settings; never render them.
-    const HIDDEN = ['epg_auto_sync_last'];
+    const HIDDEN = ['epg_auto_sync_last', 'sport_defaults_json', 'default_auto_stop_cap_s', 'default_event_duration_s', 'default_pre_pad_s', 'default_post_pad_s', 'event_duration_overrides_json'];
     // Bucket every setting into one of the 5 tabs (unknown keys → Advanced, so a new backend setting is never hidden).
     const buckets = {}; SETTINGS_TABS.forEach(t => buckets[t] = []);
     Object.keys(SETTINGS_META).filter(k => k in s).forEach(k => buckets[GROUP_TAB[SETTINGS_META[k].g] || 'Advanced'].push(k));
     Object.keys(s).filter(k => !SETTINGS_META[k] && !HIDDEN.includes(k)).forEach(k => buckets['Advanced'].push(k));
     // "Plex" is a fixed info-only tab (no settings keys) whose pane is custom HTML, not the generic set-grid — appended
     // after the key-driven tabs so it always shows regardless of which settings exist.
-    const PLEX_TAB = 'Plex';
-    const tabs = [...SETTINGS_TABS.filter(t => buckets[t].length), PLEX_TAB];
+    const PLEX_TAB = 'Plex', PROFILES_TAB = 'Recording profiles';
+    const tabs = [...SETTINGS_TABS.filter(t => buckets[t].length), PROFILES_TAB, PLEX_TAB];
     const nav = `<div class="tab-nav">${tabs.map((t, i) => `<button class="tab-btn${i === 0 ? ' active' : ''}" data-tab="${esc(t)}">${esc(t)}</button>`).join('')}</div>`;
-    const panes = tabs.map((t, i) => `<div class="tab-pane${i === 0 ? ' active' : ''}" data-tab="${esc(t)}">${t === PLEX_TAB ? plexSettingsPane() : `<div class="set-grid">${buckets[t].map(k => settingField(k, s[k])).join('')}</div>${t === 'Storage' ? webhookUrlsBlock(wh) : ''}`}</div>`).join('');
+    const paneBody = t => t === PLEX_TAB ? plexSettingsPane()
+      : t === PROFILES_TAB ? recordingProfilesPane(s)
+      : `<div class="set-grid">${buckets[t].map(k => settingField(k, s[k])).join('')}</div>${t === 'Storage' ? webhookUrlsBlock(wh) : ''}`;
+    const panes = tabs.map((t, i) => `<div class="tab-pane${i === 0 ? ' active' : ''}" data-tab="${esc(t)}">${paneBody(t)}</div>`).join('');
     el.innerHTML = `<div class="settings-wrap">${nav}${panes}
       <div class="row" style="margin:18px 0 28px"><button onclick="saveSettings()">Save settings</button><span id="setMsg" class="muted"></span></div></div>`;
     el.querySelectorAll('.tab-btn').forEach(b => b.addEventListener('click', () => {
@@ -1827,6 +1835,29 @@ function webhookUrlsBlock(wh) {
 // Settings → Plex: info-only pane. The provider URL (location.origin + '/plex') + how the Custom Metadata Provider
 // works + set-up steps, all grounded in PlexEndpoints.cs (the /plex agent) and MediaImportService.cs (the on-disk
 // League/Season/event layout + .unsorted staging).
+// Settings → Recording profiles: per-sport length / auto-stop cap / pre-roll / post-roll (minutes). The Default row
+// edits the global fallbacks; each sport row is blank-to-inherit. Saved by saveSettings (data-glob + data-sport).
+function recordingProfilesPane(s) {
+  let prof = {}; try { prof = JSON.parse(s.sport_defaults_json || '{}') || {}; } catch { prof = {}; }
+  const toMin = v => v > 0 ? Math.round(v / 60) : '';                                  // seconds → minutes, blank if unset
+  const gMin = (k, def) => Math.round((parseInt(s[k]) >= 0 ? parseInt(s[k]) : def) / 60);
+  const known = ['American Football', 'Australian Football', 'Baseball', 'Basketball', 'Cricket', 'Cycling', 'Darts', 'Fighting', 'Golf', 'Ice Hockey', 'Motorsport', 'Rugby', 'Snooker', 'Soccer', 'Tennis'];
+  const extra = Object.keys(prof).filter(k => !known.some(n => n.toLowerCase() === k.toLowerCase())).map(k => k.replace(/\b\w/g, c => c.toUpperCase()));
+  const sports = [...new Set([...known, ...extra])].sort((a, b) => a.localeCompare(b));
+  const cell = (sport, f) => { const p = prof[sport.toLowerCase()] || {}; return `<input type="number" min="0" data-sport="${esc(sport.toLowerCase())}" data-pf="${f}" value="${toMin(p[f])}" placeholder="—" style="width:64px"/>`; };
+  const row = sp => `<tr><td style="padding:6px 10px;white-space:nowrap"><b>${esc(sp)}</b></td><td>${cell(sp, 'len')}</td><td>${cell(sp, 'cap')}</td><td>${cell(sp, 'pre')}</td><td>${cell(sp, 'post')}</td></tr>`;
+  return `<div class="note" style="max-width:860px"><b>Recording profiles.</b> <span class="muted" style="font-size:12px">Per-sport recording <b>length</b>, smart-auto-stop <b>extension cap</b>, and <b>pre/post-roll</b> padding — all in <b>minutes</b>. Blank = inherit the <b>Default</b> row. Applies when the provider gives no end time; a per-league override still wins. (Baseball's 3h cap is the rain-delay headroom.)</span></div>
+    <div style="overflow-x:auto;margin-top:12px"><table class="rtable" style="min-width:520px">
+      <thead><tr><th>Sport</th><th>Length</th><th>Auto&#8209;stop&nbsp;cap</th><th>Pre&#8209;roll</th><th>Post&#8209;roll</th></tr></thead>
+      <tbody>
+        <tr><td style="padding:6px 10px"><b>Default</b> <span class="muted" style="font-size:11px">(any other sport)</span></td>
+          <td><input type="number" min="1" data-glob="default_event_duration_s" value="${gMin('default_event_duration_s', 7200)}" style="width:64px"/></td>
+          <td><input type="number" min="0" data-glob="default_auto_stop_cap_s" value="${gMin('default_auto_stop_cap_s', 3600)}" style="width:64px"/></td>
+          <td><input type="number" min="0" data-glob="default_pre_pad_s" value="${gMin('default_pre_pad_s', 300)}" style="width:64px"/></td>
+          <td><input type="number" min="0" data-glob="default_post_pad_s" value="${gMin('default_post_pad_s', 1800)}" style="width:64px"/></td></tr>
+        ${sports.map(row).join('')}
+      </tbody></table></div>`;
+}
 function plexSettingsPane() {
   const url = location.origin + '/plex';
   return `<div style="max-width:720px">
@@ -2395,6 +2426,13 @@ async function saveSettings() {
     if (i.dataset.json) { try { JSON.parse(i.value); } catch { badJson = i.dataset.k; } }
     vals[i.dataset.k] = i.value;
   });
+  // Recording profiles tab: the Default row (minutes → seconds) and the per-sport matrix → sport_defaults_json.
+  document.querySelectorAll('#view [data-glob]').forEach(i => { const v = parseInt(i.value); if (v >= 0) vals[i.dataset.glob] = String(v * 60); });
+  if (document.querySelector('#view [data-sport]')) {
+    const sp = {};
+    document.querySelectorAll('#view [data-sport]').forEach(i => { const v = parseInt(i.value); if (v > 0) (sp[i.dataset.sport] ||= {})[i.dataset.pf] = v * 60; });
+    vals['sport_defaults_json'] = JSON.stringify(sp);
+  }
   if (badJson) { toast(`“${(SETTINGS_META[badJson] || {}).t || badJson}” isn’t valid JSON`, 'err'); return; }
   const r = await api.put('/api/settings', vals);
   if (r.error) { toast(r.error, 'err'); return; }
@@ -2443,10 +2481,9 @@ async function openLeagueModal(id) {
       <div class="muted" style="font-size:12px;margin-bottom:8px">Tick the sessions you want to record (e.g. just the Race &amp; Qualifying). Tick <b>none</b> (or All) to record <b>every</b> session.</div>
       <div id="lSessions" class="team-grid"></div>
     </div>
-    <details id="lLengthWrap" style="margin-top:14px;border-top:1px solid var(--line);padding-top:12px"${(x?.eventDurationOverrideS || (x && x.sessionDurations && Object.keys(x.sessionDurations).length)) ? ' open' : ''}>
-      <summary style="font-size:13px;font-weight:600;cursor:pointer">Event length (advanced)</summary>
-      <div class="muted" style="font-size:11px;margin:8px 0">Assumed length when the provider gives no end time. Blank = use the sport / global default.</div>
-      <label class="field" style="font-size:12px;max-width:340px"><span>Default length override <span class="muted">(minutes)</span></span><input id="lDuration" type="number" min="1" value="${x?.eventDurationOverrideS ? Math.round(x.eventDurationOverrideS / 60) : ''}" placeholder="e.g. 120"/></label>
+    <details id="lLengthWrap" style="margin-top:14px;border-top:1px solid var(--line);padding-top:12px;display:none"${(x && x.sessionDurations && Object.keys(x.sessionDurations).length) ? ' open' : ''}>
+      <summary style="font-size:13px;font-weight:600;cursor:pointer">Motorsport session lengths (advanced)</summary>
+      <div class="muted" style="font-size:11px;margin:8px 0">Recording lengths are now set per sport in <b>Settings → Recording profiles</b>. Motorsport can additionally set a length per session kind below.</div>
       <div id="lSessDurBlock" style="display:none;margin-top:12px">
         <div style="font-size:12px;font-weight:600;margin-bottom:2px">Per-session overrides <span class="muted">(motorsport)</span></div>
         <div class="muted" style="font-size:11px;margin-bottom:8px">A length per session kind — overrides the default above for that session.</div>
@@ -2510,6 +2547,7 @@ async function openLeagueModal(id) {
         return `<label class="field" style="font-size:12px"><span>${esc(k)} <span class="muted">(min)</span></span><input type="number" min="1" data-kind="${esc(k)}" value="${mins}" placeholder="${esc(ph)}"/></label>`;
       }).join('');
     } else { $('#lSessionsWrap').style.display = 'none'; $('#lSessions').innerHTML = ''; $('#lSessDurBlock').style.display = 'none'; $('#lSessDur').innerHTML = ''; }
+    if ($('#lLengthWrap')) $('#lLengthWrap').style.display = motorsport ? '' : 'none'; // the length details is motorsport-only now (per-session overrides)
     // Max-extension prefill: motorsport events usually need ~120 min. Prefill 120 only when the field is empty and the
     // user hasn't typed their own value (and we're not clobbering a saved override on an edit). data-prefilled marks a
     // value WE injected so we can cleanly revert it back to the placeholder (60) when switching to a non-motorsport league.
@@ -2581,7 +2619,6 @@ async function submitLeague(id) {
     name: manual ? undefined : opt?.dataset.name,
     sport: manual ? undefined : (opt?.dataset.sport || $('#lSport').value),
     scheduleHorizonDays: parseInt($('#lHorizon').value) || 14, monitored: $('#lMon').checked, color: $('#lColor').value || '',
-    eventDurationOverrideS: (() => { const v = parseInt($('#lDuration').value); return v > 0 ? v * 60 : 0; })(),
     autoStopMode: $('#lAutoStop').value,
     autoStopMaxExtendS: (parseInt($('#lAutoStopMax')?.value) > 0 ? parseInt($('#lAutoStopMax').value) * 60 : 0), // 0 = clear to default
     retentionMode: $('#lRetMode') ? $('#lRetMode').value : '',

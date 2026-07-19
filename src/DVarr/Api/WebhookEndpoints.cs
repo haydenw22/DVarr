@@ -3,6 +3,7 @@ using System.Text.Json;
 using DVarr.Data;
 using DVarr.Data.Entities;
 using DVarr.Infrastructure;
+using DVarr.Services.Media;
 using Microsoft.EntityFrameworkCore;
 
 namespace DVarr.Api;
@@ -24,7 +25,7 @@ public static class WebhookEndpoints
     public static void MapWebhookApi(this WebApplication app)
     {
         // Plex: multipart/form-data with a `payload` JSON field. media.scrobble fires at ~90% watched.
-        app.MapPost("/api/webhooks/plex", async (HttpRequest req, DVarrDbContext db, DbWriteGate gate, ILoggerFactory lf) =>
+        app.MapPost("/api/webhooks/plex", async (HttpRequest req, DVarrDbContext db, DbWriteGate gate, RetentionService retention, ILoggerFactory lf) =>
         {
             if (!await TokenValidAsync(req, db)) return Results.Unauthorized();
             if (req.ContentLength is > PlexMaxBodyBytes) return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
@@ -46,9 +47,16 @@ public static class WebhookEndpoints
                         var series = FirstString(meta, "grandparentTitle");
                         var season = IntField(meta, "parentIndex");
                         var episode = IntField(meta, "index");
-                        var n = await MarkWatchedAsync(db, gate, path, series, season, episode, log);
-                        log.LogInformation("[Webhook] plex scrobble '{Title}' (series={Series} S{Season}E{Episode}, path={Path}) → {N} item(s) marked watched",
-                            title ?? "?", series ?? "?", season, episode, path ?? "(none)", n);
+                        var (result, fresh) = await MarkWatchedAsync(db, gate, path, series, season, episode, log);
+                        if (result == WatchResult.Marked)
+                        {
+                            log.LogInformation("[Webhook] plex scrobble '{Title}' (series={Series} S{Season}E{Episode}, path={Path}) → {N} item(s) marked watched",
+                                title ?? "?", series ?? "?", season, episode, path ?? "(none)", fresh.Count);
+                            await retention.EvictWatchedAsync(fresh);
+                        }
+                        else if (result == WatchResult.NoMatch)
+                            log.LogInformation("[Webhook] plex scrobble '{Title}' (series={Series} S{Season}E{Episode}, path={Path}) → no matching library file",
+                                title ?? "?", series ?? "?", season, episode, path ?? "(none)");
                     }
                 }
             }
@@ -58,7 +66,7 @@ public static class WebhookEndpoints
 
         // Jellyfin (Webhook plugin): JSON body. Treat any payload flagged played/played-to-completion as watched
         // (the plugin's templates vary: PlaybackStop + PlayedToCompletion, or a UserDataSaved with Played).
-        app.MapPost("/api/webhooks/jellyfin", async (HttpRequest req, DVarrDbContext db, DbWriteGate gate, ILoggerFactory lf) =>
+        app.MapPost("/api/webhooks/jellyfin", async (HttpRequest req, DVarrDbContext db, DbWriteGate gate, RetentionService retention, ILoggerFactory lf) =>
         {
             if (!await TokenValidAsync(req, db)) return Results.Unauthorized();
             if (req.ContentLength is > JellyfinMaxBodyBytes) return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
@@ -79,9 +87,17 @@ public static class WebhookEndpoints
                         var series = FirstString(root, "SeriesName");
                         var season = IntField(root, "SeasonNumber");
                         var episode = IntField(root, "EpisodeNumber");
-                        var n = await MarkWatchedAsync(db, gate, path, series, season, episode, log);
-                        log.LogInformation("[Webhook] jellyfin '{Title}' (series={Series} S{Season}E{Episode}, path={Path}) → {N} item(s) marked watched",
-                            title ?? "?", series ?? "?", season, episode, path ?? "(none)", n);
+                        var (result, fresh) = await MarkWatchedAsync(db, gate, path, series, season, episode, log);
+                        if (result == WatchResult.Marked)
+                        {
+                            log.LogInformation("[Webhook] jellyfin '{Title}' (series={Series} S{Season}E{Episode}, path={Path}) → {N} item(s) marked watched",
+                                title ?? "?", series ?? "?", season, episode, path ?? "(none)", fresh.Count);
+                            await retention.EvictWatchedAsync(fresh);
+                        }
+                        else if (result == WatchResult.NoMatch)
+                            log.LogInformation("[Webhook] jellyfin '{Title}' (series={Series} S{Season}E{Episode}, path={Path}) → no matching library file",
+                                title ?? "?", series ?? "?", season, episode, path ?? "(none)");
+                        // AlreadyWatched → silent no-op (a duplicate end-of-play event)
                     }
                 }
             }
@@ -134,8 +150,10 @@ public static class WebhookEndpoints
     /// League/Season/Game filing) — Jellyfin's "watched" webhook frequently carries no file path at all, so the
     /// structured key is what actually lands. Every path refuses ambiguity: a key resolving to several rows is skipped,
     /// not guessed at (audit SEC-08), because watched state can feed the auto-delete plan. Returns rows flagged.</summary>
-    private static async Task<int> MarkWatchedAsync(DVarrDbContext db, DbWriteGate gate, string? path,
-        string? series, int? season, int? episode, ILogger log)
+    private enum WatchResult { Marked, AlreadyWatched, NoMatch }
+
+    private static async Task<(WatchResult Result, List<int> Fresh)> MarkWatchedAsync(DVarrDbContext db, DbWriteGate gate,
+        string? path, string? series, int? season, int? episode, ILogger log)
     {
         var ids = new List<int>();
 
@@ -152,7 +170,7 @@ public static class WebhookEndpoints
                     if (byName.Count > 1)
                     {
                         log.LogWarning("[Webhook] filename '{Name}' matches {N} library files — ambiguous, not marking watched", name, byName.Count);
-                        return 0;
+                        return (WatchResult.NoMatch, new());
                     }
                     ids = byName;
                 }
@@ -173,15 +191,20 @@ public static class WebhookEndpoints
             if (ids.Count > 1)
             {
                 log.LogWarning("[Webhook] '{Series}' S{Season}E{Episode} matches {N} library files — ambiguous, not marking watched", s, season, episode, ids.Count);
-                return 0;
+                return (WatchResult.NoMatch, new());
             }
         }
 
-        if (ids.Count == 0) return 0;
+        if (ids.Count == 0) return (WatchResult.NoMatch, new());
+
+        // Only WRITE on the transition to watched — Jellyfin fires many end-of-play events, so an already-watched item
+        // is a silent no-op (no re-write, and the caller logs nothing) rather than a duplicate line every time.
+        var fresh = await db.LibraryItems.Where(i => ids.Contains(i.Id) && i.WatchedUtc == null).Select(i => i.Id).ToListAsync();
+        if (fresh.Count == 0) return (WatchResult.AlreadyWatched, new());
         var now = EpochTime.Now();
         await gate.WriteAsync(async () =>
-            await db.LibraryItems.Where(i => ids.Contains(i.Id)).ExecuteUpdateAsync(x => x.SetProperty(i => i.WatchedUtc, now)));
-        return ids.Count;
+            await db.LibraryItems.Where(i => fresh.Contains(i.Id)).ExecuteUpdateAsync(x => x.SetProperty(i => i.WatchedUtc, now)));
+        return (WatchResult.Marked, fresh);
     }
 
     private static int? IntField(JsonElement el, string prop)

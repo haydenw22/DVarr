@@ -12,6 +12,18 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.41.4] — 2026-07-19
+Per-sport recording profiles (length, auto-stop cap, padding — all in one place), a rain-delay fix, live recordings back on top when sorting, and delete-after-watched that actually deletes.
+
+### Added
+- **Recording profiles — one place for every sport's timing.** A new **Settings → Recording profiles** tab sets, per sport, the assumed **length** (used when the provider gives no end time), the smart-auto-stop **extension cap**, and the **pre/post-roll** padding — all in minutes, with a **Default** row for anything not listed. Seeded with sensible defaults for the common sports; a per-league override still wins. This replaces the per-league "Event length" box (now gone from the league dialog) and the old raw per-sport JSON — and your existing per-sport lengths are migrated in automatically on upgrade.
+
+### Fixed
+- **Baseball (and any long sport) is no longer cut off by a rain delay.** The smart-auto-stop extension cap was a flat 1h for every non-motorsport sport, so a rain-delayed game blew past it and stopped mid-resumption (*"cannot extend further"*). Caps are now **per sport** — baseball defaults to **3h** of headroom — so a delayed game keeps recording when play returns. Every sport's cap is tunable in Recording profiles.
+- **Live recordings stay on top when sorting by date.** Sorting the Recordings page by "closest / furthest" buried an in-progress recording at the bottom (it started in the past, so the event-window sort sank it). A recording capturing right now is now pinned to the top of the date sorts. Alphabetical is unchanged.
+- **"Delete after watched" now deletes when you finish, not a day later.** Retention ran on a once-a-day sweep, so a game marked watched sat until then. When your media server reports a game watched, DVarr now evicts it **immediately** — if that league (or the global default) is on the delete-after-watched policy and the recording isn't protected.
+- **No more duplicate "marked watched" log spam.** Jellyfin fires several webhooks near the end of playback; DVarr re-logged (and re-flagged) each one. It now acts and logs only on the **transition** to watched — repeat events are silent no-ops.
+
 ## [1.41.3] — 2026-07-18
 Delete-after-watched now works with Jellyfin, plus quieter logs.
 

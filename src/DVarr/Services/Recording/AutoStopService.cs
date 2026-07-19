@@ -229,7 +229,7 @@ public sealed class AutoStopService : BackgroundService
                 }
                 else // InPlay or Unknown — unknown fails LONG (F1/motorsport report no strStatus at all)
                 {
-                    var cap = c.AutoStopMaxExtendS ?? (MotorsportSession.IsMotorsport(c.Sport) ? 7200 : 3600);
+                    var cap = await settings.GetAutoStopCapSecondsAsync(c.Sport, c.AutoStopMaxExtendS);
                     var allowedEnd = originalEnd + cap;
 
                     // Slot boundary: never let this window (incl. post-pad) reach into the NEXT recording's pre-roll

@@ -139,6 +139,7 @@ using (var scope = app.Services.CreateScope())
     await db.Database.MigrateAsync();
 
     var settingsSvc = scope.ServiceProvider.GetRequiredService<SettingsService>();
+    await settingsSvc.MigrateSportProfilesAsync(); // v1.41.4: fold legacy per-sport length JSON into sport_defaults_json (before the orphan prune)
     await settingsSvc.EnsureDefaultsAsync();
     // Point display-time conversion (UI clock, filenames, Plex air dates) at the configured zone before anything renders.
     EpochTime.SetDisplayZone(await settingsSvc.GetAsync("timezone_display"));

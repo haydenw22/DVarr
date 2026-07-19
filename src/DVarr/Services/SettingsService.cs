@@ -22,25 +22,48 @@ public sealed class SettingsService
         _gate = gate;
     }
 
+    /// <summary>A per-sport recording profile: assumed event length, smart-auto-stop extension cap, and pre/post-roll
+    /// padding — all in SECONDS, all optional (null = inherit the global default). Keyed by lowercased TheSportsDB
+    /// strSport in <c>sport_defaults_json</c>.</summary>
+    public sealed record SportProfile(int? Len, int? Cap, int? Pre, int? Post);
+
+    /// <summary>Seed for <c>sport_defaults_json</c> — sensible defaults for the common sports (seconds), editable in
+    /// Settings → Recording profiles. Baseball's 3h cap is the rain-delay headroom that fix motivated.</summary>
+    public static readonly string DefaultSportProfilesJson = JsonSerializer.Serialize(new Dictionary<string, object>
+    {
+        ["american football"] = new { len = 12600, cap = 5400, pre = 300, post = 1800 },
+        ["australian football"] = new { len = 8400, cap = 3600, pre = 300, post = 1800 },
+        ["baseball"] = new { len = 10800, cap = 10800, pre = 300, post = 1800 },
+        ["basketball"] = new { len = 8100, cap = 3600, pre = 300, post = 1800 },
+        ["cricket"] = new { len = 14400, cap = 10800, pre = 300, post = 1800 },
+        ["cycling"] = new { len = 18000, cap = 3600, pre = 300, post = 900 },
+        ["darts"] = new { len = 10800, cap = 5400, pre = 300, post = 900 },
+        ["fighting"] = new { len = 18000, cap = 7200, pre = 600, post = 3600 },
+        ["golf"] = new { len = 21600, cap = 7200, pre = 300, post = 1800 },
+        ["ice hockey"] = new { len = 9000, cap = 5400, pre = 300, post = 1800 },
+        ["motorsport"] = new { len = 10800, cap = 7200, pre = 600, post = 1800 },
+        ["rugby"] = new { len = 7200, cap = 3600, pre = 300, post = 1800 },
+        ["snooker"] = new { len = 14400, cap = 10800, pre = 300, post = 900 },
+        ["soccer"] = new { len = 7200, cap = 3600, pre = 300, post = 1800 },
+        ["tennis"] = new { len = 10800, cap = 10800, pre = 300, post = 1800 },
+    });
+
     /// <summary>Canonical defaults (docs/05 §1.7). Values are strings (scalar or JSON).</summary>
     public static readonly IReadOnlyDictionary<string, string> Defaults = new Dictionary<string, string>
     {
         ["max_global_concurrent_recordings"] = "4",
         ["default_pre_pad_s"] = "300",
         ["default_post_pad_s"] = "1800",
-        // TheSportsDB never gives an end time, so DVarr assumes one. default_event_duration_s is the base (2h —
-        // a soccer match + stoppage fits in 2h core + the 30-min post-pad). event_duration_overrides_json maps a
-        // lowercased sport name to its own seconds (e.g. "motorsport":10800 keeps a long window instead of being cut
-        // at 2h). NOTE: for MOTORSPORT this per-sport value is only a FALLBACK — GetEventDurationSecondsAsync resolves
-        // an earlier BUILT-IN per-session default first (MotorsportSession.DefaultDurationS: a Sprint/Quali/Practice ~1h,
-        // Race/Testing 3h), so this "motorsport" entry applies only to a session kind the built-ins don't cover.
-        // Edit the JSON to add sports (e.g. add "american football": 12600).
+        // TheSportsDB never gives an end time, so DVarr assumes one. default_event_duration_s is the GLOBAL base (2h)
+        // used for any sport without its own profile. Per-sport assumed length + auto-stop cap + pre/post padding live
+        // in sport_defaults_json (Settings → Recording profiles), seeded below; a per-league override still wins.
         ["default_event_duration_s"] = "7200",
-        // Sport-audit defaults (2026-07-04): sports whose events routinely exceed the 2h base get their own assumed
-        // length — golf rounds ~6h, fight cards (UFC etc.) ~5h, tennis/cricket ~4h (T20-ish; long formats use the
-        // per-league override). Keys = lowercased TheSportsDB strSport; matching is case-insensitive. Auto-stop
-        // extends past these when the event genuinely runs long.
-        ["event_duration_overrides_json"] = "{\"motorsport\":10800,\"fighting\":18000,\"golf\":21600,\"cricket\":14400,\"tennis\":14400}",
+        // Global smart-auto-stop extension cap (seconds) for any sport without its own profile cap. Per-sport caps sit
+        // in sport_defaults_json (e.g. baseball 3h for rain delays); a per-league override still wins.
+        ["default_auto_stop_cap_s"] = "3600",
+        // Per-sport recording profiles: {sport:{len,cap,pre,post}} in seconds; any omitted field inherits the matching
+        // global default. Seeded with sensible defaults for the common sports — edit in Settings → Recording profiles.
+        ["sport_defaults_json"] = DefaultSportProfilesJson,
         // Bitrate-floor placeholder detection (opt-in, like dead-feed detection): when bitrate_floor_enabled is on, a
         // recording whose rolling stream bitrate stays below the floor for its channel's quality tier for a sustained
         // window is treated as a provider placeholder/slate (bytes flow, but far too few for real content) and fails
@@ -201,22 +224,127 @@ public sealed class SettingsService
         if (kind != null && Events.MotorsportSession.DefaultDurationS(kind) is { } builtin) return builtin;
         var def = await GetIntAsync("default_event_duration_s"); if (def <= 0) def = 7200;
         if (string.IsNullOrWhiteSpace(sport)) return def;
-        var json = await GetAsync("event_duration_overrides_json");
-        if (string.IsNullOrWhiteSpace(json)) return def;
+        // Tier 3: the sport's profile length (sport_defaults_json), else the global default.
+        var profiles = ParseSportProfiles(await GetAsync("sport_defaults_json"));
+        return profiles.TryGetValue(sport!.Trim(), out var prof) && prof.Len is > 0 ? prof.Len.Value : def;
+    }
+
+    /// <summary>Parse sport_defaults_json — {sport:{len,cap,pre,post}} (seconds). Keyed case-insensitively; a field
+    /// &lt;= 0 or absent means "inherit the global default" (null).</summary>
+    public static Dictionary<string, SportProfile> ParseSportProfiles(string? json)
+    {
+        var map = new Dictionary<string, SportProfile>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(json)) return map;
         try
         {
             using var doc = JsonDocument.Parse(json!);
-            if (doc.RootElement.ValueKind != JsonValueKind.Object) return def;
-            var key = sport!.Trim();
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return map;
             foreach (var p in doc.RootElement.EnumerateObject())
             {
-                if (!string.Equals(p.Name.Trim(), key, StringComparison.OrdinalIgnoreCase)) continue;
-                if (p.Value.ValueKind == JsonValueKind.Number && p.Value.TryGetInt32(out var n) && n > 0) return n;
-                if (p.Value.ValueKind == JsonValueKind.String && int.TryParse(p.Value.GetString(), out var s) && s > 0) return s;
+                if (string.IsNullOrWhiteSpace(p.Name) || p.Value.ValueKind != JsonValueKind.Object) continue;
+                map[p.Name.Trim()] = new SportProfile(SportField(p.Value, "len"), SportField(p.Value, "cap"), SportField(p.Value, "pre"), SportField(p.Value, "post"));
             }
         }
-        catch { /* malformed override JSON → use the base default */ }
-        return def;
+        catch { /* malformed → no profiles */ }
+        return map;
+    }
+
+    private static int? SportField(JsonElement obj, string key)
+    {
+        if (!obj.TryGetProperty(key, out var v)) return null;
+        if (v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n) && n > 0) return n;
+        if (v.ValueKind == JsonValueKind.String && int.TryParse(v.GetString(), out var s) && s > 0) return s;
+        return null;
+    }
+
+    /// <summary>Serialize sport profiles to the compact {sport:{len,cap,pre,post}} form, omitting null/&lt;=0 fields
+    /// and empty sports.</summary>
+    public static string SerializeSportProfiles(IReadOnlyDictionary<string, SportProfile> profiles)
+    {
+        var o = new Dictionary<string, Dictionary<string, int>>();
+        foreach (var (sport, p) in profiles)
+        {
+            var d = new Dictionary<string, int>();
+            if (p.Len is > 0) d["len"] = p.Len.Value;
+            if (p.Cap is > 0) d["cap"] = p.Cap.Value;
+            if (p.Pre is > 0) d["pre"] = p.Pre.Value;
+            if (p.Post is > 0) d["post"] = p.Post.Value;
+            if (d.Count > 0 && !string.IsNullOrWhiteSpace(sport)) o[sport.Trim()] = d;
+        }
+        return JsonSerializer.Serialize(o);
+    }
+
+    /// <summary>Smart-auto-stop extension cap (seconds): per-league override → the sport's profile cap → the global
+    /// default_auto_stop_cap_s. Baseball's profile carries a 3h cap so rain delays aren't clipped.</summary>
+    public async Task<int> GetAutoStopCapSecondsAsync(string? sport, int? leagueOverrideS = null)
+    {
+        if (leagueOverrideS is > 0) return leagueOverrideS.Value;
+        if (!string.IsNullOrWhiteSpace(sport))
+        {
+            var profiles = ParseSportProfiles(await GetAsync("sport_defaults_json"));
+            if (profiles.TryGetValue(sport!.Trim(), out var prof) && prof.Cap is > 0) return prof.Cap.Value;
+        }
+        var def = await GetIntAsync("default_auto_stop_cap_s");
+        return def > 0 ? def : 3600;
+    }
+
+    /// <summary>Pre/post-roll padding (seconds) for a sport: the sport's profile pads, else the global
+    /// default_pre_pad_s / default_post_pad_s (an explicit global 0 is respected).</summary>
+    public async Task<(int Pre, int Post)> GetPadsForSportAsync(string? sport)
+    {
+        var pre = int.TryParse(await GetAsync("default_pre_pad_s"), out var pr) && pr >= 0 ? pr : 300;
+        var post = int.TryParse(await GetAsync("default_post_pad_s"), out var po) && po >= 0 ? po : 1800;
+        if (!string.IsNullOrWhiteSpace(sport))
+        {
+            var profiles = ParseSportProfiles(await GetAsync("sport_defaults_json"));
+            if (profiles.TryGetValue(sport!.Trim(), out var prof))
+            {
+                if (prof.Pre is > 0) pre = prof.Pre.Value;
+                if (prof.Post is > 0) post = prof.Post.Value;
+            }
+        }
+        return (pre, post);
+    }
+
+    /// <summary>One-time migration (v1.41.4): fold the retired flat per-sport length map (event_duration_overrides_json)
+    /// into the richer sport_defaults_json profiles, preserving any user-customised lengths, then drop the old key.
+    /// Runs BEFORE EnsureDefaultsAsync so the old key isn't pruned before it's read. Defensive — never throws.</summary>
+    public async Task MigrateSportProfilesAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            var oldRow = await _db.Settings.FirstOrDefaultAsync(s => s.Key == "event_duration_overrides_json", ct);
+            if (oldRow is null) return; // already migrated / fresh install
+
+            var current = await _db.Settings.FirstOrDefaultAsync(s => s.Key == "sport_defaults_json", ct);
+            var profiles = ParseSportProfiles(current?.Value ?? DefaultSportProfilesJson);
+            try
+            {
+                using var doc = JsonDocument.Parse(oldRow.Value);
+                if (doc.RootElement.ValueKind == JsonValueKind.Object)
+                    foreach (var p in doc.RootElement.EnumerateObject())
+                    {
+                        int? oldLen = p.Value.ValueKind == JsonValueKind.Number && p.Value.TryGetInt32(out var n) && n > 0 ? n
+                                    : p.Value.ValueKind == JsonValueKind.String && int.TryParse(p.Value.GetString(), out var s) && s > 0 ? s : null;
+                        if (oldLen is null || string.IsNullOrWhiteSpace(p.Name)) continue;
+                        var key = p.Name.Trim();
+                        var ex = profiles.TryGetValue(key, out var pr) ? pr : new SportProfile(null, null, null, null);
+                        profiles[key] = ex with { Len = oldLen };
+                    }
+            }
+            catch { /* malformed old JSON → keep the seed profiles, just drop the old key */ }
+
+            var merged = SerializeSportProfiles(profiles);
+            await _gate.WriteAsync(async () =>
+            {
+                var row = await _db.Settings.FirstOrDefaultAsync(s => s.Key == "sport_defaults_json", ct);
+                if (row is null) _db.Settings.Add(new Setting { Key = "sport_defaults_json", Value = merged, UpdatedUtc = EpochTime.Now() });
+                else { row.Value = merged; row.UpdatedUtc = EpochTime.Now(); }
+                _db.Settings.Remove(oldRow);
+                await _db.SaveChangesAsync(ct);
+            }, ct);
+        }
+        catch { /* migration is best-effort; a failure just leaves the old key for next boot */ }
     }
 
     /// <summary>Parse a League.SessionDurationsJson map (session-kind → SECONDS). Tolerates number or string values;

@@ -146,10 +146,8 @@ public sealed class AutoScheduleService : BackgroundService
         var now = EpochTime.Now();
         var interval = await settings.GetIntAsync("auto_schedule_interval_s"); if (interval <= 0) interval = 300;
         var syncInterval = await settings.GetIntAsync("event_sync_interval_s"); if (syncInterval <= 0) syncInterval = 21600;
-        // Pads: an EXPLICIT 0 is a legitimate "no padding" choice and must survive (audit SET-02 — the old `<= 0`
-        // guard silently rewrote a saved 0 back to 5/30 minutes). Only an unparseable/negative value falls back.
-        var pre = int.TryParse(await settings.GetAsync("default_pre_pad_s"), out var preRaw) && preRaw >= 0 ? preRaw : 300;
-        var post = int.TryParse(await settings.GetAsync("default_post_pad_s"), out var postRaw) && postRaw >= 0 ? postRaw : 1800;
+        // Pre/post-roll padding is resolved PER-SPORT at the creation site below (GetPadsForSportAsync): each sport's
+        // profile pads apply, an explicit 0 survives (audit SET-02), and an unset field inherits the global default.
 
         // 0) Daily retention prune (audit DB-01): keep 30 days of Notifications (the Activity feed) and 7 days of
         //    ScheduleTicks (per-tick diagnostics). Both are pure observability data — nothing joins them.
@@ -584,6 +582,7 @@ public sealed class AutoScheduleService : BackgroundService
 
                 // Defensive: events are given a per-sport EndUtc at ingest, but a legacy/manual row may have none.
                 var endUtc = e.EndUtc ?? e.StartUtc + await settings.GetEventDurationSecondsAsync(l.Sport, l.EventDurationOverrideS, l.SessionDurationsJson, e.Title);
+                var (pre, post) = await settings.GetPadsForSportAsync(l.Sport); // per-sport pre/post-roll (inherits the global default)
                 var winStart = e.StartUtc - pre; var winEnd = endUtc + post;
                 var rank = CreditAwarePlanner.MakeRank(RecordingPriority.Normal, l.Priority,
                     TeamPriorityScore(leagueTeamOrder.GetValueOrDefault(e.LeagueId), e.HomeTeamId, e.AwayTeamId), e.StartUtc, e.Id);

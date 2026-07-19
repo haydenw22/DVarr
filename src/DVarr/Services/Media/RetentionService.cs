@@ -115,6 +115,49 @@ public sealed class RetentionService
         return (deleted, freed, false);
     }
 
+    /// <summary>Immediately evict specific just-watched items whose effective retention mode is "watched" (and which
+    /// aren't protected/unsorted). Called from the watched webhook so delete-after-watched acts the moment you finish
+    /// a game instead of waiting for the once-a-day sweep. Items under any other policy are ignored — they wait for
+    /// the scheduled sweep. Returns how many were removed.</summary>
+    public async Task<int> EvictWatchedAsync(IReadOnlyCollection<int> itemIds, CancellationToken ct = default)
+    {
+        if (itemIds.Count == 0) return 0;
+        var globalMode = (await _settings.GetAsync("retention_default_mode") ?? "keep_all").Trim();
+        var now = EpochTime.Now();
+        int deleted = 0;
+        foreach (var id in itemIds)
+        {
+            ct.ThrowIfCancellationRequested();
+            var item = await _db.LibraryItems.FindAsync(new object?[] { id }, ct);
+            if (item is null || item.Status != LibraryItemStatus.Ok || item.Protected || item.Unsorted) continue;
+            // Effective mode = the item's league policy, else the global default. Only "watched" evicts on the spot.
+            var mode = globalMode;
+            if (item.LeagueId is { } lid)
+            {
+                var lm = await _db.Leagues.AsNoTracking().Where(l => l.Id == lid).Select(l => l.RetentionMode).FirstOrDefaultAsync(ct);
+                if (!string.IsNullOrWhiteSpace(lm)) mode = lm!.Trim();
+            }
+            if (mode != "watched") continue;
+            await _playback.StopAsync(id); // never delete a file out from under its own playback session
+            var err = _lib.DeleteItemFiles(item);
+            if (err is not null) { _log.LogWarning("[Retention] delete-after-watched failed for {Id}: {Err}", id, err); continue; }
+            var (title, bytes, recId) = (item.Title, item.FileBytes, item.RecordingId);
+            await _gate.WriteAsync(async () =>
+            {
+                _db.LibraryItems.Remove(item);
+                _db.Notifications.Add(new Notification
+                {
+                    RecordingId = recId, TsUtc = now, Kind = NotificationKind.RetentionEvicted, Severity = Severity.Info,
+                    Message = $"deleted “{title}” after you finished watching it — {bytes / 1_000_000_000.0:0.0} GB freed",
+                });
+                await _db.SaveChangesAsync(ct);
+            }, ct);
+            deleted++;
+            _log.LogInformation("[Retention] delete-after-watched removed '{Title}' ({Gb:0.00} GB)", title, bytes / 1_000_000_000.0);
+        }
+        return deleted;
+    }
+
     /// <summary>Pick the eviction candidates for one league's items (newest-first) under a mode. Protected items are
     /// excluded BEFORE this runs (RET-01) — keep-N slots and the GB budget only ever count unprotected items.</summary>
     private static (List<LibraryItem> Victims, string Detail) SelectVictims(string mode, List<LibraryItem> itemsDesc,
