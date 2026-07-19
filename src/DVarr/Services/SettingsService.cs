@@ -158,6 +158,13 @@ public sealed class SettingsService
         ["retention_keep_last"] = "20",
         ["retention_keep_days"] = "90",
         ["retention_gb_cap"] = "500",
+        // "Delete after watched": ON = remove a game the instant your media server reports it watched; OFF = just flag
+        // it and let the daily cleanup delete it. The daily cleanup runs once per day at retention_sweep_time (LOCAL to
+        // your Display timezone) and applies every league's policy. retention_sweep_last is an internal fire stamp
+        // (the last local date it ran — must stay in Defaults or EnsureDefaults would prune the row each boot).
+        ["retention_watched_instant"] = "true",
+        ["retention_sweep_time"] = "03:00",
+        ["retention_sweep_last"] = "",
         ["timezone_display"] = "Australia/Brisbane",
         ["ha_webhook_url"] = "",
         // Public base URL of this DVarr instance (e.g. https://dvr.example.com), used to build the externally-reachable

@@ -12,6 +12,16 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.41.5] — 2026-07-19
+Decide *when* watched games get deleted — the instant your media server marks them, or during a daily cleanup at a time you choose.
+
+### Added
+- **Delete watched games instantly — or hold off.** "Delete after watched" removed a game the moment your media server reported it watched, with no way to defer. A new **Delete watched games instantly** toggle (Settings → Storage) lets you turn that off: watched games are simply flagged, and the daily cleanup deletes them on its next run. On by default — nothing changes unless you want it to.
+- **Pick when the daily cleanup runs.** A new **Daily cleanup time** setting runs the automatic retention sweep at a time of day *you* choose, in your local timezone (default **03:00**) — instead of on a rolling 24-hour timer anchored to whenever the server last restarted. The one sweep applies every league's retention policy and clears any watched games queued while instant delete is off.
+
+### Changed
+- The **Recording Profiles** settings tab is capitalised consistently, and its help note is tidied up.
+
 ## [1.41.4] — 2026-07-19
 Per-sport recording profiles (length, auto-stop cap, padding — all in one place), a rain-delay fix, live recordings back on top when sorting, and delete-after-watched that actually deletes.
 

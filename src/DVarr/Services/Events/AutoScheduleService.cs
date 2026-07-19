@@ -47,9 +47,6 @@ public sealed class AutoScheduleService : BackgroundService
     // Last low-disk-space warning: warn at most once / 6h so a genuinely full disk nags without spamming the feed.
     private static long _lastLowDiskWarnUtc;
 
-    // Last retention eviction sweep (at most once a day, piggybacked on the tick).
-    private static long _lastRetentionSweepUtc;
-
     public AutoScheduleService(IServiceScopeFactory scopes, DbWriteGate gate, ILogger<AutoScheduleService> log)
     { _scopes = scopes; _gate = gate; _log = log; }
 
@@ -191,24 +188,25 @@ public sealed class AutoScheduleService : BackgroundService
         }
         catch (Exception ex) { _log.LogWarning(ex, "[AutoSchedule] low-space check failed"); }
 
-        // 0c) Retention sweep (daily): evict old finished recordings per each league's policy (unprotected-oldest
-        //     first, reusing the safe delete-with-files primitive). No-op unless a non-keep_all policy is configured.
-        if (now - Interlocked.Read(ref _lastRetentionSweepUtc) > 86400)
+        // 0c) Retention sweep: evict old finished recordings per each league's policy (unprotected-oldest first,
+        //     reusing the safe delete-with-files primitive). No-op unless a non-keep_all policy is configured. Fires
+        //     once per LOCAL day (the Display timezone) at retention_sweep_time, and clears any delete-after-watched
+        //     games flagged while instant delete was off. The stamp advances only on SUCCESS (audit RET-05) — a
+        //     failed sweep (locked db, unmounted drive) retries next tick, not tomorrow.
+        try
         {
-            try
+            var localNow = EpochTime.ToDisplay(now);
+            var todayLocal = localNow.ToString("yyyy-MM-dd");
+            var lastFired = (await settings.GetAsync("retention_sweep_last") ?? "").Trim();
+            var sweepTime = (await settings.GetAsync("retention_sweep_time") ?? "03:00").Trim();
+            if (lastFired != todayLocal && TimeSpan.TryParse(sweepTime, out var sched) && localNow.TimeOfDay >= sched)
             {
                 var (n, freed, _) = await scope.ServiceProvider.GetRequiredService<DVarr.Services.Media.RetentionService>().SweepAsync(ct: ct);
-                // Advance the stamp only on SUCCESS (audit RET-05) — a failed sweep (locked db, unmounted drive)
-                // must not silently defer cleanup a whole day.
-                Interlocked.Exchange(ref _lastRetentionSweepUtc, now);
+                await settings.SetAsync("retention_sweep_last", todayLocal, ct); // stamp on success only — a throw retries next tick
                 if (n > 0) _log.LogInformation("[AutoSchedule] retention evicted {N} item(s), freed {Gb:0.0} GB", n, freed / 1_000_000_000.0);
             }
-            catch (Exception ex)
-            {
-                Interlocked.Exchange(ref _lastRetentionSweepUtc, now - 86400 + 3600); // retry in ~1h, not tomorrow
-                _log.LogWarning(ex, "[AutoSchedule] retention sweep failed (retrying in ~1h)");
-            }
         }
+        catch (Exception ex) { _log.LogWarning(ex, "[AutoSchedule] retention sweep failed (retrying next tick after the scheduled time)"); }
 
         // 1) Refresh events for monitored, non-manual leagues whose data is stale.
         var dueLeagues = await db.Leagues

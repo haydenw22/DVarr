@@ -1775,6 +1775,8 @@ const SETTINGS_META = {
   retention_keep_last: { g: 'Storage', t: 'Keep newest N games', h: 'For the “keep the newest N games” policy — how many of the most recent games to keep per league.', ty: 'int' },
   retention_keep_days: { g: 'Storage', t: 'Keep last N days', h: 'For the “keep the last N days” policy — delete games older than this many days.', ty: 'int' },
   retention_gb_cap: { g: 'Storage', t: 'Keep under (GB)', h: 'For the “GB cap” policy — keep the newest games up to this many GB per league, deleting older ones.', ty: 'int' },
+  retention_watched_instant: { g: 'Storage', t: 'Delete watched games instantly', h: 'For the “Delete after watched” policy — remove a game the moment your media server reports it watched. Turn this off to just flag watched games and let the daily cleanup delete them instead.', ty: 'bool' },
+  retention_sweep_time: { g: 'Storage', t: 'Daily cleanup time', h: 'Local time of day the automatic cleanup runs — it applies every league’s retention policy and clears any watched games queued while instant delete is off.', ty: 'time' },
 };
 function settingField(k, v) {
   const m = SETTINGS_META[k] || { t: k, h: '', ty: (v === 'true' || v === 'false') ? 'bool' : 'text' };
@@ -1796,14 +1798,14 @@ PAGES.settings = {
     // Webhook URLs ride along for the Storage pane (token-authenticated — the token IS the media server's login).
     const [s, wh] = await Promise.all([api.get('/api/settings'), api.get('/api/webhooks/urls').catch(() => null)]);
     // Internal bookkeeping keys — persisted server-side but not user settings; never render them.
-    const HIDDEN = ['epg_auto_sync_last', 'sport_defaults_json', 'default_auto_stop_cap_s', 'default_event_duration_s', 'default_pre_pad_s', 'default_post_pad_s', 'event_duration_overrides_json'];
+    const HIDDEN = ['epg_auto_sync_last', 'retention_sweep_last', 'sport_defaults_json', 'default_auto_stop_cap_s', 'default_event_duration_s', 'default_pre_pad_s', 'default_post_pad_s', 'event_duration_overrides_json'];
     // Bucket every setting into one of the 5 tabs (unknown keys → Advanced, so a new backend setting is never hidden).
     const buckets = {}; SETTINGS_TABS.forEach(t => buckets[t] = []);
     Object.keys(SETTINGS_META).filter(k => k in s).forEach(k => buckets[GROUP_TAB[SETTINGS_META[k].g] || 'Advanced'].push(k));
     Object.keys(s).filter(k => !SETTINGS_META[k] && !HIDDEN.includes(k)).forEach(k => buckets['Advanced'].push(k));
     // "Plex" is a fixed info-only tab (no settings keys) whose pane is custom HTML, not the generic set-grid — appended
     // after the key-driven tabs so it always shows regardless of which settings exist.
-    const PLEX_TAB = 'Plex', PROFILES_TAB = 'Recording profiles';
+    const PLEX_TAB = 'Plex', PROFILES_TAB = 'Recording Profiles';
     const tabs = [...SETTINGS_TABS.filter(t => buckets[t].length), PROFILES_TAB, PLEX_TAB];
     const nav = `<div class="tab-nav">${tabs.map((t, i) => `<button class="tab-btn${i === 0 ? ' active' : ''}" data-tab="${esc(t)}">${esc(t)}</button>`).join('')}</div>`;
     const paneBody = t => t === PLEX_TAB ? plexSettingsPane()
@@ -1846,7 +1848,7 @@ function recordingProfilesPane(s) {
   const sports = [...new Set([...known, ...extra])].sort((a, b) => a.localeCompare(b));
   const cell = (sport, f) => { const p = prof[sport.toLowerCase()] || {}; return `<input type="number" min="0" data-sport="${esc(sport.toLowerCase())}" data-pf="${f}" value="${toMin(p[f])}" placeholder="—" style="width:64px"/>`; };
   const row = sp => `<tr><td style="padding:6px 10px;white-space:nowrap"><b>${esc(sp)}</b></td><td>${cell(sp, 'len')}</td><td>${cell(sp, 'cap')}</td><td>${cell(sp, 'pre')}</td><td>${cell(sp, 'post')}</td></tr>`;
-  return `<div class="note" style="max-width:860px"><b>Recording profiles.</b> <span class="muted" style="font-size:12px">Per-sport recording <b>length</b>, smart-auto-stop <b>extension cap</b>, and <b>pre/post-roll</b> padding — all in <b>minutes</b>. Blank = inherit the <b>Default</b> row. Applies when the provider gives no end time; a per-league override still wins. (Baseball's 3h cap is the rain-delay headroom.)</span></div>
+  return `<div class="note" style="max-width:860px"><b>Recording Profiles.</b> <span class="muted" style="font-size:12px">Per-sport recording <b>length</b>, smart-auto-stop <b>extension cap</b>, and <b>pre/post-roll</b> padding — all in <b>minutes</b>. Blank = inherit the <b>Default</b> row. Applies when the provider gives no end time; a per-league override still wins.</span></div>
     <div style="overflow-x:auto;margin-top:12px"><table class="rtable" style="min-width:520px">
       <thead><tr><th>Sport</th><th>Length</th><th>Auto&#8209;stop&nbsp;cap</th><th>Pre&#8209;roll</th><th>Post&#8209;roll</th></tr></thead>
       <tbody>
@@ -2483,7 +2485,7 @@ async function openLeagueModal(id) {
     </div>
     <details id="lLengthWrap" style="margin-top:14px;border-top:1px solid var(--line);padding-top:12px;display:none"${(x && x.sessionDurations && Object.keys(x.sessionDurations).length) ? ' open' : ''}>
       <summary style="font-size:13px;font-weight:600;cursor:pointer">Motorsport session lengths (advanced)</summary>
-      <div class="muted" style="font-size:11px;margin:8px 0">Recording lengths are now set per sport in <b>Settings → Recording profiles</b>. Motorsport can additionally set a length per session kind below.</div>
+      <div class="muted" style="font-size:11px;margin:8px 0">Recording lengths are now set per sport in <b>Settings → Recording Profiles</b>. Motorsport can additionally set a length per session kind below.</div>
       <div id="lSessDurBlock" style="display:none;margin-top:12px">
         <div style="font-size:12px;font-weight:600;margin-bottom:2px">Per-session overrides <span class="muted">(motorsport)</span></div>
         <div class="muted" style="font-size:11px;margin-bottom:8px">A length per session kind — overrides the default above for that session.</div>

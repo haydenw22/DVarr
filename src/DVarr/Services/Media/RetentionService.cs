@@ -122,6 +122,9 @@ public sealed class RetentionService
     public async Task<int> EvictWatchedAsync(IReadOnlyCollection<int> itemIds, CancellationToken ct = default)
     {
         if (itemIds.Count == 0) return 0;
+        // Instant delete-after-watched can be turned off — then a watched game is only flagged, and the daily sweep
+        // (retention_sweep_time) removes it instead.
+        if (!await _settings.GetBoolAsync("retention_watched_instant")) return 0;
         var globalMode = (await _settings.GetAsync("retention_default_mode") ?? "keep_all").Trim();
         var now = EpochTime.Now();
         int deleted = 0;
