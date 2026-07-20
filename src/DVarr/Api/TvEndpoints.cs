@@ -233,8 +233,10 @@ public static class TvEndpoints
                             background = $"/api/tv/art/hero-bg/{eventRef}",
                             homeBadge = c.HomeTeamId != null && leagueRef != null ? $"/api/tv/art/team-badge/{leagueRef}/{c.HomeTeamId}" : null,
                             awayBadge = c.AwayTeamId != null && leagueRef != null ? $"/api/tv/art/team-badge/{leagueRef}/{c.AwayTeamId}" : null,
-                            homeCutout = (string?)null, // player cutouts not wired this pass (no TSDB DTO for them yet)
-                            awayCutout = (string?)null,
+                            // Lazy: emit the route whenever we have a team id + leagueRef; the art route resolves the
+                            // cutout (and 404s if the team has none) — no TSDB call on this hot path.
+                            homeCutout = c.HomeTeamId != null && leagueRef != null ? $"/api/tv/art/team-cutout/{leagueRef}/{c.HomeTeamId}" : null,
+                            awayCutout = c.AwayTeamId != null && leagueRef != null ? $"/api/tv/art/team-cutout/{leagueRef}/{c.AwayTeamId}" : null,
                             leagueBadge = leagueRef != null ? $"/api/tv/art/league-badge/{leagueRef}" : null,
                         },
                     };
@@ -326,12 +328,41 @@ public static class TvEndpoints
             return await FetchAndServeAsync(url, ctx, paths, hf, log, ct);
         });
 
-        // hero-bg/{eventRef} — the hero background cascade (event thumb → league fanart → league poster → 404).
+        // hero-bg/{eventRef} — the hero background cascade (event thumb → home-team fanart → league fanart →
+        // league poster → 404). Resolution is lazy — it happens here, never on the /home hot path.
         app.MapGet("/api/tv/art/hero-bg/{eventRef}", async (string eventRef, HttpContext ctx, DVarrDbContext db,
             TheSportsDbClient tsdb, RuntimePaths paths, IHttpClientFactory hf, ILoggerFactory lf, CancellationToken ct) =>
         {
             var log = lf.CreateLogger("DVarr.Api.Tv");
             var url = await ResolveHeroBackgroundAsync(eventRef, db, tsdb, ct);
+            return await FetchAndServeAsync(url, ctx, paths, hf, log, ct);
+        });
+
+        // team-cutout/{leagueRef}/{teamId} — the first player carrying a cutout (else the first with a render),
+        // via GetPlayersAsync (24h-cached). leagueRef only guards that the league is known (resolves its TSDB id);
+        // players are keyed by team. None with either → 404.
+        app.MapGet("/api/tv/art/team-cutout/{leagueRef}/{teamId}", async (string leagueRef, string teamId, HttpContext ctx,
+            DVarrDbContext db, TheSportsDbClient tsdb, RuntimePaths paths, IHttpClientFactory hf, ILoggerFactory lf, CancellationToken ct) =>
+        {
+            var log = lf.CreateLogger("DVarr.Api.Tv");
+            var (_, ext) = await ResolveLeagueRefAsync(leagueRef, db);
+            if (ext is null) return Results.NotFound();
+            var players = await tsdb.GetPlayersAsync(teamId, ct);
+            var url = players.FirstOrDefault(p => p.Cutout != null)?.Cutout
+                ?? players.FirstOrDefault(p => p.Render != null)?.Render;
+            return await FetchAndServeAsync(url, ctx, paths, hf, log, ct);
+        });
+
+        // team-fanart/{leagueRef}/{teamId} — the team's fanart, via GetTeamsAsync(externalLeagueId) (6h-cached).
+        // Absent (or the team isn't in that league's list) → 404.
+        app.MapGet("/api/tv/art/team-fanart/{leagueRef}/{teamId}", async (string leagueRef, string teamId, HttpContext ctx,
+            DVarrDbContext db, TheSportsDbClient tsdb, RuntimePaths paths, IHttpClientFactory hf, ILoggerFactory lf, CancellationToken ct) =>
+        {
+            var log = lf.CreateLogger("DVarr.Api.Tv");
+            var (_, ext) = await ResolveLeagueRefAsync(leagueRef, db);
+            if (ext is null) return Results.NotFound();
+            var teams = await tsdb.GetTeamsAsync(ext, ct);
+            var url = teams.FirstOrDefault(t => t.Id == teamId)?.Fanart;
             return await FetchAndServeAsync(url, ctx, paths, hf, log, ct);
         });
     }
@@ -454,29 +485,40 @@ public static class TvEndpoints
         return null;
     }
 
-    // Cascade: event thumb → league fanart → league poster. Resolves the event's league to reach fanart/poster.
+    // Cascade: event thumb → home-team fanart (two-team events) → league fanart → league poster. Resolves the
+    // event's league (for fanart/poster) and its home team id (for team fanart). Runs on the art route, not /home.
     private static async Task<string?> ResolveHeroBackgroundAsync(string eventRef, DVarrDbContext db, TheSportsDbClient tsdb, CancellationToken ct)
     {
         string? thumb;
         string? ext;         // TSDB league id for fanart/poster lookup
         string? localPoster; // a synced league already stores its poster locally
+        string? homeTeamId;  // present only on a two-team event → its fanart is preferred over league art
 
         if (eventRef.StartsWith("tsdb-", StringComparison.OrdinalIgnoreCase))
         {
             var ev = await tsdb.GetEventByIdAsync(eventRef[5..], ct);
-            thumb = ev?.Thumb; ext = ev?.LeagueId; localPoster = null;
+            thumb = ev?.Thumb; ext = ev?.LeagueId; localPoster = null; homeTeamId = ev?.HomeTeamId;
         }
         else if (int.TryParse(eventRef, out var eid))
         {
             var e = await db.Events.AsNoTracking().FirstOrDefaultAsync(x => x.Id == eid, ct);
             if (e is null) return null;
-            thumb = e.ThumbUrl;
+            thumb = e.ThumbUrl; homeTeamId = e.HomeTeamId;
             var l = await db.Leagues.AsNoTracking().FirstOrDefaultAsync(x => x.Id == e.LeagueId, ct);
             ext = l?.ExternalLeagueId; localPoster = l?.PosterUrl;
         }
         else return null;
 
         if (!string.IsNullOrEmpty(thumb)) return thumb;
+
+        // Prefer the home team's fanart before falling back to league-level art (6h-cached team list).
+        if (ext is not null && !string.IsNullOrWhiteSpace(homeTeamId))
+        {
+            var teams = await tsdb.GetTeamsAsync(ext, ct);
+            var teamFanart = teams.FirstOrDefault(t => t.Id == homeTeamId)?.Fanart;
+            if (!string.IsNullOrEmpty(teamFanart)) return teamFanart;
+        }
+
         string? fanart = null, poster = localPoster;
         if (ext is not null)
         {

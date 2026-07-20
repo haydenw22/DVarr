@@ -9,7 +9,11 @@ namespace DVarr.Services.Events;
 // ---- Lightweight DTOs surfaced to the UI + ingest/import (only the fields DVarr uses) ----
 public sealed record TsdbSport(string Name, string? Format);
 public sealed record TsdbLeague(string Id, string Name, string Sport, string? Country, string? Alternate, string? Poster, string? Badge, string? Fanart = null);
-public sealed record TsdbTeam(string Id, string Name, string? Badge, string? Logo);
+public sealed record TsdbTeam(string Id, string Name, string? Badge, string? Logo, string? Fanart = null);
+/// <summary>One player from v2 /list/players/{idTeam}. Cutout = strCutout (transparent PNG head/body cut-out),
+/// Render = strRender (full-body render), Thumb = strThumb. Cutout/Render are premium-only and often absent on a
+/// given player — nulls are the norm, so a caller cascades to the next player / a fallback.</summary>
+public sealed record TsdbPlayer(string Id, string Name, string? Cutout, string? Render, string? Thumb);
 public sealed record TsdbEvent(string Id, string Title, long? StartUtc, bool DateOnly, string? Status,
     string? Thumb, string? Poster, int? Round, string? Season, string? League, string? Sport, string? LeagueId,
     string? HomeTeamId, string? HomeTeamName, string? AwayTeamId, string? AwayTeamName, string? TvStation = null);
@@ -229,9 +233,30 @@ public sealed class TheSportsDbClient
             {
                 var id = Str(e, "idTeam"); var name = Str(e, "strTeam");
                 if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(name)) continue;
-                list.Add(new TsdbTeam(id!, name!, Str(e, "strBadge"), Str(e, "strLogo") ?? Str(e, "strBadge")));
+                // Fanart is an additive parse (v2 list/teams carries strFanart[1..4]) — the TV hero background
+                // prefers the home team's fanart. Optional, default-null, so no other call site changes.
+                list.Add(new TsdbTeam(id!, name!, Str(e, "strBadge"), Str(e, "strLogo") ?? Str(e, "strBadge"),
+                    Str(e, "strFanart") ?? Str(e, "strFanart1") ?? Str(e, "strFanart2") ?? Str(e, "strFanart3") ?? Str(e, "strFanart4")));
             }
         return list.OrderBy(t => t.Name, StringComparer.OrdinalIgnoreCase).ToList();
+    });
+
+    /// <summary>Players on a team (v2 /list/players/{idTeam}) — each with cutout/render/thumb artwork. Cutout and
+    /// render are premium-only and frequently absent for a given player, so nulls are normal (the caller cascades).
+    /// Cached 24h (empty results briefly, per <see cref="CachedAsync"/>). Backs the TV player-cutout art kind.</summary>
+    public async Task<List<TsdbPlayer>> GetPlayersAsync(string idTeam, CancellationToken ct = default)
+        => await CachedAsync($"players:{await KeyAsync()}:{idTeam}", TimeSpan.FromHours(24), async () =>
+    {
+        var list = new List<TsdbPlayer>();
+        using var doc = await GetAsync($"list/players/{Uri.EscapeDataString(idTeam)}", ct);
+        if (TryArray(doc, "list", out var arr))
+            foreach (var e in arr.EnumerateArray())
+            {
+                var id = Str(e, "idPlayer"); var name = Str(e, "strPlayer");
+                if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(name)) continue;
+                list.Add(new TsdbPlayer(id!, name!, Str(e, "strCutout"), Str(e, "strRender"), Str(e, "strThumb")));
+            }
+        return list;
     });
 
     // ---- Events ----

@@ -12,6 +12,14 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.43.0] — 2026-07-21
+Still building that backend. The artwork proxy learns a couple of new tricks, and the aggregated feed now points at them. Nothing changes in the app you use today. 👀
+
+### Added
+- **The artwork proxy now serves player cutout renders.** Ask it for a team and it finds that team's squad, picks a player with a transparent cut-out portrait (falling back to a full-body render), and resolves it to a real image URL server-side — downloaded once, cached to disk and served with the same week-long header as every other kind. As always the client only ever asks for a DVarr path, and anything missing returns a clean 404.
+- **…and team fanart.** A team's wide background art is resolved the same way, and the cascading headline background got a little smarter — it now prefers the home team's fanart before falling back to league artwork (event thumbnail → home-team fanart → league fanart → league poster).
+- **The aggregated feed now points at both.** The one-call feed's headline entries now carry the player-cutout links alongside the existing badges, so a client can compose them without a second round-trip — resolved lazily, so no extra provider traffic on the feed itself.
+
 ## [1.42.0] — 2026-07-20
 We're building the backend of something new. Nothing changes in the app you use today — this release quietly lays plumbing that's worth having on its own. More when it's ready. 👀
 
