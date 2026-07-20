@@ -447,7 +447,7 @@ public sealed class AutoScheduleService : BackgroundService
 
                 await _gate.WriteAsync(async () =>
                 {
-                    if (decision.PreemptRecordingId is { } vid) await PreemptAsync(vid, $"preempted by higher-priority recording #{r.Id}");
+                    if (decision.PreemptRecordingId is { } vid) await PreemptAsync(vid, $"preempted by recording #{r.Id} (won on {decision.PreemptWhy})");
                     var rec = await db.Recordings.FindAsync(r.Id);
                     if (rec is null) return;
                     // SourceId is part of the (Id, SourceId) alternate key — re-point via RecordingRepoint (delete
@@ -629,7 +629,7 @@ public sealed class AutoScheduleService : BackgroundService
                 var newId = 0;
                 await _gate.WriteAsync(async () =>
                 {
-                    if (decision.PreemptRecordingId is { } vid) await PreemptAsync(vid, $"preempted by higher-priority '{e.Title}'");
+                    if (decision.PreemptRecordingId is { } vid) await PreemptAsync(vid, $"preempted by '{e.Title}' (won on {decision.PreemptWhy})");
                     var rec = new RecordingEntity
                     {
                         EventId = e.Id, SourceId = chosen.SourceId, ChannelId = chosen.ChannelId, StreamId = chosen.StreamId,

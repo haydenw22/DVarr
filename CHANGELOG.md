@@ -12,6 +12,23 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.41.8] — 2026-07-20
+Kills the periodic audio dropouts, finds nationally-televised games by broadcaster and across both logins, stops a re-sync silently unscheduling a game, and lets the guide look backwards.
+
+### Fixed
+- **A re-sync can no longer silently unschedule a game (the doubleheader bug).** When the provider re-sent an event without team ids — which happens on doubleheader and late-rescheduled entries — DVarr blanked the ids it already had. That had two invisible consequences: every **team-scoped** channel mapping stopped applying (the game became unresolvable and was skipped with no recording, no conflict and no visible log), and the game's **team-follow priority dropped to zero** (so a lower-ranked game could preempt it — the "my higher-priority game lost" report). Team ids are now kept when a re-sync goes quiet on them; a real correction still lands.
+- **National broadcasts are found by broadcaster, and on either login.** The search for a game outside your mapped channels had two blind spots: it only looked at the recording's own login, and it required the guide to name **both teams** — so a game on NBC listed as *"Sunday Night Baseball"*, or a network carried only on your second login, could never be found. The fallback now searches **every enabled login** (moving across logins only when that login is free for the whole window, and keeping a fallback ladder on the new login), and when no guide names the teams it asks TheSportsDB **which networks carry the game** and matches a channel *named* for one — with the guard that the channel's own guide must show sport-appropriate content, so "FOX" can never land on FOX News, and network-name evidence never moves a recording off a **pinned** channel. The "nothing lists this game" warning now names the networks too (*"listed on NBC, Peacock — no channel in your lineup carries it"*), so a streaming-only game is called out as exactly that.
+- **The audio dropout every 15–20 seconds is gone.** Finalize re-encodes audio through a re-sync filter that was tuned to allow essentially **no** smooth correction — so every time the feed's audio and video clocks drifted apart (routine on IPTV restreams), the only correction available was the blunt one: punch in a gap or drop samples. That's what you were hearing, at a metronomic interval, all the way through a recording. The filter can now absorb that drift by resampling imperceptibly, and the blunt correction is reserved for genuine large discontinuities at a reconnect.
+- **Guide programmes no longer overlap into unreadable mush.** Provider guides routinely contain programmes that overlap in time (and outright duplicates of the same show). Those blocks were painted on top of one another, so their titles collided. They're now laid out in time order without overlapping, duplicates covered by an earlier entry are dropped, and every block still shows its full title on hover.
+
+### Added
+- **The guide can look backwards.** The "‹ earlier" button existed, but there was nothing to show: every guide refresh deleted the previous listings, and provider guides only carry now→future. Finished programmes are now kept for **7 days**, so you can scroll back and see what a channel *actually aired* — which is exactly the question worth asking when a recording caught the wrong thing.
+- **A warning when nothing in your lineup lists the game.** If no channel's guide shows the fixture — no mapped channel, and nothing found elsewhere on that login — DVarr now says so on the recording instead of quietly capturing a channel that may be showing a blackout slate or studio filler. It still records (guide data is patchy, and a missing listing must never cancel a capture that would have worked), but you're told it might be a national or streaming-only broadcast you don't receive.
+- **The channel re-pick explains itself.** When DVarr looks for a game outside your mapped channels and gives up, it now logs *why* — the fallback is off, the guide only had placeholders, no channel carries a guide id, nothing named both teams, or the best match wasn't strong enough to move off a pinned channel. Six previously silent dead ends.
+
+### Changed
+- **Conflict messages say what actually decided it.** "Preempted by higher-priority X" read as a league-priority call, which is misleading when both games are in the *same* league — the real reason is usually team-follow order or start time. The message now names the deciding factor.
+
 ## [1.41.7] — 2026-07-20
 Stops finalize silently throwing away hours of a finished game, makes the failures that used to leave no trace visible, and keeps your logs across restarts.
 

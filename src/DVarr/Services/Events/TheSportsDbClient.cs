@@ -12,10 +12,12 @@ public sealed record TsdbLeague(string Id, string Name, string Sport, string? Co
 public sealed record TsdbTeam(string Id, string Name, string? Badge, string? Logo);
 public sealed record TsdbEvent(string Id, string Title, long? StartUtc, bool DateOnly, string? Status,
     string? Thumb, string? Poster, int? Round, string? Season, string? League, string? Sport, string? LeagueId,
-    string? HomeTeamId, string? HomeTeamName, string? AwayTeamId, string? AwayTeamName);
+    string? HomeTeamId, string? HomeTeamName, string? AwayTeamId, string? AwayTeamName, string? TvStation = null);
 /// <summary>One in-play event from v2 /livescore/{sport}: Status = strStatus (1H/HT/2H/ET/P …),
 /// Progress = strProgress (the match minute). Presence in the livescore feed itself means "in play".</summary>
 public sealed record TsdbLiveScore(string EventId, string? Status, string? Progress);
+/// <summary>One broadcaster row from v2 /lookup/event_tv/{id} — see <see cref="TheSportsDbClient.GetEventTvAsync"/>.</summary>
+public sealed record TsdbEventTv(string Channel, string? Country);
 
 /// <summary>
 /// Thin wrapper over TheSportsDB <b>v2</b> (premium key, sent as the <c>X-API-KEY</c> header). Backs the league
@@ -281,6 +283,23 @@ public sealed class TheSportsDbClient
         return null;
     }
 
+    /// <summary>One broadcaster row from v2 /lookup/event_tv/{id}: the channel NAME a country airs the event on
+    /// (e.g. "Peacock Premium" / "ESPN 2 Netherlands"). Backs the national-fallback's network-name channel match.
+    /// Returns null when the CALL failed (retry later) vs an empty list for "looked up, nobody listed".</summary>
+    public async Task<List<TsdbEventTv>?> GetEventTvAsync(string idEvent, CancellationToken ct = default)
+    {
+        using var doc = await GetAsync($"lookup/event_tv/{Uri.EscapeDataString(idEvent)}", ct);
+        if (doc is null) return null;
+        var list = new List<TsdbEventTv>();
+        if (TryArray(doc, "lookup", out var arr))
+            foreach (var e in arr.EnumerateArray())
+            {
+                var ch = Str(e, "strChannel");
+                if (!string.IsNullOrWhiteSpace(ch)) list.Add(new TsdbEventTv(ch!, Str(e, "strCountry")));
+            }
+        return list;
+    }
+
     /// <summary>Best-effort fuzzy event search (v2 /search/event/{name}). Used only by the manual-recording MatchQuery
     /// enrichment, which falls back to a flat filename if this returns nothing — so a v2 search miss is harmless.</summary>
     public async Task<List<TsdbEvent>> SearchEventsAsync(string name, string? season, CancellationToken ct = default)
@@ -319,7 +338,8 @@ public sealed class TheSportsDbClient
             id!, Str(e, "strEvent") ?? "Event", start, dateOnly, Str(e, "strStatus"),
             Str(e, "strThumb"), Str(e, "strPoster"),
             IntOrNull(Str(e, "intRound")), Str(e, "strSeason"), Str(e, "strLeague"), Str(e, "strSport"), Str(e, "idLeague"),
-            Str(e, "idHomeTeam"), Str(e, "strHomeTeam"), Str(e, "idAwayTeam"), Str(e, "strAwayTeam"));
+            Str(e, "idHomeTeam"), Str(e, "strHomeTeam"), Str(e, "idAwayTeam"), Str(e, "strAwayTeam"),
+            Str(e, "strTVStation"));
     }
 
     private static (long? start, bool dateOnly) ParseTime(JsonElement e)

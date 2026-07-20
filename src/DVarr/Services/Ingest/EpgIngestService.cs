@@ -21,6 +21,10 @@ public sealed record EpgResult(int SourceId, bool Ok, int Programmes, int Channe
 public sealed class EpgIngestService
 {
     private const int BatchSize = 5000;
+
+    /// <summary>How much already-finished guide data to keep after a refresh, so the Guide page can be scrolled back
+    /// to see what a channel actually aired. Bounded so a daily auto-sync can't grow the table without limit.</summary>
+    private const long HistoryRetentionS = 7 * 86400;
     // One lock per source so two concurrent syncs of the SAME source can't race the last-known-good swap (the
     // maxOldId threshold is read outside the gate). Static because the service is scoped per request; different
     // sources still sync in parallel.
@@ -173,7 +177,20 @@ public sealed class EpgIngestService
                 // last-good EPG sync time in the same write — the re-pick sweep reads it to detect a >12h-stale guide.
                 await _gate.WriteAsync(async () =>
                 {
-                    await _db.Programmes.Where(p => p.SourceId == sourceId && p.Id <= maxOldId).ExecuteDeleteAsync(ct);
+                    // Provider XMLTV only carries now→future, so deleting every old row made yesterday's guide
+                    // unrecoverable — and "what was actually on that channel?" is exactly the question a wrong-channel
+                    // recording raises. RETAIN old programmes that had already finished before this feed's coverage
+                    // begins (up to HistoryRetentionS), and drop the rest. Anchoring the cut to the new feed's own
+                    // earliest start — rather than to "now" — guarantees retained history can't overlap and duplicate
+                    // what this run just inserted.
+                    var nowUtc = EpochTime.Now();
+                    var minNewStart = await _db.Programmes.Where(p => p.SourceId == sourceId && p.Id > maxOldId)
+                        .MinAsync(p => (long?)p.StartUtc, ct) ?? nowUtc;
+                    var keepFloor = nowUtc - HistoryRetentionS;
+                    await _db.Programmes
+                        .Where(p => p.SourceId == sourceId && p.Id <= maxOldId
+                                    && !(p.StopUtc <= minNewStart && p.StopUtc > keepFloor))
+                        .ExecuteDeleteAsync(ct);
                     // Re-load the row inside the gate — the batch flushes above call ChangeTracker.Clear(), so the `s`
                     // captured before streaming may be detached. FindAsync returns the tracked (or freshly-read) entity.
                     var src = await _db.Sources.FindAsync(new object?[] { sourceId }, ct);

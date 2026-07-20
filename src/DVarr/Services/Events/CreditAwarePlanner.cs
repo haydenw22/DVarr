@@ -23,7 +23,7 @@ public sealed class CreditAwarePlanner
     public sealed record Slot(int SourceId, long StartUtc, long EndUtc, int RecordingId, RecordingState State, PRank Rank);
 
     /// <summary>The outcome for one event: placed on Option (optionally preempting an incumbent), or a Conflict with a reason.</summary>
-    public sealed record Decision(bool Placed, Option? Option, int? PreemptRecordingId, bool Conflict, string Reason);
+    public sealed record Decision(bool Placed, Option? Option, int? PreemptRecordingId, bool Conflict, string Reason, string PreemptWhy = "");
 
     /// <summary>Conflict rank (HIGHER wins): priority class, then league priority, then team priority (the order of
     /// the league's followed teams — first = most important), then earlier start, then lower id.</summary>
@@ -38,6 +38,17 @@ public sealed class CreditAwarePlanner
             return NegId.CompareTo(o.NegId);
         }
     }
+
+    /// <summary>Which field actually decided a preemption, for the user-facing "why was this bumped?" message. Two
+    /// games in the SAME league tie on league priority, so the real reason is usually team-follow order or start
+    /// time — saying just "higher-priority" left users reading it as a league-priority call and concluding DVarr had
+    /// it backwards.</summary>
+    public static string DecidingFactor(PRank win, PRank lose) =>
+          win.Prio != lose.Prio         ? "recording priority"
+        : win.League != lose.League     ? "league priority"
+        : win.Team != lose.Team         ? "team-follow order"
+        : win.NegStart != lose.NegStart ? "earlier start time"
+        : "tie-break";
 
     public static PRank MakeRank(RecordingPriority prio, int leaguePriority, int teamPriority, long startUtc, int id)
         => new(PrioScore(prio), leaguePriority, teamPriority, -startUtc, -(long)id);
@@ -105,7 +116,8 @@ public sealed class CreditAwarePlanner
                 { victim = s; bestOpt = o; }
 
         if (victim is not null && bestOpt is not null)
-            return new(true, bestOpt, victim.RecordingId, false, $"preempted lower-priority recording #{victim.RecordingId}");
+            return new(true, bestOpt, victim.RecordingId, false, $"preempted lower-priority recording #{victim.RecordingId}",
+                DecidingFactor(candRank, victim.Rank));
 
         return new(false, null, null, true, "both logins busy for this window");
     }

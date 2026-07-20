@@ -7,7 +7,8 @@ namespace DVarr.Services.Events;
 /// <summary>A normalised event. ExternalId is provider-stable (drives the churn-proof natural key). Carries
 /// optional TheSportsDB enrichment (thumbnail, round, season) for Plex-clean media import + the Plex provider.</summary>
 public sealed record IngestedEvent(string ExternalId, string Title, long StartUtc, long? EndUtc, bool DateOnly, string? Status,
-    string? ThumbUrl = null, int? Round = null, string? Season = null, string? HomeTeamId = null, string? AwayTeamId = null);
+    string? ThumbUrl = null, int? Round = null, string? Season = null, string? HomeTeamId = null, string? AwayTeamId = null,
+    string? TvStation = null);
 
 /// <summary>
 /// Fetches a league's events. TheSportsDB (free key) is the only provider offered now; legacy "ics" leagues
@@ -44,7 +45,7 @@ public sealed class EventFetcher
                 // TheSportsDB never returns an end time — leave it null here; EventIngestService fills in the
                 // per-sport default duration so it's tunable in one place. Carry the team ids for team-follow.
                 byId.TryAdd(e.Id, new IngestedEvent(e.Id, e.Title, st, null, e.DateOnly, e.Status,
-                    e.Thumb ?? e.Poster, e.Round, e.Season, e.HomeTeamId, e.AwayTeamId));
+                    e.Thumb ?? e.Poster, e.Round, e.Season, e.HomeTeamId, e.AwayTeamId, e.TvStation));
             }
         }
 

@@ -94,10 +94,26 @@ public sealed class EventIngestService
                     if (ie.ThumbUrl is not null) ev.ThumbUrl = ie.ThumbUrl;
                     if (ie.Round is not null) ev.Round = ie.Round;
                     if (ie.Season is not null) ev.Season = ie.Season;
-                    // Team ids track the provider authoritatively (the v2 schedule always carries them for team sports);
-                    // assign unconditionally so a correction to null can't leave a stale id that mis-files team-follow.
-                    ev.HomeTeamId = ie.HomeTeamId;
-                    ev.AwayTeamId = ie.AwayTeamId;
+                    // Team ids track the provider — but only when it actually SUPPLIES them. Doubleheader and
+                    // late-rescheduled entries sometimes come back with no idHomeTeam/idAwayTeam, and blindly
+                    // assigning null here had two silent consequences: every TEAM-SCOPED channel mapping stopped
+                    // applying (the event became "not resolvable" and was skipped with no recording, no conflict),
+                    // and the event's team-follow priority dropped to zero (so a lower-ranked game could preempt
+                    // it). Keep the ids we already hold when the provider goes quiet; a real correction — non-null
+                    // ids — still lands unconditionally.
+                    if (ie.HomeTeamId is not null || ie.AwayTeamId is not null)
+                    {
+                        ev.HomeTeamId = ie.HomeTeamId;
+                        ev.AwayTeamId = ie.AwayTeamId;
+                    }
+                    else if (ev.HomeTeamId is not null || ev.AwayTeamId is not null)
+                    {
+                        _log.LogInformation("[Events] '{Title}': provider re-sync carried no team ids — keeping the existing ones so team-scoped mappings and team priority stay intact", ie.Title);
+                    }
+                    // Broadcast networks (strTVStation) feed the national-fallback's network-name channel match.
+                    // Only overwrite with real data — null means "schedule payload didn't say", and clobbering a
+                    // previously fetched value with null would re-trigger the per-event TV lookup.
+                    if (!string.IsNullOrWhiteSpace(ie.TvStation)) ev.Broadcast = ie.TvStation;
                     if (isTsdb) ev.TsdbEventId = ie.ExternalId;
                     ev.LastSeenSyncUtc = now;
                     updated++;
@@ -111,6 +127,7 @@ public sealed class EventIngestService
                         Status = MapStatus(ie.Status), Monitored = l.Monitored, LastSeenSyncUtc = now,
                         ThumbUrl = ie.ThumbUrl, Round = ie.Round, Season = ie.Season,
                         HomeTeamId = ie.HomeTeamId, AwayTeamId = ie.AwayTeamId,
+                        Broadcast = string.IsNullOrWhiteSpace(ie.TvStation) ? null : ie.TvStation,
                         TsdbEventId = isTsdb ? ie.ExternalId : null,
                     });
                     added++;

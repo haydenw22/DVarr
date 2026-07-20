@@ -128,6 +128,12 @@ public class Event
     public string? HomeTeamId { get; set; }
     public string? AwayTeamId { get; set; }
 
+    /// <summary>Broadcast networks TheSportsDB lists for this event (strTVStation, e.g. "NBC, Peacock"). Lets the
+    /// national-broadcast fallback match a channel by NETWORK NAME when the guide's listing is branded ("Sunday
+    /// Night Baseball") and never names the teams — and lets the no-guide-match warning name the networks the user
+    /// is missing. Null = never seen/fetched; "" = looked up and none listed (don't re-fetch).</summary>
+    public string? Broadcast { get; set; }
+
     public long? LastSeenSyncUtc { get; set; }
     public string? SourceMetaJson { get; set; }
 

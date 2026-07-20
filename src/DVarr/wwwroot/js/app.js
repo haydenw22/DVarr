@@ -1040,14 +1040,26 @@ function renderGuide(wrap, g) {
     const recs = c.recordings || [];
     const overCore = (s, e) => recs.some(r => r.coreStart < e && r.coreEnd > s);    // the actual recording → red
     const overPad = (s, e) => recs.some(r => r.start < e && r.end > s);              // pre/post buffer → orange
-    const blocks = (c.programmes || []).filter(p => p.start && p.stop > winStart && p.start < winEnd).map(p => {
-      const left = xOf(p.start), w = Math.max(2, xOf(p.stop) - left);
+    // Provider guides routinely carry programmes that OVERLAP in time (and outright duplicates of the same show).
+    // The blocks are absolutely positioned from those times, so overlapping entries used to be painted on top of one
+    // another and their titles collided into unreadable mush. Draw them in time order, never letting a block start
+    // before the previous one ended, and drop any entry an earlier programme already covers entirely. Each block
+    // still carries the full title in its tooltip (and ellipsizes) so a squeezed block is readable on hover.
+    let drawnTo = -Infinity;
+    const blocks = (c.programmes || [])
+      .filter(p => p.start && p.stop > winStart && p.start < winEnd)
+      .sort((a, b) => (a.start - b.start) || (a.stop - b.stop))
+      .map(p => {
+      const startAt = Math.max(p.start, drawnTo);
+      if (p.stop <= startAt) return '';                 // wholly covered by what we've already drawn → skip
+      drawnTo = p.stop;
+      const left = xOf(startAt), w = Math.max(2, xOf(p.stop) - left);
       const live = p.start <= now && now < p.stop;
       const core = overCore(p.start, p.stop);
       const pad = !core && overPad(p.start, p.stop);
       const cls = 'g-prog' + (live ? ' live' : '') + (core ? ' rec' : '') + (pad ? ' pad' : '');
       return `<div class="${cls}" style="left:${left}px;width:${w}px" data-ch="${c.channelId}" data-start="${p.start}" data-stop="${p.stop}" data-title="${esc(p.Title || p.title || '')}" title="${esc(p.Title || p.title || '')} · ${hhmm(p.start)}-${hhmm(p.stop)}"><span class="g-pt">${hhmm(p.start)}</span> ${esc(p.Title || p.title || '')}</div>`;
-    }).join('');
+    }).filter(Boolean).join('');
     const body = blocks || `<div class="g-empty">no guide data</div>`;
     return `<div class="g-row"><div class="g-ch" title="Watch ${esc(c.name)}" onclick="chanTap(${c.channelId},'${jsq(c.name)}')">${c.logo ? chLogo(c.logo) : I.play}<span>${esc(c.name)}</span></div><div class="g-track" style="width:${trackW}px">${body}</div></div>`;
   }).join('');

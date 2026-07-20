@@ -60,6 +60,7 @@ public enum NotificationKind
     ReplayGaveUp,    // no re-air appeared before the rescue ticket expired
     RetentionEvicted, // retention policy deleted one or more old recordings to reclaim space
     Retimed,          // the provider moved an event's start and DVarr retimed the pending recording to match
+    NoGuideMatch,     // nothing in the lineup's guide shows this fixture — likely a national/streaming-only broadcast
 }
 
 /// <summary>Lifecycle of a second-chance replay-rescue ticket (docs: automatic re-air rescue).</summary>

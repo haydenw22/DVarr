@@ -775,7 +775,13 @@ public sealed class RecorderSupervisor
             // undecodable (silent) at the splice. A uniform re-encode eliminates that whole class of audio dropouts.
             // aresample async keeps audio locked to the (de-overlapped) video timeline across reconnect splices
             // instead of leaving a silent gap; make_zero rebases any small negative TS the inpoint seeks introduce.
-            "-c:a", "aac", "-b:a", "256k", "-af", "aresample=async=1:min_hard_comp=0.1",
+            // async=1000 (was 1): the number is how many samples/sec may be SOFT-corrected by resampling. At 1 that
+            // is effectively nothing, so every correction fell through to HARD compensation — inserting silence or
+            // dropping samples once drift passed min_hard_comp — which is audible as a brief dropout every 15-20s on
+            // any feed whose audio and video clocks drift apart (common on IPTV restreams). Allowing generous soft
+            // correction absorbs that drift inaudibly, while min_hard_comp stays as the safety net for genuine large
+            // discontinuities at a reconnect splice.
+            "-c:a", "aac", "-b:a", "256k", "-af", "aresample=async=1000:min_hard_comp=0.1",
             "-avoid_negative_ts", "make_zero",
         });
         if (chaptersPath is not null) args.AddRange(new[] { "-map_chapters", "1" });
