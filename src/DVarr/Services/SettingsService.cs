@@ -178,6 +178,12 @@ public sealed class SettingsService
         // calendar-feed link shown in the "Subscribe" modal. Empty by default — the UI prompts for it there. A text
         // setting whose default must NOT look numeric, or the /api/settings int-guard would reject a real URL.
         ["public_base_url"] = "",
+        // Home-feed hero "popular leagues" fallback (/api/tv/home): a JSON array of TheSportsDB league-id strings. When your
+        // followed leagues don't fill the 5 hero slots, /api/tv/home tops them up with the next live/upcoming fixtures
+        // from these leagues (fetched via TheSportsDB, cached ≥15 min). Defaults to a broad spread of the biggest
+        // leagues (ids verified against LeagueCatalog): AFL 4456, NRL 4416, F1 4370, EPL 4328, NFL 4391, NBA 4387,
+        // NHL 4380, MLB 4424. A JSON-array default (never numeric) so the /api/settings int-guard treats it as text.
+        ["tv_hero_popular_leagues"] = "[\"4456\",\"4416\",\"4370\",\"4328\",\"4391\",\"4387\",\"4380\",\"4424\"]",
     };
 
     public async Task EnsureDefaultsAsync(CancellationToken ct = default)

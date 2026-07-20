@@ -8,7 +8,7 @@ namespace DVarr.Services.Events;
 
 // ---- Lightweight DTOs surfaced to the UI + ingest/import (only the fields DVarr uses) ----
 public sealed record TsdbSport(string Name, string? Format);
-public sealed record TsdbLeague(string Id, string Name, string Sport, string? Country, string? Alternate, string? Poster, string? Badge);
+public sealed record TsdbLeague(string Id, string Name, string Sport, string? Country, string? Alternate, string? Poster, string? Badge, string? Fanart = null);
 public sealed record TsdbTeam(string Id, string Name, string? Badge, string? Logo);
 public sealed record TsdbEvent(string Id, string Title, long? StartUtc, bool DateOnly, string? Status,
     string? Thumb, string? Poster, int? Round, string? Season, string? League, string? Sport, string? LeagueId,
@@ -209,9 +209,11 @@ public sealed class TheSportsDbClient
             {
                 var name = Str(e, "strLeague");
                 if (!string.IsNullOrWhiteSpace(name))
-                    // Prefer the portrait poster; fall back to the badge for the "logo" slot.
+                    // Prefer the portrait poster; fall back to the badge for the "logo" slot. Fanart is an
+                    // additive parse (v2 lookup/league carries strFanart[1..]) — the TV hero background prefers it.
                     return new TsdbLeague(Str(e, "idLeague") ?? idLeague, name!, Str(e, "strSport") ?? "", Str(e, "strCountry"),
-                        Str(e, "strLeagueAlternate"), Str(e, "strPoster") ?? Str(e, "strFanart"), Str(e, "strBadge") ?? Str(e, "strLogo"));
+                        Str(e, "strLeagueAlternate"), Str(e, "strPoster") ?? Str(e, "strFanart"), Str(e, "strBadge") ?? Str(e, "strLogo"),
+                        Str(e, "strFanart") ?? Str(e, "strFanart1") ?? Str(e, "strFanart2"));
             }
         return null;
     });

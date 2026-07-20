@@ -206,6 +206,7 @@ app.MapParityApi();
 app.MapCalendarApi();
 app.MapPreviewApi();
 app.MapLibraryApi();
+app.MapTvApi();
 app.MapWebhookApi();
 app.MapPlexApi();
 app.MapFallbackToFile("index.html");

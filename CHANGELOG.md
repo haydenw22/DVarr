@@ -12,6 +12,13 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.42.0] — 2026-07-20
+We're building the backend of something new. Nothing changes in the app you use today — this release quietly lays plumbing that's worth having on its own. More when it's ready. 👀
+
+### Added
+- **A one-call aggregated feed (`GET /api/tv/home`).** One request returns a curated slate of what matters right now: up to five headline events — your followed leagues and teams first (live games leading, then whatever starts soonest in the next 48 hours, honouring the same team- and session-follow rules as the rest of DVarr), topped up from a configurable list of big leagues (AFL, NRL, F1, EPL, NFL, NBA, NHL and MLB out of the box, editable in Settings) — plus a live-and-upcoming rail, your most recent recordings, followed leagues with upcoming counts, and source connection status. Assembled server-side from a handful of queries, with TheSportsDB touched only through a ≥15-minute cache. Read-only, and behind the same login as the web UI.
+- **A caching artwork proxy (`GET /api/tv/art/…`).** League badges and posters, team badges, event thumbnails and a cascading headline background (event thumbnail → league fanart → league poster) are resolved to their real image URLs server-side — a client only ever asks for a DVarr path, so there's no way to point it at an arbitrary URL. Each image is downloaded once (TheSportsDB hosts only, capped at 10 MB, de-duplicated so two requests can't both fetch it), stored under `/config/artcache`, and then served straight from disk with a week-long cache header. Anything missing returns a clean 404.
+
 ## [1.41.8] — 2026-07-20
 Kills the periodic audio dropouts, finds nationally-televised games by broadcaster and across both logins, stops a re-sync silently unscheduling a game, and lets the guide look backwards.
 
