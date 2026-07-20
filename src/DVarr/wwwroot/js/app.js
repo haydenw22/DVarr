@@ -472,8 +472,9 @@ PAGES.recordings = {
       const byName = (a, b) => (a.title || '').localeCompare(b.title || '');
       const nowS = Math.floor(Date.now() / 1000);
       // A recording capturing right now is the closest thing to "now" — float live/in-progress rows to the top of
-      // the DATE sorts so an in-progress game is never buried below upcoming windows (it started in the past, so the
-      // plain event-window comparators would otherwise sink it). Name sorts stay a pure A–Z.
+      // "closest first" so an in-progress game is never buried below upcoming windows (it started in the past, so the
+      // plain event-window comparator would otherwise sink it). ONLY that sort: pinning it in "furthest first" too
+      // made the live row look stuck regardless of the dropdown. Furthest-first and the name sorts are pure sorts.
       const liveFirst = cmp => (a, b) => {
         const aL = ACTIVE.includes(a.state), bL = ACTIVE.includes(b.state);
         return aL !== bL ? (aL ? -1 : 1) : cmp(a, b);
@@ -487,7 +488,7 @@ PAGES.recordings = {
       rows = rows.slice().sort(
         sort === 'name_asc' ? byName
         : sort === 'name_desc' ? ((a, b) => byName(b, a))
-        : sort === 'evt_far' ? liveFirst((a, b) => (b.startUtc || 0) - (a.startUtc || 0))
+        : sort === 'evt_far' ? ((a, b) => (b.startUtc || 0) - (a.startUtc || 0))
         : liveFirst(byClosest)); // evt_close default
       // Keep the bulk selection to the currently VISIBLE rows only (audit UI-BULK-01): otherwise a row selected
       // under one filter stays in recSel after a filter hides it, and a bulk Stop/Delete would silently hit hidden
@@ -2833,4 +2834,18 @@ buildNav();
 })();
 connectSSE();
 // Register the service worker so the app shell loads instantly (and works offline) once installed to the home screen.
-if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+  // The shell is served stale-while-revalidate, so straight after a container update the page boots on the PREVIOUS
+  // release's JS and stays there until a hard refresh — new features look broken until you know to do that. When the
+  // updated worker takes control, reload once so an upgrade lands by itself. Guarded so it can never loop.
+  // Only an UPDATE should reload: on a first-ever visit the worker claims a page that had no controller at all,
+  // which isn't a stale shell and shouldn't bounce the page.
+  const hadController = !!navigator.serviceWorker.controller;
+  let swReloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController || swReloaded) return;
+    swReloaded = true;
+    location.reload();
+  });
+}

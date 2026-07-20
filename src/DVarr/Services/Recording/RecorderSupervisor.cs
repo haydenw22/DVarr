@@ -740,10 +740,12 @@ public sealed class RecorderSupervisor
         // (the "going back in time" bug). Falls back to a plain list if PTS can't be read — never worse than before.
         var deoverlap = await GetBoolSettingAsync("finalize_deoverlap_enabled", true);
         var listPath = Path.Combine(segDir, "concat.ffconcat");
-        var (listLines, trimmed, dropped, jumpDropped) = await BuildConcatListAsync(segs, deoverlap);
+        var (listLines, trimmed, dropped, jumpDropped, rebased) = await BuildConcatListAsync(segs, deoverlap);
         await File.WriteAllLinesAsync(listPath, listLines);
-        if (deoverlap && (trimmed > 0 || dropped > 0 || jumpDropped > 0))
-            _log.LogInformation("[Recorder] Recording {Id} de-overlap: {Trim} segment(s) trimmed, {Drop} dropped as duplicates, {Jump} dropped for internal clock jumps", recordingId, trimmed, dropped, jumpDropped);
+        var keptSegs = listLines.Count(l => l.StartsWith("file ", StringComparison.Ordinal));
+        if (deoverlap && (trimmed > 0 || dropped > 0 || jumpDropped > 0 || rebased > 0))
+            _log.LogInformation("[Recorder] Recording {Id} de-overlap: kept {Kept}/{Total} segment(s) — {Trim} trimmed, {Drop} dropped as duplicates, {Jump} dropped for internal clock jumps, {Reb} clock rebase(s)",
+                recordingId, keptSegs, segs.Count, trimmed, dropped, jumpDropped, rebased);
 
         // Chapter markers (best-effort): live status transitions recorded during capture become embedded MKV
         // chapters, riding the SAME concat pass as a second (ffmetadata) input — zero extra IO, and Plex /
@@ -781,22 +783,60 @@ public sealed class RecorderSupervisor
         foreach (var a in args) psi.ArgumentList.Add(a);
 
         Process? proc = null;
+        var errTail = new System.Collections.Concurrent.ConcurrentQueue<string>();
         try
         {
             proc = Process.Start(psi)!;
             var p = proc;
-            _ = Task.Run(async () => { try { while (await p.StandardError.ReadLineAsync() is not null) { } } catch { } });
+            // Keep the LAST few stderr lines. At -loglevel warning these carry exactly what explains a short output
+            // ("Error during demuxing", "Non-monotonous DTS", stream-parameter mismatches). They used to be read and
+            // thrown away, which left a truncated finalize with no forensic trail anywhere.
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    string? line;
+                    while ((line = await p.StandardError.ReadLineAsync()) is not null)
+                    { errTail.Enqueue(line); while (errTail.Count > 20) errTail.TryDequeue(out _); }
+                }
+                catch { }
+            });
             _ = Task.Run(async () => { try { while (await p.StandardOutput.ReadLineAsync() is not null) { } } catch { } });
             // Scale the hang-guard by footage length (≈75 8s-segments per 10 min) so a long motorsport finalize
             // can't be clipped, while still bounding a wedged ffmpeg. Copy-video + CPU-AAC runs well faster than
             // realtime, so this is generous: ~10 min floor, ~60 min ceiling.
             var capMin = Math.Clamp(10 + segs.Count / 10, 10, 60);
             using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(capMin));
+            var concatSw = System.Diagnostics.Stopwatch.StartNew();
             await p.WaitForExitAsync(cts.Token);
-            if (p.ExitCode != 0 || !File.Exists(outputPath)) return (false, 0, 0, null);
+            concatSw.Stop();
+            // Finalize is the window where the game isn't playable yet, so make its cost visible: this pass streams
+            // every segment through the muxer (video copied, audio re-encoded) and is normally the bulk of the wait.
+            _log.LogInformation("[Recorder] Recording {Id} concat+encode took {Sec:0.#}s for {N} segment(s)", recordingId, concatSw.Elapsed.TotalSeconds, keptSegs);
+            if (p.ExitCode != 0 || !File.Exists(outputPath))
+            {
+                foreach (var l in errTail) _log.LogWarning("[Recorder] finalize ffmpeg: {Line}", l);
+                return (false, 0, 0, null);
+            }
             var bytes = new FileInfo(outputPath).Length;
             var durationS = await ProbeDurationAsync(outputPath);
-            return (bytes > 0, bytes, durationS, null);
+            // TRUNCATION GUARD. ffmpeg downgrades a mid-stream demux error to a CLEAN exit: it stops reading, writes a
+            // valid container and returns 0 — so a short file is not self-evident and used to be filed as a perfect
+            // recording. Compare what came out against what went in (~8s per kept segment) and shout when a big chunk
+            // is missing. Only checked on runs long enough for the ±1 partial segment at each end to be noise.
+            string? gaps = null;
+            var expectedS = keptSegs * 8;
+            if (expectedS >= 600 && durationS > 0 && durationS < expectedS * 0.9)
+            {
+                var lostS = expectedS - durationS;
+                gaps = JsonSerializer.Serialize(new { shortOutput = new { durationS, expectedS, missingS = lostS, segmentsKept = keptSegs } });
+                _log.LogError("[Recorder] Recording {Id} FINALIZE TRUNCATED — output is {Dur}s but {Kept} kept segment(s) hold ~{Exp}s (~{Lost}s missing). ffmpeg exited 0; last stderr follows.",
+                    recordingId, durationS, keptSegs, expectedS, lostS);
+                foreach (var l in errTail) _log.LogWarning("[Recorder] finalize ffmpeg: {Line}", l);
+                await AddNotificationAsync(recordingId, NotificationKind.Degraded, Severity.Warn,
+                    $"finalize produced only {durationS / 60}m from ~{expectedS / 60}m of captured segments — footage may be missing");
+            }
+            return (bytes > 0, bytes, durationS, gaps);
         }
         catch (Exception ex)
         {
@@ -872,19 +912,35 @@ public sealed class RecorderSupervisor
     /// dropped; a partial overlap gets an `inpoint` at the running timeline end so only the new tail is kept.
     /// A segment whose INTERNAL span is impossibly long is dropped too (see <see cref="MaxSaneSegmentSpanS"/>).
     /// </summary>
-    private async Task<(List<string> lines, int trimmed, int dropped, int jumpDropped)> BuildConcatListAsync(List<string> segs, bool deoverlap)
+    private async Task<(List<string> lines, int trimmed, int dropped, int jumpDropped, int rebased)> BuildConcatListAsync(List<string> segs, bool deoverlap)
     {
         static string FileLine(string s) => $"file '{s.Replace("\\", "/").Replace("'", "'\\''")}'";
         var lines = new List<string> { "ffconcat version 1.0" };
-        if (!deoverlap) { lines.AddRange(segs.Select(FileLine)); return (lines, 0, 0, 0); }
+        if (!deoverlap) { lines.AddRange(segs.Select(FileLine)); return (lines, 0, 0, 0, 0); }
 
         const double eps = 0.05;
         var inv = System.Globalization.CultureInfo.InvariantCulture;
         double timelineEnd = double.NegativeInfinity;
-        int trimmed = 0, dropped = 0, jumpDropped = 0;
-        foreach (var s in segs)
+        int trimmed = 0, dropped = 0, jumpDropped = 0, rebased = 0;
+        // Probe every segment's PTS range CONCURRENTLY. That's one ffprobe process per 8-second segment, and a long
+        // game is ~1700 of them — serially that put minutes on the clock before the concat even started. Only the I/O
+        // is parallel; the decision loop below still walks the segments strictly in order, so the result is identical.
+        var probeSw = System.Diagnostics.Stopwatch.StartNew();
+        var ranges = new (double min, double max, bool ok)[segs.Count];
+        using (var probeGate = new SemaphoreSlim(Math.Clamp(Environment.ProcessorCount / 2, 2, 8)))
+            await Task.WhenAll(segs.Select(async (s, i) =>
+            {
+                await probeGate.WaitAsync();
+                try { ranges[i] = await ProbePtsRangeAsync(s); }
+                finally { probeGate.Release(); }
+            }));
+        probeSw.Stop();
+        _log.LogInformation("[Recorder] de-overlap: probed {N} segment(s) in {Sec:0.#}s", segs.Count, probeSw.Elapsed.TotalSeconds);
+
+        for (var i = 0; i < segs.Count; i++)
         {
-            var (min, max, ok) = await ProbePtsRangeAsync(s);
+            var s = segs[i];
+            var (min, max, ok) = ranges[i];
             if (!ok)
             {
                 // Unreadable PTS → include verbatim and reset the guard (never worse than the old behaviour).
@@ -908,6 +964,21 @@ public sealed class RecorderSupervisor
                 lines.Add(FileLine(s));                       // no overlap
                 timelineEnd = max;
             }
+            else if (timelineEnd - max > MaxReserveLookbackS)
+            {
+                // The WHOLE segment sits far below the running timeline. That is not a re-served duplicate — a
+                // provider only ever re-serves the last few buffered seconds — it is a NEW CLOCK: the source
+                // restarted its PCR/PTS (transcoder/encoder restart, or a fresh session handed to ffmpeg's
+                // -reconnect), or the 33-bit PTS wrapped (every ~26.5h). KEEP it and rebase the timeline; the
+                // concat demuxer re-bases at file boundaries anyway, so a fresh clock joins cleanly.
+                // Without this the "duplicate" rule below silently discarded EVERY remaining segment until the new
+                // clock climbed back past the old absolute PTS — hours of footage gone, exit code 0, no error.
+                rebased++;
+                _log.LogWarning("[Recorder] segment {Seg} restarts the clock (ends {Max:0.#}s, timeline was at {End:0.#}s) — rebasing the finalize timeline instead of dropping",
+                    Path.GetFileName(s), max, timelineEnd);
+                lines.Add(FileLine(s));
+                timelineEnd = max;
+            }
             else if (max <= timelineEnd + eps)
             {
                 dropped++;                                    // wholly inside the timeline already → drop the file
@@ -920,20 +991,27 @@ public sealed class RecorderSupervisor
                 timelineEnd = max;
             }
         }
-        // Pathological source (e.g. every segment straddles a PCR wrap): if the jump filter would leave NOTHING,
-        // fall back to the plain list — a file with a weird timeline still beats no recording at all.
-        if (jumpDropped > 0 && !lines.Skip(1).Any())
+        // Pathological source: if the de-overlap pass would leave NOTHING, fall back to the plain list — a file with
+        // a weird timeline still beats no recording at all. This now covers EVERY drop reason (clock jumps and mass
+        // "duplicates" alike), not just the jump filter, so a poisoned timeline can never yield an empty concat list.
+        if (segs.Count > 0 && !lines.Skip(1).Any())
         {
+            _log.LogWarning("[Recorder] de-overlap would have discarded ALL {N} segment(s) — falling back to the plain concat list", segs.Count);
             lines = new List<string> { "ffconcat version 1.0" };
             lines.AddRange(segs.Select(FileLine));
-            return (lines, 0, 0, 0);
+            return (lines, 0, 0, 0, 0);
         }
-        return (lines, trimmed, dropped, jumpDropped);
+        return (lines, trimmed, dropped, jumpDropped, rebased);
     }
 
     /// <summary>Longest internal PTS span (seconds) a single clock-cut segment can legitimately have. Segments are
     /// cut every 8s of wall clock (plus up to a GOP), so minutes of internal span always means a mid-file clock jump.</summary>
     private const double MaxSaneSegmentSpanS = 300;
+
+    /// <summary>How far BELOW the running finalize timeline a segment can sit and still be a genuine duplicate. A
+    /// provider re-serving buffered content on reconnect only ever replays its last few seconds; anything further
+    /// back is a restarted source clock (or a 33-bit PTS wrap) and must rebase the timeline, not be discarded.</summary>
+    private const double MaxReserveLookbackS = 300;
 
     /// <summary>Min &amp; max video packet PTS (seconds) of a segment via ffprobe (demux only, no decode). Min/max
     /// (not first/last) so an intra-segment reconnect that itself regressed PTS doesn't fool the overlap maths.</summary>
@@ -946,9 +1024,21 @@ public sealed class RecorderSupervisor
             foreach (var a in new[] { "-v", "quiet", "-select_streams", "v:0", "-show_entries", "packet=pts_time", "-of", "csv=p=0", seg })
                 psi.ArgumentList.Add(a);
             using var p = Process.Start(psi)!;
-            var outp = await p.StandardOutput.ReadToEndAsync();
+            // The timeout has to cover the READ as well: a wedged ffprobe never closes stdout, so awaiting
+            // ReadToEndAsync without a token blocked finalize indefinitely (only the outer hang-guard eventually
+            // caught it), and Dispose alone leaves the OS process running — kill it explicitly.
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-            await p.WaitForExitAsync(cts.Token);
+            string outp;
+            try
+            {
+                outp = await p.StandardOutput.ReadToEndAsync(cts.Token);
+                await p.WaitForExitAsync(cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                try { if (!p.HasExited) p.Kill(entireProcessTree: true); } catch { }
+                return (0, 0, false);   // unreadable → the caller keeps the segment verbatim and resets the timeline
+            }
             double min = double.PositiveInfinity, max = double.NegativeInfinity; var any = false;
             var inv = System.Globalization.CultureInfo.InvariantCulture;
             foreach (var line in outp.Split('\n', StringSplitOptions.RemoveEmptyEntries))

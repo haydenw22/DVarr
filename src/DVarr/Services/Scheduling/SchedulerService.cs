@@ -21,6 +21,10 @@ public sealed class SchedulerService : BackgroundService
     private readonly DbWriteGate _gate;
     private readonly ILogger<SchedulerService> _log;
 
+    // Last "not started" reason logged per recording, so the every-tick arm retry doesn't spam the feed once the
+    // message is visible at Information (see the arm loop below).
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, (string Err, long At)> _lastStartFail = new();
+
     public SchedulerService(IServiceScopeFactory scopes, RecorderService recorder, DbWriteGate gate, ILogger<SchedulerService> log)
     {
         _scopes = scopes; _recorder = recorder; _gate = gate; _log = log;
@@ -119,7 +123,20 @@ public sealed class SchedulerService : BackgroundService
             {
                 var err = await _recorder.TryStartAsync(r.Id, ct);
                 if (err is null) started++;
-                else { conflicts++; _log.LogDebug("[Scheduler] Recording {Id} not started: {Err}", r.Id, err); }
+                else
+                {
+                    conflicts++;
+                    // Information, not Debug: "couldn't arm" is the other invisible recording-loss path (the in-app log
+                    // viewer keeps Information and above). The arm is retried EVERY tick, so throttle it — log when the
+                    // reason changes, else at most once per 10 minutes per recording.
+                    var nowS = EpochTime.Now();
+                    var prev = _lastStartFail.TryGetValue(r.Id, out var pv) ? pv : default;
+                    if (prev.Err != err || nowS - prev.At > 600)
+                    {
+                        _lastStartFail[r.Id] = (err, nowS);
+                        _log.LogInformation("[Scheduler] Recording {Id} not started: {Err}", r.Id, err);
+                    }
+                }
             }
             catch (Exception ex)
             {

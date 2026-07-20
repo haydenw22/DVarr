@@ -41,9 +41,12 @@ var dbPath = Path.Combine(configDir, "dvarr.db");
 // ---------------------------------------------------------------------------
 // Services
 // ---------------------------------------------------------------------------
-// In-memory ring buffer of recent log lines backing the in-app Logs viewer (/api/logs). One instance both feeds the
-// logger provider and is resolved by the endpoint. Purely in-memory (nothing to disk; cleared on restart).
+// Ring buffer of recent log lines backing the in-app Logs viewer (/api/logs). One instance both feeds the logger
+// provider and is resolved by the endpoint. Entries are also persisted (redacted, batched) to a rotating file under
+// /config/logs and reloaded here on boot — a restart or container update used to wipe exactly the logs needed to
+// explain the failure that preceded it.
 var logBuffer = new LogRingBuffer();
+logBuffer.EnablePersistence(Path.Combine(configDir, "logs"));
 builder.Services.AddSingleton(logBuffer);
 builder.Logging.AddProvider(new RingBufferLoggerProvider(logBuffer));
 // Framework HttpClient categories log every request URL at Information — for provider calls that's the IPTV login
@@ -101,6 +104,10 @@ var urls = builder.Configuration["DVarr:Urls"] ?? "http://0.0.0.0:1867";
 builder.WebHost.UseUrls(urls);
 
 var app = builder.Build();
+
+// Write out any log lines still queued when we're asked to stop — a shutdown's last lines are usually the ones that
+// explain it, and the batch writer's tick would otherwise drop them on the floor.
+app.Lifetime.ApplicationStopping.Register(() => logBuffer.Flush());
 
 app.Logger.LogInformation("DVarr starting. config={Config} media={Media} segments={Segments}", configDir, mediaDir, segmentDir);
 

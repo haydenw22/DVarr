@@ -12,6 +12,24 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.41.7] — 2026-07-20
+Stops finalize silently throwing away hours of a finished game, makes the failures that used to leave no trace visible, and keeps your logs across restarts.
+
+### Fixed
+- **A restarted provider clock no longer deletes the rest of your recording.** Finalize de-duplicates content a provider re-serves after a reconnect by ignoring segments that fall behind the running timeline. But when a source *restarts its clock* mid-game (transcoder/encoder restart, or a fresh session handed over on reconnect) every following segment comes back with low timestamps — and was discarded as a "duplicate" until the new clock climbed past the old one. That could silently bin **hours**: a 4-hour, 12 GB capture finalising to a 1.5-hour, 3.5 GB file, with no error and a clean exit code. DVarr now recognises a restarted clock (as opposed to a few re-served seconds), **rebases the timeline and keeps the footage**. The same fix covers the 33-bit timestamp wrap that happens on any stream running past ~26.5 hours.
+- **A truncated finalize is no longer filed as a perfect recording.** ffmpeg treats a mid-stream demux error as a clean finish — it stops reading, writes a valid file and exits 0 — so a short recording looked identical to a complete one. Finalize now compares what came out against the segments that went in, and **shouts** (log + Activity warning) when a meaningful chunk is missing. The finalize error output is kept too, instead of being thrown away, so the next occurrence is diagnosable.
+- **Games that silently never got scheduled now say so.** The two paths that end in "no recording at all" — an event no channel mapping resolves, and a recording that couldn't arm — only logged at debug level, which the in-app Logs page doesn't keep. Both are now visible (the arm failure throttled so a retry loop can't spam), so *"why didn't my game record?"* has an answer in the log.
+- **A cleared postponement can no longer evaporate a recording.** When a postponed event went live again, DVarr deleted the cancelled recording and expected the scheduler to place a fresh one — but if the event had aged out of the scheduling window, nothing replaced it: no recording, no conflict, no notification. It now only reclaims rows the scheduler can actually re-place.
+- **A moved event no longer retimes your recording in silence.** When a provider shifts an event, DVarr re-aims the pending recording to match — previously with nothing in the Activity feed. If the provider moved it to a placeholder time (common around doubleheaders) the recording quietly walked off the real broadcast. Any real shift is now reported.
+- **Upgrading no longer needs a hard refresh.** The app shell is cached for instant/offline loading, so straight after an update the page could still boot on the *previous* release's code — making new fixes look broken until you knew to force-reload. The page now reloads itself once when the updated version takes over.
+- **"Event date — furthest first" sorts purely again.** An in-progress recording was pinned to the top of *both* date sorts, so switching between them appeared to do nothing. The live recording is now pinned only in "closest first" (where it belongs — it *is* the closest thing to now); every other option is a plain sort.
+
+- **Finalizing is quicker, and now tells you where the time went.** The duplicate-check pass ran one `ffprobe` per 8-second segment strictly one at a time — on a long game that's ~1,700 of them, adding minutes before the actual assembly even began. Those probes now run in parallel (bounded, so it won't starve an in-progress recording). Finalize also logs how long each phase took, so a slow finalize can be measured instead of guessed at. Note the bulk of the wait is the assembly pass itself, which scales with how long the game ran — games now record to their true end (the rain-delay/auto-stop fixes), so there is simply more footage to assemble than there used to be.
+- **A wedged `ffprobe` can no longer stall finalize indefinitely.** The timeout didn't cover reading the probe's output, so a hung probe blocked until the outer guard fired — and the process was left running. It's now bounded and killed properly.
+
+### Added
+- **Logs survive a restart or a container update.** The Logs page was memory-only, so the moment you updated or restarted to deal with a problem, the evidence of that problem was gone. Log lines are now also written to a rotating file under your config folder (bounded, and credential-redacted exactly like the on-screen view) and reloaded on boot — so the Logs page still shows what happened *before* the restart.
+
 ## [1.41.6] — 2026-07-20
 Fixes a serious “delete after watched” bug that could delete a game **while you were still watching it**, and replaces the blunt instant-delete with a runtime-aware safety window.
 

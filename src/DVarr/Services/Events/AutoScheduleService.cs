@@ -375,10 +375,15 @@ public sealed class AutoScheduleService : BackgroundService
         // later un-postpones the match it would silently never record again. Reclaim ONLY recordings WE sweep-cancelled
         // (the FailureReason marker) whose event is active again — a user cancellation stays terminal. Delete the dead
         // row + drop the event from handledEventIds so 2b re-places it fresh (current time, full resolution + planning).
+        // GUARDED by candidateIds, exactly as 1d is: 2b only ever iterates candidates, so deleting the row for an event
+        // that has fallen out of the candidate pool (e.g. it started more than an hour ago) evaporates the recording
+        // entirely — no row, no conflict, no notification, nothing to re-place it. Leave those alone.
+        var candidateIds = candidates.Select(x => x.Id).ToHashSet();
         var reviveRows = await (from r in db.Recordings
                                 join e in db.Events on r.EventId equals e.Id
                                 where r.State == RecordingState.Cancelled && r.FailureReason == "event cancelled/postponed"
                                       && (e.Status == EventStatus.Scheduled || e.Status == EventStatus.Live || e.Status == EventStatus.Unknown)
+                                      && candidateIds.Contains(e.Id)
                                 select new { r.Id, EventId = r.EventId!.Value }).ToListAsync(ct);
         if (reviveRows.Count > 0)
         {
@@ -398,7 +403,6 @@ public sealed class AutoScheduleService : BackgroundService
         // record its events again. Mirror 1c: reclaim ONLY filter-sweep-cancelled rows whose event is back in TODAY'S
         // candidate pool (it passes the current filters), delete the dead row and drop the event from handledEventIds
         // so 2b re-places it fresh. A user's own cancellation carries a different/absent reason and stays terminal.
-        var candidateIds = candidates.Select(e => e.Id).ToHashSet();
         if (candidateIds.Count > 0)
         {
             var filterRevive = await db.Recordings.AsNoTracking()
@@ -505,7 +509,18 @@ public sealed class AutoScheduleService : BackgroundService
                                     var rec = await db.Recordings.FindAsync(pend.Id);
                                     if (rec is not null && rec.State == RecordingState.Pending)
                                     {
+                                        var movedS = Math.Abs(e.StartUtc - rec.StartUtc);
                                         rec.StartUtc = e.StartUtc; rec.EndUtc = newEnd; rec.Title = e.Title; rec.UpdatedUtc = now;
+                                        // A silently re-aimed recording looks identical to one that never existed — and a
+                                        // provider moving an event to a bogus/placeholder time (endemic to doubleheaders)
+                                        // walks the recording off the real broadcast. Surface any REAL window shift in the
+                                        // Activity feed; the clash branch below already notifies for its own case.
+                                        if (movedS >= 300)
+                                            db.Notifications.Add(new Notification
+                                            {
+                                                RecordingId = pend.Id, TsUtc = now, Kind = NotificationKind.Retimed, Severity = Severity.Info, ToState = "Pending",
+                                                Message = $"provider moved this event by {movedS / 60}m — recording retimed to match",
+                                            });
                                         await db.SaveChangesAsync(ct);
                                     }
                                 }, ct);
@@ -572,7 +587,11 @@ public sealed class AutoScheduleService : BackgroundService
                 var opts = await planner.OptionsForEventAsync(e.Id, ct);
                 if (opts.Count == 0)
                 {
-                    _log.LogDebug("[AutoSchedule] event {Id} '{Title}' not resolvable", e.Id, e.Title);
+                    // Information, not Debug: this is a SILENT recording loss and the in-app log viewer only keeps
+                    // Information and above, so at Debug the one line that explains "why didn't my game record?" was
+                    // invisible to every user. The Activity notification below is throttled per league per day; this
+                    // line is per event, so the log always shows exactly which fixtures were skipped.
+                    _log.LogInformation("[AutoSchedule] event {Id} '{Title}' NOT SCHEDULED — no channel mapping resolves it (check the league's mappings, and that the event still has its teams)", e.Id, e.Title);
                     // A monitored event that CAN'T be scheduled is a silent recording loss (tonight's Crows game) —
                     // surface it in the Activity feed, at most once per league per day so 20 fixtures don't spam.
                     if (_lastNoMapWarn.GetOrAdd(e.LeagueId, 0) is var lastWarn && now - lastWarn > 86400 && _lastNoMapWarn.TryUpdate(e.LeagueId, now, lastWarn))

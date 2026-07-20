@@ -59,6 +59,7 @@ public enum NotificationKind
     ReplayScheduled, // found a re-air and scheduled a low-priority replay recording
     ReplayGaveUp,    // no re-air appeared before the rescue ticket expired
     RetentionEvicted, // retention policy deleted one or more old recordings to reclaim space
+    Retimed,          // the provider moved an event's start and DVarr retimed the pending recording to match
 }
 
 /// <summary>Lifecycle of a second-chance replay-rescue ticket (docs: automatic re-air rescue).</summary>
