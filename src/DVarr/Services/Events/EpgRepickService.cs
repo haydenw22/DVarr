@@ -212,17 +212,20 @@ public sealed class EpgRepickService
             ev.Title, nets.Count > 0 ? $" (listed on {NetList(nets)})" : "");
     }
 
-    // Last decline reason logged per recording. The re-pick sweep re-runs on every schedule tick, so log at
-    // Information (the level the in-app viewer keeps) only when the reason CHANGES — otherwise at most once every
-    // 30 minutes per recording.
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, (string Reason, long At)> _lastDecline = new();
+    // Last decline CATEGORY logged per recording. The re-pick sweep re-runs on every schedule tick for a pending
+    // game — for hours — so an un-throttled line here floods the log (a national game logged ~100 lines/day).
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, (string Key, long At)> _lastDecline = new();
+    private const long DeclineHeartbeatS = 6 * 3600;   // re-log an unchanged category at most this often
 
-    private void LogDecline(int recordingId, string title, string reason)
+    /// <param name="key">A STABLE category ("no-both-team-match", "pin-blocks-network", …). Throttling must key off
+    /// this, NOT the rendered reason: the message embeds volatile counts ("559 programme(s) searched") that change on
+    /// every guide refresh, so keying on the text defeated the throttle and re-logged the same dead end every sweep.</param>
+    private void LogDecline(int recordingId, string title, string key, string reason)
     {
         var now = EpochTime.Now();
         var prev = _lastDecline.TryGetValue(recordingId, out var pv) ? pv : default;
-        if (prev.Reason == reason && now - prev.At < 1800) return;
-        _lastDecline[recordingId] = (reason, now);
+        if (prev.Key == key && now - prev.At < DeclineHeartbeatS) return;   // same category → quiet until it changes (or a 6h heartbeat)
+        _lastDecline[recordingId] = (key, now);
         _log.LogInformation("[EpgRepick] no national-broadcast alternative for '{Title}': {Reason}", title, reason);
     }
 
@@ -251,15 +254,15 @@ public sealed class EpgRepickService
         // recording is about to capture a channel that isn't carrying the game — the user needs to be able to find out
         // which step gave up (previously all these exits were silent).
         if (!await _settings.GetBoolAsync("national_fallback_enabled"))
-        { LogDecline(rec.Id, ev.Title, "the national-broadcast fallback is turned off in Settings"); return false; }
+        { LogDecline(rec.Id, ev.Title, "disabled", "the national-broadcast fallback is turned off in Settings"); return false; }
         var (sideA, sideB) = ResolverService.EventSides(ev.Title);
         if (ReferenceEquals(sideA, sideB) || sideA.Count == 0 || sideB.Count == 0)
-        { LogDecline(rec.Id, ev.Title, "couldn't split the event title into two distinct teams"); return false; }
+        { LogDecline(rec.Id, ev.Title, "no-two-teams", "couldn't split the event title into two distinct teams"); return false; }
 
         // A mapped channel holding the slot with a placeholder means the guide hasn't named the fixture yet — that
         // is not evidence the game moved. Stay put; the next sweep re-judges once the placeholder resolves.
         if (await MappedGuideHasPlaceholderAsync(rec.SourceId, ev, ct))
-        { LogDecline(rec.Id, ev.Title, "a mapped channel's guide still shows a placeholder — waiting for it to firm up"); return false; }
+        { LogDecline(rec.Id, ev.Title, "placeholder", "a mapped channel's guide still shows a placeholder — waiting for it to firm up"); return false; }
 
         var now = EpochTime.Now();
         // League mapped channel ids in RANK order (the order matters when a cross-credential move rebuilds its
@@ -280,7 +283,7 @@ public sealed class EpgRepickService
             if (!string.IsNullOrEmpty(eid)) byEpg.TryAdd((c.SourceId, eid!.ToUpperInvariant()), (c.Id, c.SourceId, c.StreamId, c.Name));
         }
         if (byEpg.Count == 0)
-        { LogDecline(rec.Id, ev.Title, $"none of the {chans.Count} unmapped channel(s) on any login carry a guide id to search"); return false; }
+        { LogDecline(rec.Id, ev.Title, "no-guide-ids", $"none of the {chans.Count} unmapped channel(s) on any login carry a guide id to search"); return false; }
 
         var winStart = ev.StartUtc - 1800;
         var winEnd = (ev.EndUtc ?? ev.StartUtc + 7200) + 1800;
@@ -309,14 +312,14 @@ public sealed class EpgRepickService
             titleHits = titleHits.Where(x => x.sim >= PinOverrideScore).ToList();
             if (titleHits.Count == 0)
             {
-                LogDecline(rec.Id, ev.Title, $"best match outside your mapped channels was '{strongest.ch.Name}' ({strongest.sim:0.00}), below the {PinOverrideScore:0.00} needed to move off a pinned channel");
+                LogDecline(rec.Id, ev.Title, "pin-blocks-weak", $"best match outside your mapped channels was '{strongest.ch.Name}' ({strongest.sim:0.00}), below the {PinOverrideScore:0.00} needed to move off a pinned channel");
                 return false;
             }
         }
         foreach (var hit in titleHits)
         {
             if (hit.ch.SourceId != rec.SourceId && !await SlotFreeAsync(hit.ch.SourceId, rec, ct))
-            { LogDecline(rec.Id, ev.Title, $"'{hit.ch.Name}' on your other login shows the game, but that login is busy for this window"); continue; }
+            { LogDecline(rec.Id, ev.Title, "other-login-busy", $"'{hit.ch.Name}' on your other login shows the game, but that login is busy for this window"); continue; }
             return await MoveToAsync(rec, ev, mapped, mappedLadder, (hit.ch.Id, hit.ch.SourceId, hit.ch.StreamId, hit.ch.Name), now,
                 $"national broadcast: '{ev.Title}' is on '{hit.ch.Name}'{(hit.ch.SourceId == rec.SourceId ? "" : " (your other login)")} — recording moved there", ct);
         }
@@ -330,12 +333,12 @@ public sealed class EpgRepickService
         var networks = await NetworksForEventAsync(ev, ct);
         if (networks.Count == 0)
         {
-            LogDecline(rec.Id, ev.Title, $"no channel's guide names both teams in this window ({progs.Count} programme(s) searched across {byEpg.Count} channel(s)), and TheSportsDB lists no broadcaster to match by name — the game may be on a network you don't carry, or streaming-only");
+            LogDecline(rec.Id, ev.Title, "no-both-team-match", $"no channel's guide names both teams in this window ({progs.Count} programme(s) searched across {byEpg.Count} channel(s)), and TheSportsDB lists no broadcaster to match by name — the game may be on a network you don't carry, or streaming-only");
             return false;
         }
         if (curPinned)
         {
-            LogDecline(rec.Id, ev.Title, $"listed on {NetList(networks)}, but your current channel is pinned — a network-name match isn't strong enough evidence to move off a pin");
+            LogDecline(rec.Id, ev.Title, "pin-blocks-network", $"listed on {NetList(networks)}, but your current channel is pinned — a network-name match isn't strong enough evidence to move off a pin");
             return false;
         }
 
@@ -358,7 +361,7 @@ public sealed class EpgRepickService
         }
         if (netCands.Count == 0)
         {
-            LogDecline(rec.Id, ev.Title, $"listed on {NetList(networks)}, but no channel named for {(networks.Count == 1 ? "that network" : "those networks")} shows matching sport content in this window — it may be a network you don't carry, or streaming-only");
+            LogDecline(rec.Id, ev.Title, "network-not-carried", $"listed on {NetList(networks)}, but no channel named for {(networks.Count == 1 ? "that network" : "those networks")} shows matching sport content in this window — it may be a network you don't carry, or streaming-only");
             return false;
         }
         // One candidate per channel (its best-matching programme); same credential first, then full-name network
@@ -369,7 +372,7 @@ public sealed class EpgRepickService
             .ThenBy(x => x.Name.Length).ThenBy(x => x.Name, StringComparer.OrdinalIgnoreCase))
         {
             if (cand.SourceId != rec.SourceId && !await SlotFreeAsync(cand.SourceId, rec, ct))
-            { LogDecline(rec.Id, ev.Title, $"'{cand.Name}' on your other login matches {cand.Network}, but that login is busy for this window"); continue; }
+            { LogDecline(rec.Id, ev.Title, "other-login-busy-net", $"'{cand.Name}' on your other login matches {cand.Network}, but that login is busy for this window"); continue; }
             return await MoveToAsync(rec, ev, mapped, mappedLadder, (cand.Id, cand.SourceId, cand.StreamId, cand.Name), now,
                 $"national broadcast: '{ev.Title}' is listed on {cand.Network} — moved to '{cand.Name}'{(cand.SourceId == rec.SourceId ? "" : " (your other login)")}, whose guide shows '{cand.Prog}'", ct);
         }

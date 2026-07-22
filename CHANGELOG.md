@@ -12,6 +12,15 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.43.1] — 2026-07-21
+Quietens a repetitive log line, and stops a conflicted game recording only its tail — hunting a replay instead.
+
+### Fixed
+- **The "no national-broadcast alternative" log line no longer repeats itself.** For a game DVarr can't find on another channel, that line was throttled on its full text — which includes a count ("559 programme(s) searched") that changes on every guide refresh, defeating the throttle. A pending national game was logging the same non-actionable line ~100 times a day. It's now throttled on the *reason* (not the wording), so it appears once when the situation is first hit and again only if the reason changes (or every 6 hours as a heartbeat).
+
+### Changed
+- **A conflict that frees up too late now hunts for a replay instead of recording the scraps.** With one login and two overlapping games, the lower-priority game waits parked as a conflict; when the login frees, DVarr promoted it — even if only the last few minutes were left, so you'd get just the postgame. Now, if less than **50%** of the game remains when the slot frees, DVarr marks it Missed and opens a **replay-rescue ticket** to catch a re-air of the whole game (which is what you actually want when a conflict eats the start). Tunable under **Settings → Recording → "Conflict: min % of game left to record"** — set it to 0 to go back to recording whatever's left.
+
 ## [1.43.0] — 2026-07-21
 Still building that backend. The artwork proxy learns a couple of new tricks, and the aggregated feed now points at them. Nothing changes in the app you use today. 👀
 

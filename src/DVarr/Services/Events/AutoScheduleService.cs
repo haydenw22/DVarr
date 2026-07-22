@@ -440,6 +440,26 @@ public sealed class AutoScheduleService : BackgroundService
                 var winEndC = newEndC + r.PostPadS;
                 if (now >= winEndC) { await MarkConflictMissedAsync(db, r.Id, now); continue; } // window passed while parked
 
+                // Too little of the game left to be worth a fragment: if the credential frees when most of the event
+                // is already gone, promoting would capture only the tail (a user hit this recording just the 30-min
+                // postgame). Below the configured floor, mark it Missed instead — which opens a replay-rescue ticket to
+                // hunt for a re-air of the WHOLE game, which is what you actually want when a conflict eats the start.
+                // conflict_min_remaining_pct = 0 restores the old "record whatever's left" behaviour.
+                var minRemPct = Math.Clamp(await settings.GetIntAsync("conflict_min_remaining_pct"), 0, 100);
+                if (minRemPct > 0 && now > winStartC)
+                {
+                    var eventLenC = Math.Max(1, winEndC - winStartC);
+                    var remainingC = winEndC - now;
+                    if (remainingC * 100 < eventLenC * minRemPct)
+                    {
+                        var remMin = Math.Max(0, remainingC) / 60;
+                        await MarkConflictMissedAsync(db, r.Id, now,
+                            $"credential freed with only {remMin}m of the event left (< {minRemPct}%) — skipped the tail, hunting a replay instead");
+                        _log.LogInformation("[AutoSchedule] conflict {Id} '{Title}': only {Min}m left when the slot freed (< {Pct}%) → Missed + replay rescue, not a tail capture", r.Id, ev.Title, remMin, minRemPct);
+                        continue;
+                    }
+                }
+
                 var opts = await planner.OptionsForEventAsync(eid, ct);
                 var rank = RankOf(r);
                 var decision = planner.Decide(opts, winStartC, winEndC, rank, slots);
@@ -715,14 +735,15 @@ public sealed class AutoScheduleService : BackgroundService
     }
 
     /// <summary>A parked conflict whose whole window elapsed (both logins stayed busy throughout) → terminal Missed.</summary>
-    private async Task MarkConflictMissedAsync(DVarrDbContext db, int recId, long now)
+    private async Task MarkConflictMissedAsync(DVarrDbContext db, int recId, long now,
+        string reason = "conflict window elapsed (both logins busy throughout)")
     {
         await _gate.WriteAsync(async () =>
         {
             var r = await db.Recordings.FindAsync(recId);
             if (r is null || r.State != RecordingState.Conflict) return;
             r.State = RecordingState.Missed; r.UpdatedUtc = now;
-            r.FailureReason = "conflict window elapsed (both logins busy throughout)";
+            r.FailureReason = reason;
             db.Notifications.Add(new Notification { RecordingId = recId, TsUtc = now, Kind = NotificationKind.Missed, Severity = Severity.Critical, ToState = "Missed", Message = r.FailureReason });
             await db.SaveChangesAsync();
         });
@@ -733,7 +754,7 @@ public sealed class AutoScheduleService : BackgroundService
             await RescueService.TryOpenTicketAsync(
                 rescueScope.ServiceProvider.GetRequiredService<DVarrDbContext>(), _gate,
                 rescueScope.ServiceProvider.GetRequiredService<SettingsService>(),
-                recId, "conflict window elapsed (both logins busy)", _log);
+                recId, reason, _log);
         }
         catch (Exception ex) { _log.LogDebug(ex, "[AutoSchedule] rescue-ticket open failed for {Id}", recId); }
     }

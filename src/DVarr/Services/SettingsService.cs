@@ -123,6 +123,11 @@ public sealed class SettingsService
         // and no mapped channel's guide shows it, search the whole provider for a channel whose guide clearly shows the
         // matchup (BOTH teams) and record there instead. Same login only; requires the guide to actually list the game.
         ["national_fallback_enabled"] = "true",
+        // When a parked conflict's credential finally frees, only PROMOTE it if at least this % of the game still
+        // remains — otherwise capturing would net just the tail (e.g. the postgame). Below the floor the recording is
+        // marked Missed, which opens a replay-rescue ticket to hunt a re-air of the whole game. 0 = always record
+        // whatever's left (the pre-1.43.1 behaviour).
+        ["conflict_min_remaining_pct"] = "50",
         // When a recording's pre-roll attempt captures nothing (e.g. the channel isn't live yet), make ONE guaranteed
         // fresh attempt at the event's real start time. Never interrupts a recording that's already capturing.
         ["retry_at_event_start"] = "true",
