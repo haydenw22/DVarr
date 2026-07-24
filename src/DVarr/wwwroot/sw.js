@@ -2,7 +2,7 @@
 // DVarr service worker — makes the app installable + loads the shell instantly (and offline) over the VPN.
 // Strategy: stale-while-revalidate for the static app shell; the /api/* surface (live data, SSE, preview streams)
 // is NEVER cached or intercepted so the UI always shows real-time state. Bump VERSION on each release to purge old shells.
-const VERSION = 'dvarr-shell-v1.43.1';
+const VERSION = 'dvarr-shell-v1.44.0';
 const SHELL = [
   '/', '/index.html', '/styles.css',
   '/js/app.js', '/js/mpegts.js', '/js/hls.js',
