@@ -93,7 +93,7 @@ public sealed class ResolverService
                     double strong = 0, weak = 0;
                     foreach (var t in progTitles)
                     {
-                        var sim = Similarity(t, ev.Title);
+                        var sim = EventSimilarity(t, ev.Title, sideA, sideB);
                         if (ShowsBothTeams(t, sideA, sideB)) strong = Math.Max(strong, sim);
                         else weak = Math.Max(weak, sim);
                     }
@@ -171,6 +171,29 @@ public sealed class ResolverService
     {
         var ta = Tokens(a); var tb = Tokens(b);
         if (ta.Count == 0 || tb.Count == 0) return 0;
+        var inter = ta.Intersect(tb).Count();
+        var union = ta.Union(tb).Count();
+        return union == 0 ? 0 : (double)inter / union;
+    }
+
+    /// <summary>Similarity for an EVENT title, ignoring the tokens its two team names SHARE. Schedule sources name
+    /// teams formally — "Adelaide Football Club vs Collingwood Football Club" — while guides use short names
+    /// ("AFL Adelaide Crows vs Collingwood"). "football"/"club" sit on BOTH sides, so they can never prove a side
+    /// (ShowsBothTeams already refuses shared tokens as evidence), yet they dilute the Jaccard score of every real
+    /// match: that AFL fixture scored 0.43 and sat under the 0.5 pin-override bar while the game aired one channel
+    /// over. Stripping the shared tokens from both titles scores only the words that identify the matchup. For a
+    /// programme that names the teams the stripped score is never lower than the plain one (both sets shrink
+    /// together), while noise-only titles ("Football Club Show") drop toward 0 — strictly better in both
+    /// directions. Single-sided events (motorsport — EventSides returned one shared instance) have no side split,
+    /// so they keep the plain metric.</summary>
+    public static double EventSimilarity(string? progTitle, string? evTitle, HashSet<string> sideA, HashSet<string> sideB)
+    {
+        if (ReferenceEquals(sideA, sideB)) return Similarity(progTitle, evTitle);
+        var shared = new HashSet<string>(sideA); shared.IntersectWith(sideB);
+        if (shared.Count == 0) return Similarity(progTitle, evTitle);
+        var ta = Tokens(progTitle); ta.ExceptWith(shared);
+        var tb = Tokens(evTitle); tb.ExceptWith(shared);
+        if (ta.Count == 0 || tb.Count == 0) return Similarity(progTitle, evTitle); // stripping ate a whole title — fall back
         var inter = ta.Intersect(tb).Count();
         var union = ta.Union(tb).Count();
         return union == 0 ? 0 : (double)inter / union;

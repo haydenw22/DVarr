@@ -12,6 +12,16 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.44.0] — 2026-07-24
+Born from a real failure: with Fox 503 **and** 504 both pinned for AFL, the guide said Adelaide vs Collingwood was on 504 — and DVarr recorded four hours of golf on 503 without a word. Three fixes so that can't happen again.
+
+### Fixed
+- **Pinning two channels now means what you meant: "record whichever of these the guide says has the game."** The guide re-pick demanded a strong title match (0.50) before moving a recording off a pinned channel — even when the destination was *another pinned mapping of the same league*. Moving between two of your own pins now needs only the ordinary evidence gates (both team names proven in the guide title, the minimum match score, and the anti-flap hysteresis). The stronger bar still protects a pin against everything you *didn't* pin.
+- **Guide matching no longer penalises formal team names.** Schedule data names fixtures like "Adelaide Football Club vs Collingwood Football Club" while the guide says "AFL Adelaide Crows vs Collingwood". The filler words both team names share ("Football", "Club") can never prove which team is which — the matcher already refused them as evidence — yet they diluted the similarity score of every real match: that game scored 0.43, just under the pin bar. Match scoring now ignores tokens the two team names share, so the same guide title scores 0.60 — and team-noise titles ("Football Club Show") score *lower* than before, not higher. Applies everywhere the metric is used: the re-pick, the national-broadcast fallback, and replay-rescue matching.
+
+### Added
+- **A held pin is no longer silent.** When the guide says the game is on a channel the re-pick isn't allowed to move to, DVarr now says so — a throttled log line, plus a one-time warning notification on the recording naming both channels and the score, with the remedy in the message ("pin the other channel too if it should be eligible"). Previously that refusal left no trace while the sweep re-declined it every five minutes for eight hours straight.
+
 ## [1.43.1] — 2026-07-21
 Quietens a repetitive log line, and stops a conflicted game recording only its tail — hunting a replay instead.
 

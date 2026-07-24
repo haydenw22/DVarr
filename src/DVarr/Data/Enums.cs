@@ -61,6 +61,7 @@ public enum NotificationKind
     RetentionEvicted, // retention policy deleted one or more old recordings to reclaim space
     Retimed,          // the provider moved an event's start and DVarr retimed the pending recording to match
     NoGuideMatch,     // nothing in the lineup's guide shows this fixture — likely a national/streaming-only broadcast
+    PinHeldRepick,    // the guide shows the game on another channel, but the current channel's pin held (match below the override bar)
 }
 
 /// <summary>Lifecycle of a second-chance replay-rescue ticket (docs: automatic re-air rescue).</summary>

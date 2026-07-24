@@ -169,7 +169,7 @@ public sealed class RescueSweepService : BackgroundService
             {
                 var chan = byKey.GetValueOrDefault((p.SourceId, p.EpgChannelId));
                 if (chan is null) continue;
-                var score = ResolverService.Similarity(p.Title, query);
+                var score = ResolverService.EventSimilarity(p.Title, query, sideA, sideB);
                 if (twoSided)
                 {
                     if (score < MinTitleScore || !ResolverService.ShowsBothTeams(p.Title, sideA, sideB)) continue;

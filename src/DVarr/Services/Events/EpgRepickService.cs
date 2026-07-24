@@ -30,7 +30,7 @@ public sealed class EpgRepickService
     private const int BlankRefreshWindowS = 3600;      // only chase a blank guide when the event is this close (a blank guide days out is normal)
     private const int StaleEpgS = 12 * 3600;           // refresh the source's guide if its last good sync is older than this
     private const int RefreshCooldownS = 30 * 60;      // at most one opportunistic EPG refresh per source per 30 min
-    private const double PinOverrideScore = 0.5;       // a PINNED channel is only overridden by a STRONG both-team match elsewhere
+    private const double PinOverrideScore = 0.5;       // a PINNED channel is only overridden by a STRONG both-team match elsewhere — never applied between two pinned mappings of the same league
 
     // Per-source last opportunistic-refresh stamp (static: the service is scoped per tick/request).
     private static readonly ConcurrentDictionary<int, long> _lastRefresh = new();
@@ -104,8 +104,22 @@ public sealed class EpgRepickService
 
         if (best.ChannelId == rec.ChannelId) return false;                       // already on the guide's pick
         if (best.EpgScore < MinEpgScore || best.EpgScore < curEpg + Hysteresis) return false; // move only for a real guide reason
-        // Protect a PINNED current channel: only a strong, unambiguous both-team match elsewhere overrides the user's pin.
-        if (cur is { Pinned: true } && best.EpgScore < PinOverrideScore) return false;
+        // Protect a PINNED current channel — but only against channels the user did NOT pin. When the guide's pick
+        // is ITSELF another pinned mapping of this league, pinning both channels means "record whichever of these
+        // the guide says has the game" (this service's founding use-case, per the class doc) — the evidence gates
+        // above are the right bar and the stronger override bar must not apply. And when the pin DOES hold, say so:
+        // this refusal used to be completely silent. (Real failure: 'Adelaide Football Club vs Collingwood Football
+        // Club' matched pinned Fox 504's guide at 0.43 with both teams proven, sat under the 0.5 bar, and rank-1
+        // pinned Fox 503 recorded four hours of golf with nothing in the log or notifications.)
+        if (cur is { Pinned: true } && !best.Pinned && best.EpgScore < PinOverrideScore)
+        {
+            var heldName = (await _db.Channels.FindAsync(new object?[] { rec.ChannelId }, ct))?.Name ?? $"#{rec.ChannelId}";
+            if (ShouldLogDecline(rec.Id, "pin-holds-mapped-move"))
+                _log.LogInformation("[EpgRepick] pin holds '{Title}' on {Cur}: the guide suggests '{Best}' (EPG {Score:0.00}) but that channel isn't pinned and the match is below the {Bar:0.00} needed to move off a pin",
+                    ev.Title, heldName, best.ChannelName, best.EpgScore, PinOverrideScore);
+            await NotifyPinHeldOnceAsync(rec, ev, best, heldName, ct);
+            return false;
+        }
 
         var fromName = (await _db.Channels.FindAsync(new object?[] { rec.ChannelId }, ct))?.Name ?? $"#{rec.ChannelId}";
         var moved = false;
@@ -222,11 +236,40 @@ public sealed class EpgRepickService
     /// every guide refresh, so keying on the text defeated the throttle and re-logged the same dead end every sweep.</param>
     private void LogDecline(int recordingId, string title, string key, string reason)
     {
+        if (ShouldLogDecline(recordingId, key))
+            _log.LogInformation("[EpgRepick] no national-broadcast alternative for '{Title}': {Reason}", title, reason);
+    }
+
+    /// <summary>The decline throttle alone (same category → quiet until it changes, or a 6h heartbeat), for decline
+    /// paths whose message doesn't fit the national-fallback template above.</summary>
+    private bool ShouldLogDecline(int recordingId, string key)
+    {
         var now = EpochTime.Now();
         var prev = _lastDecline.TryGetValue(recordingId, out var pv) ? pv : default;
-        if (prev.Key == key && now - prev.At < DeclineHeartbeatS) return;   // same category → quiet until it changes (or a 6h heartbeat)
+        if (prev.Key == key && now - prev.At < DeclineHeartbeatS) return false;
         _lastDecline[recordingId] = (key, now);
-        _log.LogInformation("[EpgRepick] no national-broadcast alternative for '{Title}': {Reason}", title, reason);
+        return true;
+    }
+
+    /// <summary>Surface, ONCE per recording, that the guide shows the game on another channel but the current
+    /// channel's pin held. A pin holding is the user's own instruction being followed — Info-level machinery — but
+    /// it's also the one situation where DVarr knowingly records a channel the guide disagrees with, so it must be
+    /// visible: a Warn notification naming both channels and the score, with the remedy (pin the other channel too)
+    /// in the message.</summary>
+    private async Task NotifyPinHeldOnceAsync(Data.Entities.Recording rec, Event ev, ResolvedChannel best, string heldName, CancellationToken ct)
+    {
+        // Once per recording: the re-pick sweep re-runs every tick.
+        if (await _db.Notifications.AnyAsync(n => n.RecordingId == rec.Id && n.Kind == NotificationKind.PinHeldRepick, ct)) return;
+        var now = EpochTime.Now();
+        await _gate.WriteAsync(async () =>
+        {
+            _db.Notifications.Add(new Notification
+            {
+                RecordingId = rec.Id, TsUtc = now, Kind = NotificationKind.PinHeldRepick, Severity = Severity.Warn,
+                Message = $"the guide suggests '{ev.Title}' is on '{best.ChannelName}' (match {best.EpgScore:0.00}), but '{heldName}' is pinned and the match is below the {PinOverrideScore:0.00} needed to move off a pin — recording '{heldName}'; pin '{best.ChannelName}' too if it should be eligible",
+            });
+            await _db.SaveChangesAsync(ct);
+        }, ct);
     }
 
     // Mirrors AutoScheduleService.SlotHolding: the states that occupy a credential's single stream slot. Used to
@@ -300,7 +343,7 @@ public sealed class EpgRepickService
         // question); a cross-credential candidate must have that login free for the whole padded window.
         var titleHits = progs
             .Where(p => ResolverService.ShowsBothTeams(p.Title, sideA, sideB))
-            .Select(p => new { p, sim = ResolverService.Similarity(p.Title, ev.Title), ch = byEpg.GetValueOrDefault((p.SourceId, p.EpgChannelId.ToUpperInvariant())) })
+            .Select(p => new { p, sim = ResolverService.EventSimilarity(p.Title, ev.Title, sideA, sideB), ch = byEpg.GetValueOrDefault((p.SourceId, p.EpgChannelId.ToUpperInvariant())) })
             .Where(x => x.ch.Id != 0)
             .OrderByDescending(x => x.ch.SourceId == rec.SourceId).ThenByDescending(x => x.sim)
             .ToList();
@@ -356,7 +399,7 @@ public sealed class EpgRepickService
             {
                 if (p.Title is null || PlaceholderRx.IsMatch(p.Title)) continue;
                 if (!TokenSet(p.Title).Overlaps(corroborate)) continue;   // guide must look like this sport/league/fixture
-                netCands.Add((c.Id, c.SourceId, c.StreamId, c.Name, network, netScore, p.Title, ResolverService.Similarity(p.Title, ev.Title)));
+                netCands.Add((c.Id, c.SourceId, c.StreamId, c.Name, network, netScore, p.Title, ResolverService.EventSimilarity(p.Title, ev.Title, sideA, sideB)));
             }
         }
         if (netCands.Count == 0)
