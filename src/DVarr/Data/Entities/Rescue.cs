@@ -35,8 +35,18 @@ public class RescueTicket
     /// <summary>Give up (→ GaveUp) once now passes this with no re-air found.</summary>
     public long ExpiresUtc { get; set; }
 
-    /// <summary>The scheduled replay recording, once one is armed. Null while still hunting.</summary>
+    /// <summary>The scheduled replay/catch-up recording, once one is armed. Null while still hunting.</summary>
     public int? ReplayRecordingId { get; set; }
+
+    /// <summary>How many provider-archive (catch-up) pulls this ticket has already scheduled. After
+    /// <see cref="RescueSweepService"/>'s per-ticket cap, the sweep stops trying the archive and hunts
+    /// re-airs only — a provider whose archive is broken must not be re-pulled forever.</summary>
+    public int CatchupAttempts { get; set; }
+
+    /// <summary>True when the copy that opened this ticket is suspect (recorded with no guide corroboration):
+    /// a catch-up pull must then come from a guide-VERIFIED airing — re-pulling the same uncorroborated
+    /// channel/window would just download the same wrong programme again.</summary>
+    public bool RequireCorroborated { get; set; }
     /// <summary>Search every channel on the mapped sources, not just the league's mapped channels.</summary>
     public bool WholeSource { get; set; }
     /// <summary>Why the ticket opened (failure reason) / latest sweep note.</summary>

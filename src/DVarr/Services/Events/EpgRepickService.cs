@@ -88,6 +88,12 @@ public sealed class EpgRepickService
         var cur = all.FirstOrDefault(c => c.ChannelId == rec.ChannelId);
         var curEpg = cur?.EpgScore ?? 0;
 
+        // Maintain the recording's guide-corroboration flag: does the CURRENT channel's guide actually show this
+        // fixture? Re-evaluated every sweep (the guide firms up over time) and frozen once the capture arms. A
+        // recording that finalizes Done with the flag still set very likely captured the wrong programme — the
+        // finalize path then opens a rescue ticket that keeps hunting a guide-verified copy (v1.45).
+        await UpdateUncorroboratedFlagAsync(rec, ev, ct);
+
         // National-broadcast fallback: when NO mapped channel actually shows this game (best mapped EPG match is
         // weak/zero — EpgScore now only counts a both-team match), the game may be on a channel the user didn't map
         // (e.g. ESPN, NBC). Search the whole lineup — every enabled credential — for a both-team match, then for a
@@ -143,6 +149,11 @@ public sealed class EpgRepickService
         }, ct);
         if (!moved) return false;
 
+        // The move landed on a channel whose guide POSITIVELY shows the fixture (that's what EpgScore gates mean) —
+        // clear the corroboration flag computed for the OLD channel, or an arm-time move would freeze a stale
+        // "uncorroborated" verdict onto a correct capture and trigger a bogus post-completion re-hunt.
+        await SetUncorroboratedAsync(recordingId, false, ct);
+
         // RecordingRepoint bypasses the change tracker, so the tracked `rec` is stale — detach it so a caller in the
         // SAME scope (e.g. RecorderService.TryStartAsync re-loading the row) reads the re-pointed values from the DB.
         _db.Entry(rec).State = Microsoft.EntityFrameworkCore.EntityState.Detached;
@@ -160,6 +171,62 @@ public sealed class EpgRepickService
             .Select(c => !string.IsNullOrEmpty(c.EpgChannelId) ? c.EpgChannelId : c.MatchedEpgId)
             .Where(e => !string.IsNullOrEmpty(e)).Select(e => e!).Distinct().ToList();
     }
+
+    /// <summary>Whether the recording's CURRENT channel's guide shows this fixture — the same evidence bar the
+    /// resolver uses (both teams proven + a plausible title match). Works for unmapped (nationally-moved) channels
+    /// too, which the mapped ladder can't score. Returns TRUE (shows it), FALSE (guide has programmes over the
+    /// window but none match — i.e. the guide CONTRADICTS the capture), or NULL (unknowable: no EPG linkage, or
+    /// no guide data over the window at all — a blank guide is not evidence of a wrong channel).</summary>
+    private async Task<bool?> CurrentChannelShowsFixtureAsync(Data.Entities.Recording rec, Event ev, CancellationToken ct)
+    {
+        var ch = await _db.Channels.AsNoTracking().FirstOrDefaultAsync(c => c.Id == rec.ChannelId, ct);
+        var eid = !string.IsNullOrEmpty(ch?.EpgChannelId) ? ch!.EpgChannelId : ch?.MatchedEpgId;
+        if (ch is null || string.IsNullOrEmpty(eid)) return null;
+        var winEnd = ev.StartUtc + (ev.StartIsDateOnly ? 86400 : 1800);
+        var titles = await _db.Programmes.AsNoTracking()
+            .Where(p => p.SourceId == ch.SourceId && p.EpgChannelId == eid && p.StartUtc <= winEnd && p.StopUtc >= ev.StartUtc)
+            .OrderBy(p => p.StartUtc).Select(p => p.Title).Take(50).ToListAsync(ct);
+        if (titles.Count == 0) return null;
+        var (sideA, sideB) = ResolverService.EventSides(ev.Title);
+        foreach (var t in titles)
+        {
+            if (!ResolverService.ShowsBothTeams(t, sideA, sideB)) continue;
+            if (ResolverService.EventSimilarity(t, ev.Title, sideA, sideB) >= MinEpgScore) return true;
+        }
+        return false;
+    }
+
+    /// <summary>Set/clear <see cref="Data.Entities.Recording.GuideUncorroborated"/> from the current channel's
+    /// guide. Flagged ONLY when the guide positively contradicts the capture (data present, no match) — a channel
+    /// with no EPG linkage or a blank window is unknowable and never flagged, or every correct capture on an
+    /// EPG-less channel would trigger a bogus re-hunt. Pending, unlocked recordings only; written via a
+    /// tracker-bypassing update so nothing else on this scoped context is flushed as a side effect.</summary>
+    private async Task UpdateUncorroboratedFlagAsync(Data.Entities.Recording rec, Event ev, CancellationToken ct)
+    {
+        try
+        {
+            var shouldFlag = await CurrentChannelShowsFixtureAsync(rec, ev, ct) == false;
+            if (rec.GuideUncorroborated == shouldFlag) return;
+            await SetUncorroboratedAsync(rec.Id, shouldFlag, ct);
+            rec.GuideUncorroborated = shouldFlag; // keep the in-memory copy honest for this sweep's later checks
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex) { _log.LogDebug(ex, "[EpgRepick] corroboration flag update failed for {Id}", rec.Id); }
+    }
+
+    /// <summary>Gate-written, tracker-bypassing flag write with a FRESH state check (the tracked entity's values
+    /// are stale under EF's identity map). Pending + unlocked only — an armed capture's flag is frozen.</summary>
+    private Task SetUncorroboratedAsync(int recordingId, bool value, CancellationToken ct)
+        => _gate.WriteAsync(async () =>
+        {
+            var state = await _db.Recordings.AsNoTracking().Where(r => r.Id == recordingId)
+                .Select(r => new { r.State, r.ChannelLocked }).FirstOrDefaultAsync(ct);
+            if (state is null || state.State != RecordingState.Pending || state.ChannelLocked) return;
+            await _db.Recordings.Where(r => r.Id == recordingId)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(r => r.GuideUncorroborated, value)
+                    .SetProperty(r => r.UpdatedUtc, EpochTime.Now()), ct);
+        }, ct);
 
     /// <summary>True when no channel mapped to the event's league (on this credential) has ANY programme overlapping
     /// the event window — i.e. the guide can't see the event yet (stale/blank), as opposed to merely not matching.</summary>
@@ -364,7 +431,8 @@ public sealed class EpgRepickService
             if (hit.ch.SourceId != rec.SourceId && !await SlotFreeAsync(hit.ch.SourceId, rec, ct))
             { LogDecline(rec.Id, ev.Title, "other-login-busy", $"'{hit.ch.Name}' on your other login shows the game, but that login is busy for this window"); continue; }
             return await MoveToAsync(rec, ev, mapped, mappedLadder, (hit.ch.Id, hit.ch.SourceId, hit.ch.StreamId, hit.ch.Name), now,
-                $"national broadcast: '{ev.Title}' is on '{hit.ch.Name}'{(hit.ch.SourceId == rec.SourceId ? "" : " (your other login)")} — recording moved there", ct);
+                $"national broadcast: '{ev.Title}' is on '{hit.ch.Name}'{(hit.ch.SourceId == rec.SourceId ? "" : " (your other login)")} — recording moved there", ct,
+                corroborated: true); // pass 1 = the destination's guide names both teams
         }
         if (titleHits.Count > 0) return false; // every both-team candidate sat on a busy login (each decline logged)
 
@@ -417,7 +485,8 @@ public sealed class EpgRepickService
             if (cand.SourceId != rec.SourceId && !await SlotFreeAsync(cand.SourceId, rec, ct))
             { LogDecline(rec.Id, ev.Title, "other-login-busy-net", $"'{cand.Name}' on your other login matches {cand.Network}, but that login is busy for this window"); continue; }
             return await MoveToAsync(rec, ev, mapped, mappedLadder, (cand.Id, cand.SourceId, cand.StreamId, cand.Name), now,
-                $"national broadcast: '{ev.Title}' is listed on {cand.Network} — moved to '{cand.Name}'{(cand.SourceId == rec.SourceId ? "" : " (your other login)")}, whose guide shows '{cand.Prog}'", ct);
+                $"national broadcast: '{ev.Title}' is listed on {cand.Network} — moved to '{cand.Name}'{(cand.SourceId == rec.SourceId ? "" : " (your other login)")}, whose guide shows '{cand.Prog}'", ct,
+                corroborated: false); // pass 2 = network-name evidence only; the completion re-hunt stays armed
         }
         return false; // every network-named candidate sat on a busy login (each decline logged)
     }
@@ -445,7 +514,7 @@ public sealed class EpgRepickService
     /// while the recording is already on the national pick.</summary>
     private async Task<bool> MoveToAsync(Data.Entities.Recording rec, Event ev, List<int> mappedRankOrder,
         List<ResolvedChannel> mappedLadder, (int Id, int SourceId, int StreamId, string Name) target, long now,
-        string message, CancellationToken ct)
+        string message, CancellationToken ct, bool corroborated = true)
     {
         var moved = false;
         await _gate.WriteAsync(async () =>
@@ -477,6 +546,10 @@ public sealed class EpgRepickService
         }, ct);
         if (moved)
         {
+            // Re-anchor the corroboration flag to the DESTINATION: a both-team (pass 1) landing spot is proven by
+            // the guide; a network-name (pass 2) guess keeps the flag so the post-completion verification re-hunt
+            // stays armed. Without this an arm-time move freezes the OLD channel's verdict onto the capture.
+            await SetUncorroboratedAsync(rec.Id, !corroborated, ct);
             _db.Entry(rec).State = Microsoft.EntityFrameworkCore.EntityState.Detached;
             _log.LogInformation("[EpgRepick] national fallback: '{Title}' → {Chan} on credential {Src}", ev.Title, target.Name, target.SourceId);
         }

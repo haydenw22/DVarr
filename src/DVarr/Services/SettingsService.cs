@@ -149,6 +149,20 @@ public sealed class SettingsService
         ["replay_rescue_whole_source"] = "false",
         ["replay_rescue_give_up_days"] = "3",
         ["replay_rescue_interval_s"] = "900",
+        // Catch-up (provider tv_archive) support: when ON, the rescue sweep first tries to pull a failed/missed game
+        // straight from an archive-enabled channel (immediate, faster-than-realtime) before hunting re-airs, and the
+        // guide offers "Record from catch-up" on past programmes of archive-enabled channels. chunk_minutes bounds a
+        // single timeshift request (providers commonly cap one request at ~2h; chunks are stitched at finalize).
+        ["catchup_enabled"] = "true",
+        ["catchup_chunk_minutes"] = "60",
+        // A live recording may stop a RUNNING Opportunistic capture (rescue replay / catch-up pull) to take the
+        // login's single slot: replays and archive pulls can always be re-hunted, the live broadcast cannot. The
+        // preempted capture is discarded (not finalized) and its rescue ticket re-opens automatically.
+        ["live_preempts_opportunistic"] = "true",
+        // A recording that completes with NOTHING in the guide ever corroborating the fixture on its channel very
+        // likely captured the wrong programme. When ON, such completions open a rescue ticket that hunts a
+        // guide-VERIFIED copy (archive or re-air); cancel the hunt from Recordings if the capture was fine.
+        ["rescue_uncorroborated_enabled"] = "true",
         // Disk-space guardrails: warn (never block) when a filesystem is under its free floor, or when a new recording
         // is projected to push it under. GB; 0 = that floor disabled. Media = the final library volume; segments = the
         // in-flight capture scratch (may be a different filesystem — the guardrail checks both).

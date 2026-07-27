@@ -73,6 +73,21 @@ public class Recording
     /// that produced it (and marks it as a replay in the UI). Null for a normal recording.</summary>
     public int? RescueTicketId { get; set; }
 
+    /// <summary>CATCH-UP capture: the archive position (epoch s, UTC) this recording pulls from the provider's
+    /// tv_archive instead of the live stream. Non-null switches the recorder to the timeshift URL + fast
+    /// (non-realtime) download path. StartUtc/EndUtc stay the WALL-CLOCK window the pull runs in (set to "now",
+    /// so scheduling, boot recovery and the UI treat it like any other due recording).</summary>
+    public long? CatchupSourceStartUtc { get; set; }
+
+    /// <summary>CATCH-UP capture: how many seconds of archive to pull, starting at CatchupSourceStartUtc.</summary>
+    public int? CatchupDurationS { get; set; }
+
+    /// <summary>True while nothing in the lineup's guide corroborates this fixture on the recorded channel (set and
+    /// cleared by the EPG re-pick sweep pre-air, frozen at finalize). A Done copy with this flag is NOT counted as a
+    /// "good copy" by replay rescue — the capture very likely recorded the wrong programme, so a rescue ticket keeps
+    /// hunting for a guide-verified airing until the user cancels it or a verified copy lands.</summary>
+    public bool GuideUncorroborated { get; set; }
+
     public long CreatedUtc { get; set; }
     public long UpdatedUtc { get; set; }
 

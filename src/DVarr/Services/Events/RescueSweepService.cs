@@ -19,6 +19,7 @@ public sealed class RescueSweepService : BackgroundService
 {
     private readonly IServiceScopeFactory _scopes;
     private readonly DbWriteGate _gate;
+    private readonly Recording.RecorderService _recorder;
     private readonly ILogger<RescueSweepService> _log;
 
     private const double MinTitleScore = 0.30;         // an EPG programme must actually look like the event
@@ -28,8 +29,8 @@ public sealed class RescueSweepService : BackgroundService
     private const int RefreshCooldownS = 30 * 60;      // at most one opportunistic EPG refresh per source per 30 min
     private static readonly ConcurrentDictionary<int, long> _lastRefresh = new();
 
-    public RescueSweepService(IServiceScopeFactory scopes, DbWriteGate gate, ILogger<RescueSweepService> log)
-    { _scopes = scopes; _gate = gate; _log = log; }
+    public RescueSweepService(IServiceScopeFactory scopes, DbWriteGate gate, Recording.RecorderService recorder, ILogger<RescueSweepService> log)
+    { _scopes = scopes; _gate = gate; _recorder = recorder; _log = log; }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -80,6 +81,30 @@ public sealed class RescueSweepService : BackgroundService
             if (await RescueService.HasGoodCopyAsync(db, t.EventId, ct))
             {
                 await UpdateTicketAsync(db, t.Id, x => { x.State = RescueTicketState.Closed; x.Note = "a good copy landed"; }, ct);
+                // Cancel the not-yet-started replay/catch-up this ticket had scheduled — closing the ticket alone
+                // used to ORPHAN it: the pending replay stayed armed, seized the login at air time and re-recorded
+                // a game whose good copy (sometimes already watched and deleted) had landed hours earlier. A
+                // capture that is already running is left alone (it settles as the good copy itself, or fails and
+                // is moot — the ticket is closed either way).
+                if (t.State == RescueTicketState.Scheduled && t.ReplayRecordingId is { } orphanId
+                    && !_recorder.IsActive(orphanId)) // an arming/armed replay is mid-flight — its supervisor owns the state row
+                {
+                    var cancelled = false;
+                    await _gate.WriteAsync(async () =>
+                    {
+                        var rep = await db.Recordings.FindAsync(new object?[] { orphanId }, ct);
+                        if (rep is not null && rep.State is RecordingState.Pending or RecordingState.Conflict)
+                        {
+                            rep.State = RecordingState.Cancelled;
+                            rep.FailureReason = "rescue closed — a good copy of the game already landed";
+                            rep.UpdatedUtc = now;
+                            cancelled = true;
+                        }
+                        await db.SaveChangesAsync(ct);
+                    }, ct);
+                    if (cancelled)
+                        _log.LogInformation("[Rescue] ticket {Id}: cancelled the scheduled replay (recording {Rep}) — a good copy of '{Title}' already landed", t.Id, orphanId, t.Title);
+                }
                 await NotifyAsync(db, t.RecordingId, NotificationKind.ReplayScheduled, Severity.Info,
                     $"replay rescue closed — a good copy of “{t.Title}” is now in the library", now, ct);
                 continue;
@@ -90,10 +115,15 @@ public sealed class RescueSweepService : BackgroundService
                 // Replay failed / was cancelled → hunt again (unless we're already past the deadline).
                 if (rep is null || rep.State is RecordingState.NeedsAttention or RecordingState.Missed or RecordingState.Cancelled)
                 {
+                    // A live-preempted catch-up pull never contacted the archive — refund its attempt so two busy
+                    // evenings can't exhaust the archive path without a single real failure.
+                    var refund = rep is { CatchupSourceStartUtc: not null }
+                                 && (rep.FailureReason ?? "").Contains("preempted", StringComparison.OrdinalIgnoreCase);
                     if (now > t.ExpiresUtc) await ExpireAsync(db, t, now, ct);
                     else await UpdateTicketAsync(db, t.Id, x =>
                     {
                         x.State = RescueTicketState.Open; x.ReplayRecordingId = null; x.NextSweepUtc = now;
+                        if (refund) x.CatchupAttempts = Math.Max(0, x.CatchupAttempts - 1);
                         x.Note = "the scheduled replay failed — hunting again";
                     }, ct);
                 }
@@ -116,7 +146,12 @@ public sealed class RescueSweepService : BackgroundService
             .Select(m => m.ChannelId).Distinct().ToListAsync(ct);
         if (mapped.Count == 0) { await BumpAsync(db, t.Id, now + interval, now, "no channels mapped to this league", ct); return; }
 
-        var mappedChans = await db.Channels.AsNoTracking().Where(c => mapped.Contains(c.Id) && c.Enabled).ToListAsync(ct);
+        // Disabled SOURCES are off-limits (the recorder refuses to contact them), so scheduling a replay or a
+        // catch-up pull there would just sit Pending until Missed — burning the ticket's attempts/deadline on a
+        // login that can never serve it.
+        var enabledSourceIds = (await db.Sources.AsNoTracking().Where(s => s.Enabled).Select(s => s.Id).ToListAsync(ct)).ToHashSet();
+        var mappedChans = (await db.Channels.AsNoTracking().Where(c => mapped.Contains(c.Id) && c.Enabled).ToListAsync(ct))
+            .Where(c => enabledSourceIds.Contains(c.SourceId)).ToList();
         var sourceIds = mappedChans.Select(c => c.SourceId).Distinct().ToList();
         var candidates = t.WholeSource
             ? await db.Channels.AsNoTracking().Where(c => sourceIds.Contains(c.SourceId) && c.Enabled).ToListAsync(ct)
@@ -148,6 +183,11 @@ public sealed class RescueSweepService : BackgroundService
         var query = string.IsNullOrWhiteSpace(t.MatchQuery) ? t.Title : t.MatchQuery;
         var (sideA, sideB) = ResolverService.EventSides(query);
         var twoSided = !ReferenceEquals(sideA, sideB);
+
+        // ---- Catch-up first (v1.45): before waiting days for a re-air, try pulling the finished game straight
+        // from the provider's tv_archive. Immediate, and it can't collide with live games (Opportunistic + the
+        // live-preempt rule). Falls through to the re-air hunt when no archive-enabled channel can serve it.
+        if (await TryCatchupAsync(scope, db, t, byKey, query, sideA, sideB, twoSided, now, ct)) return;
 
         // Page through the WHOLE window by keyset instead of scoring an arbitrary 400-row prefix — with
         // whole-source search enabled, early unrelated programmes used to crowd the real re-air out of the
@@ -227,6 +267,120 @@ public sealed class RescueSweepService : BackgroundService
         }, ct);
         _log.LogInformation("[Rescue] ticket {Id}: scheduled replay of '{Title}' on {Chan} at {When} (score {Score:0.00})",
             ticketId, t.Title, ch.Name, best.P.StartUtc, best.Score);
+    }
+
+    private const int MaxCatchupAttempts = 2;      // archive pulls per ticket before falling back to re-airs only
+    private const int CatchupIndexLagS = 600;      // providers index the archive shortly after air — don't pull early
+    private const int CatchupMaxPullS = 8 * 3600;  // runaway cap on a single pull
+    private const int CatchupHeadPadS = 120;       // archive head-room before the listed/event start
+    private const int CatchupTailPadS = 600;       // …and after the listed/event end (post-game handshakes)
+
+    /// <summary>Try to serve this ticket from the provider's catch-up archive: find a channel whose tv_archive
+    /// still covers the game — preferring one whose guide HISTORY (7-day retention) corroborates that the fixture
+    /// actually aired there, falling back to the original recording's channel when the ticket allows
+    /// uncorroborated pulls — and schedule an immediate fast archive download. Returns true when a pull was
+    /// scheduled (the sweep stops for this ticket; settle re-opens it if the pull fails).</summary>
+    private async Task<bool> TryCatchupAsync(IServiceScope scope, DVarrDbContext db, RescueTicket t,
+        Dictionary<(int Source, string Epg), Channel> byKey, string query,
+        HashSet<string> sideA, HashSet<string> sideB, bool twoSided, long now, CancellationToken ct)
+    {
+        var settings = scope.ServiceProvider.GetRequiredService<SettingsService>();
+        if (!await settings.GetBoolAsync("catchup_enabled")) return false;
+        if (t.CatchupAttempts >= MaxCatchupAttempts) return false;
+        if (now < t.EventEndUtc + CatchupIndexLagS) return false;
+
+        var winStart = t.EventStartUtc - 1800;
+        var winEnd = t.EventEndUtc + 1800;
+
+        // The archive must still hold the game's start (with an hour of safety so a pull can't fall off the
+        // window's trailing edge mid-download).
+        bool ArchiveCovers(Channel c) =>
+            c.TvArchive && (c.TvArchiveDuration ?? 0) > 0
+            && t.EventStartUtc >= now - (long)c.TvArchiveDuration!.Value * 86400 + 3600;
+
+        (Channel Chan, long PullStart, long PullEnd, double Sim, bool Corroborated)? best = null;
+
+        foreach (var kv in byKey)
+        {
+            var chan = kv.Value;
+            if (!ArchiveCovers(chan)) continue;
+            var progs = await db.Programmes.AsNoTracking()
+                .Where(p => p.SourceId == chan.SourceId && p.EpgChannelId == kv.Key.Epg && p.StopUtc > winStart && p.StartUtc < winEnd)
+                .OrderBy(p => p.StartUtc).Select(p => new { p.StartUtc, p.StopUtc, p.Title }).Take(50).ToListAsync(ct);
+            foreach (var p in progs)
+            {
+                var score = ResolverService.EventSimilarity(p.Title, query, sideA, sideB);
+                if (twoSided)
+                {
+                    if (score < MinTitleScore || !ResolverService.ShowsBothTeams(p.Title, sideA, sideB)) continue;
+                }
+                else if (score < MinSingleSidedScore) continue;
+                if (best is null || score > best.Value.Sim)
+                    best = (chan, p.StartUtc - CatchupHeadPadS, Math.Max(p.StopUtc, t.EventEndUtc) + CatchupTailPadS, score, true);
+            }
+        }
+
+        // No guide-history corroboration anywhere — pull the ORIGINAL recording's channel over the event window,
+        // unless this ticket demands a verified airing (an uncorroborated completion re-pulling the same channel
+        // would just download the same wrong programme again).
+        if (best is null && !t.RequireCorroborated)
+        {
+            var origChannelId = await db.Recordings.AsNoTracking().Where(r => r.Id == t.RecordingId)
+                .Select(r => (int?)r.ChannelId).FirstOrDefaultAsync(ct);
+            if (origChannelId is { } ocid)
+            {
+                var oc = byKey.Values.FirstOrDefault(c => c.Id == ocid)
+                         ?? await db.Channels.AsNoTracking().FirstOrDefaultAsync(c => c.Id == ocid && c.Enabled
+                                && db.Sources.Any(s => s.Id == c.SourceId && s.Enabled), ct);
+                if (oc is not null && oc.Enabled && ArchiveCovers(oc))
+                    best = (oc, t.EventStartUtc - CatchupHeadPadS, t.EventEndUtc + CatchupTailPadS, 0, false);
+            }
+        }
+        if (best is null) return false;
+
+        var pick = best.Value;
+        var pullStart = Math.Max(pick.PullStart, now - (long)(pick.Chan.TvArchiveDuration ?? 1) * 86400);
+        var pullEnd = Math.Min(pick.PullEnd, now - 60); // never ask the archive for the future
+        if (pullEnd - pullStart < 600) return false;    // nothing meaningful left to pull
+        var pullDur = (int)Math.Min(pullEnd - pullStart, CatchupMaxPullS);
+
+        var scheduled = false;
+        await _gate.WriteAsync(async () =>
+        {
+            var fresh = await db.RescueTickets.FirstOrDefaultAsync(x => x.Id == t.Id, ct);
+            if (fresh is null || fresh.State != RescueTicketState.Open) return;
+            var rep = new RecordingEntity
+            {
+                EventId = t.EventId, ChannelId = pick.Chan.Id, SourceId = pick.Chan.SourceId, StreamId = pick.Chan.StreamId,
+                // EndUtc = the pull's wall-clock timeout: slack for ~1x-realtime archives / arm latency / shape
+                // probing (a clean chunk-exhaustion still ends the pull early).
+                StartUtc = now, EndUtc = now + pullDur + Math.Max(1800, pullDur / 2), PrePadS = 0, PostPadS = 0,
+                Title = t.Title, MatchQuery = t.MatchQuery, Priority = RecordingPriority.Opportunistic,
+                ChannelLocked = true, RescueTicketId = t.Id, State = RecordingState.Pending,
+                CatchupSourceStartUtc = pullStart, CatchupDurationS = pullDur,
+                CreatedUtc = now, UpdatedUtc = now,
+            };
+            db.Recordings.Add(rep);
+            await db.SaveChangesAsync(ct);
+            fresh.State = RescueTicketState.Scheduled;
+            fresh.ReplayRecordingId = rep.Id;
+            fresh.CatchupAttempts++;
+            fresh.LastSweepUtc = now;
+            fresh.Note = pick.Corroborated
+                ? $"pulling from {pick.Chan.Name}'s catch-up archive (guide-verified airing)"
+                : $"pulling from {pick.Chan.Name}'s catch-up archive (event window — no guide listing to verify against)";
+            db.Notifications.Add(new Notification
+            {
+                RecordingId = t.RecordingId, TsUtc = now, Kind = NotificationKind.ReplayScheduled, Severity = Severity.Info,
+                Message = $"pulling “{t.Title}” from {pick.Chan.Name}'s catch-up archive ({pullDur / 60} min) — downloading now",
+            });
+            await db.SaveChangesAsync(ct);
+            scheduled = true;
+        }, ct);
+        if (scheduled)
+            _log.LogInformation("[Rescue] ticket {Id}: scheduled catch-up pull of '{Title}' from {Chan} (archive {Start}, {Min} min, {Ver})",
+                t.Id, t.Title, pick.Chan.Name, pullStart, pullDur / 60, pick.Corroborated ? $"guide-verified {pick.Sim:0.00}" : "unverified window");
+        return scheduled;
     }
 
     /// <summary>Opportunistically refresh a source's guide when it's stale (&gt;12h), rate-limited to once/30min per

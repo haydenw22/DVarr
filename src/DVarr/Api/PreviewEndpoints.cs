@@ -28,6 +28,16 @@ public static class PreviewEndpoints
             // Off-limits guard: never stream from a disabled source.
             if (!src.Enabled) { ctx.Response.StatusCode = 403; await ctx.Response.WriteAsJsonAsync(new { error = "source_disabled", message = $"{src.Label} is disabled (off-limits)." }); return; }
 
+            // This endpoint proxies RAW MPEG-TS bytes to mpegts.js. An HLS-effective source would hand back an
+            // .m3u8 PLAYLIST here — text the player can't parse, whose segment URIs embed the provider credentials
+            // this proxy exists to hide. Refuse with 409 so the client falls back to the server transcode (whose
+            // ffmpeg input handles HLS natively).
+            if (string.IsNullOrWhiteSpace(ch.DirectUrl) && XtreamClient.EffectiveStreamExt(src) == "m3u8")
+            {
+                ctx.Response.StatusCode = 409;
+                await ctx.Response.WriteAsJsonAsync(new { error = "hls_source", message = "this source streams HLS — preview uses the transcoder" });
+                return;
+            }
             var directUrl = ch.DirectUrl;
             var upstreamUrl = !string.IsNullOrWhiteSpace(directUrl) ? directUrl! : xtream.StreamTsUrl(src, ch.StreamId);
             var needsLease = string.IsNullOrWhiteSpace(directUrl); // a provider stream uses the 1 slot; a DirectUrl/test channel does not

@@ -29,6 +29,21 @@ public class ProviderSource
     /// <summary>Optional HTTP user-agent override for provider requests.</summary>
     public string? UserAgent { get; set; }
 
+    /// <summary>Live-stream container for this source: "auto" (default — .ts when the provider allows it, else
+    /// HLS), "ts" (force MPEG-TS), or "hls" (force .m3u8). HLS matters for proxies/providers that only serve —
+    /// or are only stable over — HLS; the recorder adapts its ffmpeg input flags to match.</summary>
+    public string StreamFormat { get; set; } = "auto";
+
+    /// <summary>Which Xtream archive URL shape this provider answers, discovered on the first successful catch-up
+    /// pull: "timeshift_php" (/streaming/timeshift.php?…&amp;start=…&amp;duration=…) or "timeshift_path"
+    /// (/timeshift/{user}/{pass}/{min}/{start}/{id}.ts). Null = not probed yet (the recorder tries both).</summary>
+    public string? CatchupShape { get; set; }
+
+    /// <summary>The provider's own timezone (server_info.timezone from player_api), e.g. "Europe/London".
+    /// Xtream timeshift `start` parameters are interpreted in THIS zone, not UTC — stored at auth so catch-up
+    /// pulls can convert. Null/blank = assume UTC.</summary>
+    public string? Timezone { get; set; }
+
     // Encrypted at rest (docs/05 §6). Encryption layer is wired in a later slice;
     // for now the column exists and is masked at the API boundary.
     public string Username { get; set; } = "";

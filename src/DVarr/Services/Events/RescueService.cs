@@ -14,13 +14,16 @@ public static class RescueService
     /// monitored-league event, no good copy already exists, and no ticket is already hunting this event. Best-effort
     /// and self-gating, so it's safe to call from any terminal-failure path.</summary>
     public static async Task TryOpenTicketAsync(DVarrDbContext db, DbWriteGate gate, SettingsService settings,
-        int recordingId, string reason, ILogger log, CancellationToken ct = default)
+        int recordingId, string reason, ILogger log, CancellationToken ct = default, bool requireCorroborated = false)
     {
         if (!await settings.GetBoolAsync("replay_rescue_enabled")) return;
 
         var rec = await db.Recordings.AsNoTracking().FirstOrDefaultAsync(r => r.Id == recordingId, ct);
         if (rec is null || rec.EventId is not { } eventId) return; // only linked events have a re-air search space
         if (rec.RescueTicketId is not null) return;                // a replay's own failure re-opens its parent, not a new ticket
+        // A recording the guide never corroborated demands a VERIFIED rescue however it ended — its channel/window
+        // is exactly what mustn't be blindly re-pulled from the archive (it would download the same wrong content).
+        requireCorroborated = requireCorroborated || rec.GuideUncorroborated;
 
         var ev = await db.Events.AsNoTracking().FirstOrDefaultAsync(e => e.Id == eventId, ct);
         if (ev is null) return;
@@ -47,11 +50,14 @@ public static class RescueService
                 EventStartUtc = ev.StartUtc, EventEndUtc = end,
                 State = RescueTicketState.Open, CreatedUtc = now, NextSweepUtc = now,
                 ExpiresUtc = now + giveUpDays * 86400L, WholeSource = wholeSource, Note = reason,
+                RequireCorroborated = requireCorroborated,
             });
             db.Notifications.Add(new Notification
             {
                 RecordingId = recordingId, TsUtc = now, Kind = NotificationKind.ReplayHunting, Severity = Severity.Info,
-                Message = $"hunting for a re-air of “{ev.Title}” — DVarr will record a replay if one shows in the guide within {giveUpDays} day(s)",
+                Message = requireCorroborated
+                    ? $"“{ev.Title}” recorded with no guide corroboration — hunting the provider archive and re-airs for a verified copy (cancel the hunt from Recordings if the capture turned out fine)"
+                    : $"hunting for a re-air of “{ev.Title}” — DVarr will record a replay if one shows in the guide within {giveUpDays} day(s)",
             });
             await db.SaveChangesAsync(ct);
         }, ct);
@@ -59,8 +65,12 @@ public static class RescueService
     }
 
     /// <summary>True when a playable copy of the event already exists — a finished (Done) recording, or a library
-    /// file on disk. Used to avoid opening (or to close) a rescue ticket when the game is already safely captured.</summary>
+    /// file on disk. Used to avoid opening (or to close) a rescue ticket when the game is already safely captured.
+    /// A copy that finalized with <see cref="Data.Entities.Recording.GuideUncorroborated"/> set does NOT count
+    /// (nothing in the guide ever showed the fixture on the recorded channel — it very likely captured the wrong
+    /// programme), and neither does that copy's library row.</summary>
     public static async Task<bool> HasGoodCopyAsync(DVarrDbContext db, int eventId, CancellationToken ct = default)
-        => await db.Recordings.AsNoTracking().AnyAsync(r => r.EventId == eventId && r.State == RecordingState.Done, ct)
-           || await db.LibraryItems.AsNoTracking().AnyAsync(i => i.EventId == eventId && i.Status == LibraryItemStatus.Ok, ct);
+        => await db.Recordings.AsNoTracking().AnyAsync(r => r.EventId == eventId && r.State == RecordingState.Done && !r.GuideUncorroborated, ct)
+           || await db.LibraryItems.AsNoTracking().AnyAsync(i => i.EventId == eventId && i.Status == LibraryItemStatus.Ok
+                  && !db.Recordings.Any(r => r.Id == i.RecordingId && r.GuideUncorroborated), ct);
 }

@@ -69,6 +69,10 @@ public sealed class IngestService
 
                 if (auth?.UserInfo is { } ui)
                     ApplyUserInfo(s, ui, now);
+                // The provider's own timezone (server_info) — timeshift/catch-up `start` stamps are interpreted
+                // in this zone, so it must be captured wherever auth is refreshed.
+                if (!string.IsNullOrWhiteSpace(auth?.ServerInfo?.Timezone))
+                    s.Timezone = auth!.ServerInfo!.Timezone!.Trim();
 
                 foreach (var st in streams)
                 {

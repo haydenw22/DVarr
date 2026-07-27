@@ -74,10 +74,36 @@ public sealed class SchedulerService : BackgroundService
                 .OrderBy(r => r.StartUtc)
                 .ToListAsync(ct);
 
-            passedPending = await db.Recordings
+            // A Pending CATCH-UP pull whose wall-clock window ran out while the login was busy isn't missed —
+            // its content sits in the provider archive, not on air. Slide its window forward and keep waiting,
+            // as long as the archive still covers the pull (checked below); only a pull that has genuinely
+            // fallen out of the archive is marked Missed.
+            var passedRows = await db.Recordings
                 .Where(r => r.State == RecordingState.Pending && r.EndUtc + r.PostPadS <= now)
-                .Select(r => r.Id)
+                .Select(r => new { r.Id, r.CatchupSourceStartUtc, r.CatchupDurationS, r.ChannelId })
                 .ToListAsync(ct);
+            passedPending = new List<int>();
+            foreach (var p in passedRows)
+            {
+                if (p.CatchupSourceStartUtc is { } cs && p.CatchupDurationS is { } cd)
+                {
+                    var archDays = await db.Channels.Where(c => c.Id == p.ChannelId)
+                        .Select(c => c.TvArchive ? (c.TvArchiveDuration ?? 0) : 0).FirstOrDefaultAsync(ct);
+                    if (cs >= now - (long)archDays * 86400 + 3600)
+                    {
+                        await _gate.WriteAsync(async () =>
+                        {
+                            var r = await db.Recordings.FindAsync(p.Id);
+                            if (r is null || r.State != RecordingState.Pending) return;
+                            r.StartUtc = now; r.EndUtc = now + cd + Math.Max(1800, cd / 2); r.UpdatedUtc = now;
+                            await db.SaveChangesAsync(ct);
+                        }, ct);
+                        _log.LogInformation("[Scheduler] catch-up pull {Id} still waiting for a free login — slid its window forward (archive holds the content)", p.Id);
+                        continue;
+                    }
+                }
+                passedPending.Add(p.Id);
+            }
 
             // Retry-at-event-start: an active recording whose pre-roll attempt has captured NOTHING by ~30s past the
             // real start (the channel likely wasn't live yet). Make ONE guaranteed fresh attempt; one-shot via
@@ -85,6 +111,7 @@ public sealed class SchedulerService : BackgroundService
             if (await settings.GetBoolAsync("retry_at_event_start"))
                 stuck = await db.Recordings
                     .Where(r => !r.EventStartRetried && r.BytesWritten == 0
+                                && r.CatchupSourceStartUtc == null // "captured nothing by event start" is meaningless for an archive pull (its shape-probe phase legitimately has 0 bytes past 30s)
                                 && r.StartUtc <= now - 30 && r.EndUtc + r.PostPadS > now
                                 && (r.State == RecordingState.Recording || r.State == RecordingState.Recovering
                                     || r.State == RecordingState.FailingOver || r.State == RecordingState.Degraded))

@@ -49,9 +49,79 @@ public sealed class XtreamClient
     private string Api(ProviderSource s, string query)
         => $"{BaseUrl(s)}/player_api.php?username={Uri.EscapeDataString(s.Username)}&password={Uri.EscapeDataString(s.Password)}{query}";
 
-    /// <summary>Direct .ts URL for the recorder (docs/05 §5.4, D3) — fetched straight from the provider.</summary>
+    /// <summary>Direct .ts URL for the recorder (docs/05 §5.4, D3) — fetched straight from the provider.
+    /// Kept for callers that explicitly want MPEG-TS; format-aware callers use <see cref="StreamUrl"/>.</summary>
     public string StreamTsUrl(ProviderSource s, int streamId)
         => $"{BaseUrl(s)}/live/{Uri.EscapeDataString(s.Username)}/{Uri.EscapeDataString(s.Password)}/{streamId}.ts";
+
+    /// <summary>The container the live URL should ask for on this source: "ts" or "m3u8". Honours the source's
+    /// StreamFormat ("ts"/"hls" force it); "auto" prefers .ts when the provider's allowed_output_formats include it
+    /// (the historical default), else HLS. A proxy that serves HLS-only (community case: recording died because
+    /// DVarr always built .ts URLs) either advertises m3u8-only or is forced with StreamFormat=hls.</summary>
+    public static string EffectiveStreamExt(ProviderSource s)
+    {
+        var fmt = (s.StreamFormat ?? "auto").Trim().ToLowerInvariant();
+        if (fmt == "ts") return "ts";
+        if (fmt is "hls" or "m3u8") return "m3u8";
+        // Exact token match, not substring — "rtsp".Contains("ts") is true and would wrongly keep a
+        // genuinely m3u8-only lineup on .ts.
+        var allowed = (s.AllowedOutputFormats ?? "").ToLowerInvariant()
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (allowed.Length > 0 && !allowed.Contains("ts") && allowed.Contains("m3u8")) return "m3u8";
+        return "ts";
+    }
+
+    /// <summary>Live stream URL in the source's effective container (.ts or .m3u8).</summary>
+    public string StreamUrl(ProviderSource s, int streamId)
+        => $"{BaseUrl(s)}/live/{Uri.EscapeDataString(s.Username)}/{Uri.EscapeDataString(s.Password)}/{streamId}.{EffectiveStreamExt(s)}";
+
+    // ---- Catch-up (tv_archive) ----
+    // Xtream providers answer one of two archive URL shapes; DVarr tries the preferred/probed one first and the
+    // recorder's ladder falls back to the other. The `start` stamp is in the PROVIDER's own timezone
+    // (server_info.timezone, stored on the source at auth) — not UTC.
+
+    public const string ShapeTimeshiftPhp = "timeshift_php";
+    public const string ShapeTimeshiftPath = "timeshift_path";
+
+    /// <summary>Convert a UTC epoch to the provider's local wall clock for a timeshift `start` stamp.
+    /// Unknown/invalid zone → UTC (the most common server default).</summary>
+    public static DateTime ToProviderLocal(ProviderSource s, long utcEpoch)
+    {
+        var utc = DateTimeOffset.FromUnixTimeSeconds(utcEpoch).UtcDateTime;
+        var tz = (s.Timezone ?? "").Trim();
+        if (tz.Length == 0) return utc;
+        try { return TimeZoneInfo.ConvertTimeFromUtc(utc, TimeZoneInfo.FindSystemTimeZoneById(tz)); }
+        catch { return utc; }
+    }
+
+    /// <summary>Archive pull URL for one shape. Duration is rounded UP to whole minutes (a truncated request
+    /// would clip the end of the pull).</summary>
+    public string TimeshiftUrl(ProviderSource s, int streamId, long startUtc, int durationS, string shape)
+        => TimeshiftUrlLocal(s, streamId, ToProviderLocal(s, startUtc), durationS, shape);
+
+    /// <summary>Archive pull URL from an ALREADY provider-local start. Chunked pulls convert the pull's base
+    /// start once and add plain minute offsets per chunk — converting each chunk independently would collide
+    /// two chunks onto the same wall-clock stamp across a DST fall-back hour (archive indexes are wall-clock
+    /// linear, so linear offsets from one converted base are the faithful mapping).</summary>
+    public string TimeshiftUrlLocal(ProviderSource s, int streamId, DateTime providerLocalStart, int durationS, string shape)
+    {
+        var stamp = providerLocalStart.ToString("yyyy-MM-dd:HH-mm", System.Globalization.CultureInfo.InvariantCulture);
+        var minutes = Math.Max(1, (durationS + 59) / 60);
+        return shape == ShapeTimeshiftPath
+            ? $"{BaseUrl(s)}/timeshift/{Uri.EscapeDataString(s.Username)}/{Uri.EscapeDataString(s.Password)}/{minutes}/{stamp}/{streamId}.ts"
+            : $"{BaseUrl(s)}/streaming/timeshift.php?username={Uri.EscapeDataString(s.Username)}&password={Uri.EscapeDataString(s.Password)}&stream={streamId}&start={stamp}&duration={minutes}";
+    }
+
+    /// <summary>Both archive shapes for this pull, the source's probed/known shape first — the recorder's
+    /// fallback ladder walks to the alternate shape if the first can't be opened.</summary>
+    public List<string> TimeshiftUrlCandidates(ProviderSource s, int streamId, long startUtc, int durationS)
+    {
+        var first = s.CatchupShape == ShapeTimeshiftPath ? ShapeTimeshiftPath : ShapeTimeshiftPhp;
+        var second = first == ShapeTimeshiftPath ? ShapeTimeshiftPhp : ShapeTimeshiftPath;
+        var urls = new List<string> { TimeshiftUrl(s, streamId, startUtc, durationS, first) };
+        if (string.IsNullOrEmpty(s.CatchupShape)) urls.Add(TimeshiftUrl(s, streamId, startUtc, durationS, second));
+        return urls;
+    }
 
     public Task<XtreamAuthResponse?> AuthAsync(ProviderSource s, CancellationToken ct = default)
         => GetAsync<XtreamAuthResponse>(Api(s, ""), s.UserAgent, ct);

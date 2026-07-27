@@ -992,7 +992,7 @@ PAGES.guide = {
         <button class="ghost sm" id="gNext">later ›</button>
         <select id="gHours"><option value="6">6h</option><option value="12">12h</option><option value="24" selected>24h</option></select>
       </div>
-      <div class="guide-legend"><span class="lg lg-live">live now</span><span class="lg lg-rec">recording</span><span class="lg lg-pad">pre/post buffer</span><span class="lg lg-play">▶ click a channel name to watch · click a programme to schedule</span></div>
+      <div class="guide-legend"><span class="lg lg-live">live now</span><span class="lg lg-rec">recording</span><span class="lg lg-pad">pre/post buffer</span><span class="lg lg-play">▶ click a channel name to watch · click a programme to schedule · ⟲ = finished shows downloadable from catch-up</span></div>
       <div id="gWrap" class="loading">…</div>`;
 
     const renderGroups = () => { $('#gGrp').innerHTML = groupOptions(state.groups, $('#gGrpQ').value, state.group); };
@@ -1061,7 +1061,12 @@ function renderGuide(wrap, g) {
       return `<div class="${cls}" style="left:${left}px;width:${w}px" data-ch="${c.channelId}" data-start="${p.start}" data-stop="${p.stop}" data-title="${esc(p.Title || p.title || '')}" title="${esc(p.Title || p.title || '')} · ${hhmm(p.start)}-${hhmm(p.stop)}"><span class="g-pt">${hhmm(p.start)}</span> ${esc(p.Title || p.title || '')}</div>`;
     }).filter(Boolean).join('');
     const body = blocks || `<div class="g-empty">no guide data</div>`;
-    return `<div class="g-row"><div class="g-ch" title="Watch ${esc(c.name)}" onclick="chanTap(${c.channelId},'${jsq(c.name)}')">${c.logo ? chLogo(c.logo) : I.play}<span>${esc(c.name)}</span></div><div class="g-track" style="width:${trackW}px">${body}</div></div>`;
+    // Badge only when the channel advertises a usable archive depth, and only on the wide (desktop) channel
+    // column — the 78px phone column can't fit it without pushing the name out (catch-up routing still works
+    // on tap either way).
+    const arch = (c.tvArchive && (c.tvArchiveDays || 0) > 0 && chCol >= 250)
+      ? `<span class="tag" style="margin-left:auto;flex:none" title="catch-up archive: past ${c.tvArchiveDays} day(s) can be downloaded — click a finished programme">⟲${c.tvArchiveDays}d</span>` : '';
+    return `<div class="g-row"><div class="g-ch" title="Watch ${esc(c.name)}" onclick="chanTap(${c.channelId},'${jsq(c.name)}')">${c.logo ? chLogo(c.logo) : I.play}<span>${esc(c.name)}</span>${arch}</div><div class="g-track" style="width:${trackW}px">${body}</div></div>`;
   }).join('');
 
   wrap.innerHTML = `<div class="guide-scroll"><div class="guide-inner" style="--gch:${chCol}px;width:${chCol + trackW}px">
@@ -1077,7 +1082,33 @@ function renderGuide(wrap, g) {
 
 function scheduleFromGuide(channelId, start, stop, title) {
   const c = (window._guideChans || {})[channelId] || {};
+  // A FINISHED programme on a catch-up channel (still inside its archive depth) is downloadable, not schedulable —
+  // offer the archive pull instead of a pointless past-dated schedule.
+  const now = Math.floor(Date.now() / 1000);
+  if (stop <= now - 60 && c.tvArchive && (c.tvArchiveDays || 0) > 0 && start >= now - c.tvArchiveDays * 86400 + 900)
+    return openCatchupModal(channelId, start, stop, title);
   openScheduleModal({ sourceId: c.SourceId || c.sourceId, group: c.group, channelId, channelName: c.name, title, startLocal: toLocalInput(start), durationMin: Math.max(1, Math.round((stop - start) / 60)) });
+}
+
+// Download a past programme from the channel's catch-up archive — an immediate low-priority fast download that
+// files through the normal finalize/import pipeline (name-match to TheSportsDB optional, like a manual schedule).
+function openCatchupModal(channelId, start, stop, title) {
+  const c = (window._guideChans || {})[channelId] || {};
+  modal(`<h2>Download from catch-up</h2>
+    <div class="muted" style="margin-bottom:10px">${esc(c.name)} · ${dtime(start)} – ${hhmm(stop)} (${Math.max(1, Math.round((stop - start) / 60))} min, already aired)</div>
+    <div class="fields">
+      <label class="field">Recording name<input id="cuName" value="${esc(title || '')}"/></label>
+      <label class="field" style="flex-direction:row;align-items:center;gap:8px"><input id="cuMatch" type="checkbox" style="width:auto" ${title ? 'checked' : ''}/> Match this name to TheSportsDB and rename for Plex when it finishes</label>
+    </div>
+    <div class="note" style="margin-top:12px">Pulled from the provider's archive at low priority — a live recording on this login always wins the slot (the download resumes after).</div>
+    <div class="foot"><button class="ghost" onclick="closeModals()">Cancel</button><button onclick="submitCatchup(${channelId},${start},${stop})">Download</button></div>`, 'min(520px,94vw)');
+}
+async function submitCatchup(channelId, start, stop) {
+  const name = $('#cuName').value.trim();
+  const matchQuery = ($('#cuMatch').checked && name) ? name : null;
+  closeModals();
+  const r = await api.post('/api/recordings/catchup', { channelId, startUtc: start, endUtc: stop, title: name || undefined, matchQuery });
+  if (r.error) toast(r.error, 'err'); else { toast(`Catch-up download #${r.id} started`, 'ok'); location.hash = '#/recordings'; }
 }
 
 // ---- Sources ----
@@ -1742,6 +1773,10 @@ const SETTINGS_META = {
   replay_rescue_whole_source: { g: 'Recording', t: 'Search the whole provider for re-airs', h: 'Widen the replay search from the league’s mapped channels to every channel on those providers. Finds more re-airs; may match less precisely.', ty: 'bool' },
   replay_rescue_give_up_days: { g: 'Recording', t: 'Replay hunt give-up (days)', h: 'Stop hunting for a re-air this many days after the game — after which it’s considered lost.', ty: 'int' },
   replay_rescue_interval_s: { g: 'Recording', t: 'Replay sweep interval (seconds)', h: 'How often DVarr re-checks the guide for re-airs of failed games.', ty: 'int' },
+  catchup_enabled: { g: 'Recording', t: 'Catch-up (provider archive)', h: 'Use channels’ catch-up archive (tv_archive) when the provider offers it: rescue a failed/missed game by downloading it straight from the archive (before waiting for a re-air), and let the Guide download finished programmes on ⟲ channels.', ty: 'bool' },
+  catchup_chunk_minutes: { g: 'Recording', t: 'Catch-up chunk size (minutes)', h: 'A single archive request is capped at this many minutes (providers commonly limit one request to ~2 hours); chunks are stitched seamlessly at finalize.', ty: 'int' },
+  live_preempts_opportunistic: { g: 'Recording', t: 'Live games bump replays', h: 'When every login is busy, a live recording may stop a running low-priority replay or catch-up download to take the slot — replays and downloads are re-tried automatically; the live broadcast can’t be.', ty: 'bool' },
+  rescue_uncorroborated_enabled: { g: 'Recording', t: 'Re-hunt unverified captures', h: 'If a recording finishes and the guide showed a DIFFERENT programme on that channel (it likely captured the wrong thing), keep the copy but hunt the archive/re-airs for a guide-verified one. Cancel the hunt from Recordings if the capture was fine. Needs “Guide-match channel pick” on — that sweep is what checks the guide.', ty: 'bool' },
   bitrate_floor_enabled: { g: 'Reliability', t: 'Bitrate-floor placeholder detection', h: 'Fail over when a stream keeps feeding data but far too little for real content — a provider “channel offline” slate. Uses the per-tier floors below. Opt-in; needs no GPU.', ty: 'bool' },
   bitrate_floor_kbps_sd: { g: 'Reliability', t: 'SD bitrate floor (kbps)', h: 'When placeholder detection is on: an SD channel steadily below this looks like a slate and fails over. Keep it well under a real SD stream (~1 Mbps+).', ty: 'int' },
   bitrate_floor_kbps_hd: { g: 'Reliability', t: 'HD bitrate floor (kbps)', h: 'Floor for HD channels (720p/1080p) when placeholder detection is on. Real HD is several Mbps, so a low value only catches slates.', ty: 'int' },
@@ -2407,6 +2442,11 @@ function openSourceModal(id) {
       <label class="field" style="grid-column:1/3">External EPG URL (optional)<input id="sEpg" value="${esc(x?.epgUrl || '')}" placeholder="https://…/epg.xml.gz"/></label>
       <label class="field" style="grid-column:1/3;flex-direction:row;align-items:center;gap:8px"><input id="sEpgOv" type="checkbox" ${ck(x?.epgOverride)} style="width:auto"/> Override the source's EPG with the external EPG above</label>
       <label class="field" style="grid-column:1/3">User-Agent (optional)<input id="sUa" value="${esc(x?.userAgent || '')}" placeholder="blank = VLC default; set if your provider requires a specific UA"/></label>
+      <label class="field" title="What container to request live streams in. Auto prefers MPEG-TS when the provider allows it. Pick HLS if your provider/proxy only serves (or is only stable over) .m3u8 playlists.">Stream format<select id="sFmt">
+        <option value="auto" ${sel(x?.streamFormat || 'auto', 'auto')}>auto</option>
+        <option value="ts" ${sel(x?.streamFormat, 'ts')}>MPEG-TS (.ts)</option>
+        <option value="hls" ${sel(x?.streamFormat, 'hls')}>HLS (.m3u8)</option>
+      </select></label>
       <label class="field" style="flex-direction:row;align-items:center;gap:8px"><input id="sEnabled" type="checkbox" ${edit ? ck(x.enabled) : 'checked'} style="width:auto"/> Enabled</label>
     </div>
     <div class="foot"><button class="ghost" onclick="closeModals()">Cancel</button><button onclick="submitSource(${edit ? x.id : 'null'})">${edit ? 'Save' : 'Add'} source</button></div>`, 'min(620px,94vw)');
@@ -2416,6 +2456,7 @@ async function submitSource(id) {
     label: $('#sLabel').value, type: $('#sType').value, protocol: $('#sProto').value,
     host: $('#sHost').value, port: parseInt($('#sPort').value) || 0, maxStreams: parseInt($('#sMax').value) || 1,
     username: $('#sUser').value, password: $('#sPass').value, userAgent: $('#sUa').value,
+    streamFormat: $('#sFmt').value,
     epgUrl: $('#sEpg').value, epgOverride: $('#sEpgOv').checked, enabled: $('#sEnabled').checked,
   };
   closeModals();
@@ -2810,6 +2851,7 @@ window.addEventListener('keydown', e => {
 });
 window.render = render; window.openTestModal = openTestModal; window.submitTest = submitTest;
 window.openScheduleModal = openScheduleModal; window.submitSchedule = submitSchedule; window.scheduleFor = scheduleFor; window.scheduleFromGuide = scheduleFromGuide;
+window.openCatchupModal = openCatchupModal; window.submitCatchup = submitCatchup;
 window.openPreview = openPreview; window.stopRec = stopRec; window.startRec = startRec; window.delRec = delRec; window.reresolveRec = reresolveRec; window.reresolveLeague = reresolveLeague; window.cancelRescue = cancelRescue;
 window.recToggle = recToggle; window.recToggleAll = recToggleAll; window.bulkStart = bulkStart; window.bulkResolve = bulkResolve; window.bulkStop = bulkStop; window.bulkDelete = bulkDelete; window.runPendingDelete = runPendingDelete;
 window.openImportModal = openImportModal; window.submitImport = submitImport;

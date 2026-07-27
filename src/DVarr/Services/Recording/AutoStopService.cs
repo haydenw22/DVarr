@@ -129,10 +129,14 @@ public sealed class AutoStopService : BackgroundService
         // the kickoff/half-time transitions, not just the endgame. Extend/clamp DECISIONS still apply only near
         // the end (DecideAheadS below) and only for Auto (not "fixed") leagues with auto-stop enabled. No upper
         // bound on `now` — a capture deep in its post-pad can still be extended if penalties run on.
+        // Catch-up (archive) pulls are excluded outright: their event already finished, so livescore reads
+        // "terminal" and the clamp branch would cut the download window mid-pull. Their wall-clock window is
+        // simply the download timeout — auto-stop has nothing to decide for them (chapters ride LiveMarksJson
+        // captured by the ORIGINAL recording anyway).
         var candidates = await (from r in db.Recordings.AsNoTracking()
                                 join e in db.Events.AsNoTracking() on r.EventId equals e.Id
                                 join l in db.Leagues.AsNoTracking() on e.LeagueId equals l.Id
-                                where ActiveStates.Contains(r.State)
+                                where ActiveStates.Contains(r.State) && r.CatchupSourceStartUtc == null
                                 select new
                                 {
                                     r.Id, RecEndUtc = r.EndUtc, r.PostPadS, r.SourceId,

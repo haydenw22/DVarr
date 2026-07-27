@@ -31,7 +31,7 @@ public static class ParityEndpoints
             var src = await db.Sources.FindAsync(ch.SourceId);
             if (src is null) return Results.NotFound();
             if (!src.Enabled) return Results.NotFound(); // off-limits: don't expose a disabled source's stream URL
-            return Results.Redirect(xtream.StreamTsUrl(src, ch.StreamId));
+            return Results.Redirect(xtream.StreamUrl(src, ch.StreamId));
         });
 
         // Filtered M3U = the channels you've mapped to leagues (the ones you care about), via the proxy.

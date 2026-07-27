@@ -12,6 +12,23 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.45.0] — 2026-07-27
+Catch-up arrives: DVarr can now pull finished games straight from a provider's archive — to rescue a failed or missed recording without waiting days for a re-air, or on demand from the Guide. Alongside it: HLS stream support, live games now outrank replays for the login's slot, and three community-reported failure modes are fixed.
+
+### Added
+- **Catch-up (provider archive) support.** Channels that advertise Xtream `tv_archive` show a ⟲ badge in the Guide with their archive depth; DVarr already stored the flags — now it uses them:
+  - **Rescue via archive first.** When a game fails or is missed, the rescue sweep now checks whether a mapped channel's archive still holds it — preferring a channel whose guide *history* confirms the fixture actually aired there — and downloads it immediately at low priority, faster than realtime. Re-air hunting stays as the fallback for channels without archive (and after two failed pulls).
+  - **Download from the Guide.** Click a finished programme on a ⟲ channel and choose *Download from catch-up* — it pulls the aired window from the archive and files through the normal match/rename/import pipeline like any recording.
+  - Under the hood: both Xtream archive URL shapes are probed automatically (and remembered per source), requests are chunked (default 60 min, tunable) so providers that cap a single timeshift call still serve whole games, archive timestamps are converted to the provider's own timezone, and credentials in archive URLs are masked in logs like live ones.
+- **HLS (.m3u8) stream support.** Each source has a *Stream format* setting — auto / MPEG-TS / HLS. Auto prefers `.ts` as before; pick HLS for providers or filtering proxies that only serve (or are only stable over) `.m3u8`. The recorder adapts its ffmpeg input handling to the format, and live preview/playback URLs follow the same choice. Previously DVarr always built `.ts` URLs, and an HLS-only proxy couldn't record at all.
+- **Live games now outrank replays for the slot.** With every login busy, a live recording may stop a *running* low-priority capture (rescue replay or catch-up download) and take the slot — a replay can always be re-hunted; the live broadcast can't. The bumped capture is discarded cleanly (never finalized as a fake "good copy"): a rescue replay's ticket re-opens and hunts again, and a bumped catch-up download simply re-queues and resumes once the login frees. Opt-out: *Settings → Recording → Live games bump replays*. Previously a two-day-old replay could hold the only login while two live games failed around it.
+- **Suspect captures re-hunt themselves.** A recording that finishes without the guide ever having corroborated the fixture on its channel (the "recorded the wrong programme" failure) now keeps its copy *and* opens a rescue ticket hunting a guide-verified one — via archive or re-air. The Recordings page shows the hunt; cancel it if the capture turned out fine. Opt-out: *Settings → Recording → Re-hunt unverified captures*.
+
+### Fixed
+- **A closed rescue no longer leaves its replay armed.** When a good copy of a game landed while a replay was already scheduled, the ticket closed but the replay recording stayed armed — it would later seize the login for hours to re-record a game already safely in the library (possibly already watched and deleted), and could push the next live game into a miss. Closing a ticket now cancels its not-yet-started replay.
+- **Catch-up chunks no longer vanish at finalize.** (Caught by this release's own test harness before shipping.) Each archive request restarts the provider's timestamps at zero, so the de-overlap pass mistook every chunk after the first for re-served duplicate footage and dropped them — a three-chunk pull finalized with a third of the game. Catch-up pulls now finalize with the plain in-order stitch; live recordings keep full de-overlap.
+- **Provider timezone captured at auth.** The provider's `server_info.timezone` is now stored per source (shown on the Sources API) — archive requests would otherwise be off by the provider's UTC offset.
+
 ## [1.44.0] — 2026-07-24
 Born from a real failure: with Fox 503 **and** 504 both pinned for AFL, the guide said Adelaide vs Collingwood was on 504 — and DVarr recorded four hours of golf on 503 without a word. Three fixes so that can't happen again.
 

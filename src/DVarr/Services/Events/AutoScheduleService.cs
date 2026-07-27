@@ -298,8 +298,11 @@ public sealed class AutoScheduleService : BackgroundService
 
         // Pending recordings keyed by event, so a re-synced event that MOVED can retime its already-created recording
         // (else it would record at the stale time). Only Pending is safe to retime — never an in-progress capture.
+        // ChannelLocked rows are excluded: a scheduled REPLAY airs at its re-air time (not the event's) and a
+        // CATCH-UP pull's window is a wall-clock download timeout — retiming either onto the event's window would
+        // drag them into the past and expire them.
         var pendingByEvent = committed
-            .Where(r => r.State == RecordingState.Pending && r.EventId != null)
+            .Where(r => r.State == RecordingState.Pending && r.EventId != null && !r.ChannelLocked)
             .GroupBy(r => r.EventId!.Value)
             .ToDictionary(g => g.Key, g => g.First());
 

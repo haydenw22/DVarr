@@ -59,7 +59,9 @@ public sealed class RecorderService
         string url, segDir, outputPath;
         long windowEnd;
         int stall, contentDeadTimeout, contentVerifyFps, bitrateFloor;
-        bool nativeRate, contentVerify, cleanEof;
+        bool nativeRate, finiteInput, contentVerify, cleanEof;
+        Func<Task<string?>>? nextChunk;
+        Func<int>? chunkDur;
         string contentVerifyHwaccel;
         TunerLease lease;
         List<(int channelId, int streamId, string url)> fallbacks;
@@ -79,6 +81,11 @@ public sealed class RecorderService
 
             var rec = await db.Recordings.FindAsync(recordingId);
             if (rec is null) return "recording not found";
+            // Terminal rows must never arm: the arm path's later state writes (Starting/Recording) would blindly
+            // overwrite e.g. a Cancelled written between the caller's due-query and here (real case: the rescue
+            // settle pass cancelling an orphaned replay while the scheduler was mid-arm on the same row).
+            if (rec.State is RecordingState.Done or RecordingState.Cancelled or RecordingState.Missed or RecordingState.NeedsAttention)
+                return $"recording is {rec.State} — not arming";
 
             var src = await db.Sources.FindAsync(rec.SourceId);
             var ch = await db.Channels.FindAsync(rec.ChannelId);
@@ -143,6 +150,62 @@ public sealed class RecorderService
                         throw;
                     }
                 }
+                // Live-preempts-opportunistic: every login is busy, but if the one holding THIS recording's
+                // credential is only running an Opportunistic capture (a rescue replay or a catch-up pull), a
+                // live game outranks it — a replay can always be re-hunted; the live broadcast cannot. The victim
+                // is stopped WITHOUT finalizing (AbandonRequested → Cancelled, scratch discarded) so its partial
+                // copy can't satisfy the rescue "good copy" check; the rescue settle pass then re-opens its
+                // ticket and hunts again (archive pulls simply re-run later).
+                if (acquired is null && rec.Priority != RecordingPriority.Opportunistic
+                    && await settings.GetBoolAsync("live_preempts_opportunistic"))
+                {
+                    var activeIds = ActiveIds.ToList();
+                    var victim = await db.Recordings.AsNoTracking()
+                        .Where(v => activeIds.Contains(v.Id) && v.Id != recordingId && v.SourceId == rec.SourceId
+                                    && v.Priority == RecordingPriority.Opportunistic
+                                    && (v.State == RecordingState.Starting || v.State == RecordingState.Recording
+                                        || v.State == RecordingState.Recovering || v.State == RecordingState.FailingOver
+                                        || v.State == RecordingState.Degraded))
+                        .Select(v => new { v.Id, v.Title, v.CatchupSourceStartUtc })
+                        .FirstOrDefaultAsync(stoppingToken);
+                    if (victim is not null)
+                    {
+                        var kind = victim.CatchupSourceStartUtc is not null ? "catch-up download" : "replay";
+                        _log.LogWarning("[Recorder] Recording {Id}: preempting Opportunistic {Kind} {Vid} '{VTitle}' on '{Label}' — a live recording needs the slot",
+                            recordingId, kind, victim.Id, victim.Title, src.Label);
+                        RecorderSupervisor.AbandonRequested[victim.Id] = $"preempted — live recording '{rec.Title}' needs this login (the {kind} will be retried)";
+                        await _gate.WriteAsync(async () =>
+                        {
+                            db.Notifications.Add(new Notification
+                            {
+                                RecordingId = recordingId, TsUtc = EpochTime.Now(), Kind = NotificationKind.FailedOver, Severity = Severity.Info,
+                                Message = $"preempted the {kind} of “{victim.Title}” to free '{src.Label}' for this live recording",
+                            });
+                            await db.SaveChangesAsync();
+                        });
+                        var settled = await StopAsync(victim.Id);
+                        // If the victim's supervisor finished on its own before consuming the abandon flag (raced a
+                        // natural completion), the stale entry would wrongly cancel that recording's NEXT run. Once
+                        // the task has settled the flag is either consumed (gone) or unreachable — safe to drop.
+                        // While NOT settled the supervisor may still be heading for the check, so the flag stays.
+                        // (The abandon path itself re-queues a preempted MANUAL catch-up pull to Pending; ticket-
+                        // linked captures go Cancelled and the rescue settle pass owns their retry.)
+                        if (settled)
+                        {
+                            RecorderSupervisor.AbandonRequested.TryRemove(victim.Id, out _);
+                            var post = await db.Recordings.AsNoTracking().Where(v => v.Id == victim.Id).Select(v => v.State).FirstOrDefaultAsync(stoppingToken);
+                            if (post == RecordingState.Done)
+                                _log.LogWarning("[Recorder] preempt of {Vid} raced its natural completion — it finalized Done before the abandon took effect", victim.Id);
+                        }
+                        // The victim's lease releases as soon as its capture stops (before any finalize) — poll
+                        // briefly for the freed slot rather than waiting a whole scheduler tick.
+                        for (var w = 0; w < 30 && acquired is null && !stoppingToken.IsCancellationRequested; w++)
+                        {
+                            acquired = await _tuner.TryAcquireAsync(rec.SourceId, LeasePurpose.Recording, recordingId, rec.ChannelId, rec.StreamId, stoppingToken);
+                            if (acquired is null) await Task.Delay(500, stoppingToken);
+                        }
+                    }
+                }
                 if (acquired is null) return $"credential '{src.Label}' is busy and no equivalent login has a free slot (1 stream/login)";
             }
             lease = acquired;
@@ -153,6 +216,62 @@ public sealed class RecorderService
             {
                 url = ResolveUrl(src, ch, xtream);
                 nativeRate = !string.IsNullOrWhiteSpace(ch.DirectUrl);
+                finiteInput = nativeRate;
+                nextChunk = null;
+                chunkDur = null;
+                int catchupShapeIdx = 0;
+                List<string>? catchupShapes = null;
+                Func<int, string>? catchupUrlFor = null;
+                int catchupChunkIdx = 0, catchupChunkCount = 0;
+                if (rec.CatchupSourceStartUtc is { } catchupStart && rec.CatchupDurationS is { } catchupDur && catchupDur > 0)
+                {
+                    // CATCH-UP pull: read the provider's tv_archive instead of the live stream. Finite input, no
+                    // rate throttle (the whole point is faster-than-realtime), chunked so providers that cap a
+                    // single timeshift request still serve the whole game. The provider's archive URL shape is
+                    // probed via the failover ladder: known/preferred shape first, the alternate as the "fallback".
+                    var chunkMin = await settings.GetIntAsync("catchup_chunk_minutes");
+                    var chunkS = Math.Clamp(chunkMin <= 0 ? 60 : chunkMin, 5, 240) * 60;
+                    catchupShapes = src.CatchupShape == XtreamClient.ShapeTimeshiftPath
+                        ? new List<string> { XtreamClient.ShapeTimeshiftPath, XtreamClient.ShapeTimeshiftPhp }
+                        : new List<string> { XtreamClient.ShapeTimeshiftPhp, XtreamClient.ShapeTimeshiftPath };
+                    catchupChunkCount = (catchupDur + chunkS - 1) / chunkS;
+                    var srcSnapshot = src; var chSnapshot = ch;
+                    // Convert the pull's base start to provider-local ONCE and offset chunks linearly from it —
+                    // per-chunk conversion would collide two chunks onto one stamp across a DST fall-back hour.
+                    var baseLocal = XtreamClient.ToProviderLocal(src, catchupStart);
+                    int ChunkDur(int idx) => (int)Math.Min(chunkS, catchupDur - (long)idx * chunkS);
+                    catchupUrlFor = idx =>
+                        xtream.TimeshiftUrlLocal(srcSnapshot, chSnapshot.StreamId, baseLocal.AddSeconds((long)idx * chunkS), ChunkDur(idx), catchupShapes[catchupShapeIdx]);
+                    url = catchupUrlFor(0);
+                    chunkDur = () => ChunkDur(catchupChunkIdx);
+                    nativeRate = false;
+                    finiteInput = true;
+                    // A fresh pull always starts from chunk 0 — stale segments from an interrupted earlier run of
+                    // this same recording (boot recovery, preempt requeue) would duplicate everything re-pulled.
+                    var staleScratch = Path.Combine(_paths.SegmentDir, recordingId.ToString());
+                    try { if (Directory.Exists(staleScratch)) Directory.Delete(staleScratch, recursive: true); }
+                    catch (Exception exWipe) { _log.LogWarning(exWipe, "[Recorder] couldn't clear stale catch-up scratch for {Id}", recordingId); }
+                    var srcId = src.Id;
+                    nextChunk = async () =>
+                    {
+                        // A chunk just finished cleanly → the current shape WORKS on this provider; remember it so
+                        // future pulls (and the UI) start on the right shape without re-probing. Best-effort.
+                        var provenShape = catchupShapes[catchupShapeIdx];
+                        try
+                        {
+                            using var shapeScope = _scopes.CreateScope();
+                            var sdb = shapeScope.ServiceProvider.GetRequiredService<DVarrDbContext>();
+                            await _gate.WriteAsync(async () =>
+                            {
+                                var srow = await sdb.Sources.FindAsync(srcId);
+                                if (srow is not null && srow.CatchupShape != provenShape)
+                                { srow.CatchupShape = provenShape; srow.UpdatedUtc = EpochTime.Now(); await sdb.SaveChangesAsync(); }
+                            });
+                        }
+                        catch { /* shape memo is a nicety — never disturb the pull */ }
+                        return ++catchupChunkIdx < catchupChunkCount ? catchupUrlFor(catchupChunkIdx) : null;
+                    };
+                }
                 segDir = Path.Combine(_paths.SegmentDir, recordingId.ToString(), "A");
                 outputPath = BuildOutputPath(rec, ch);
                 // INITIAL window only — the supervisor re-reads EndUtc + PostPadS live while capturing, so a smart
@@ -184,26 +303,48 @@ public sealed class RecorderService
                     bitrateFloor = ch.DetectedQuality switch { "2160p" => uhd, "1080p" or "720p" => hd, _ => sd };
                 }
 
-                // Pre-load same-credential fallbacks (rank 2..N; rank 1 is the primary on Recording.ChannelId) and
-                // resolve their URLs. The supervisor walks this ladder in order when the primary dies or goes dead.
-                var fbRows = await db.RecordingFallbacks.Where(f => f.RecordingId == recordingId && f.Rank >= 2).OrderBy(f => f.Rank).ToListAsync(stoppingToken);
-                fallbacks = new();
-                foreach (var fb in fbRows)
+                Func<int, Task<(int channelId, int streamId, string url)?>> next;
+                if (catchupUrlFor is not null)
                 {
-                    var fch = await db.Channels.FindAsync(fb.ChannelId);
-                    var fsrc = await db.Sources.FindAsync(fb.SourceId);
-                    if (fch is not null && fsrc is not null)
-                        fallbacks.Add((fch.Id, fch.StreamId, ResolveUrl(fsrc, fch, xtream)));
+                    // Catch-up "fallback" = the ALTERNATE archive URL shape on the SAME channel (the pull is
+                    // channel-locked; channel fallbacks would fetch a different channel's archive). When the
+                    // failover ladder asks, switch shapes once and resume from the current chunk.
+                    fallbacks = new();
+                    var shapesRef = catchupShapes!; var chId = ch.Id; var chStream = ch.StreamId;
+                    next = _ =>
+                    {
+                        if (catchupShapeIdx + 1 < shapesRef.Count)
+                        {
+                            catchupShapeIdx++;
+                            return Task.FromResult<(int, int, string)?>((chId, chStream, catchupUrlFor(catchupChunkIdx)));
+                        }
+                        return Task.FromResult<(int, int, string)?>(null);
+                    };
+                }
+                else
+                {
+                    // Pre-load same-credential fallbacks (rank 2..N; rank 1 is the primary on Recording.ChannelId) and
+                    // resolve their URLs. The supervisor walks this ladder in order when the primary dies or goes dead.
+                    var fbRows = await db.RecordingFallbacks.Where(f => f.RecordingId == recordingId && f.Rank >= 2).OrderBy(f => f.Rank).ToListAsync(stoppingToken);
+                    fallbacks = new();
+                    foreach (var fb in fbRows)
+                    {
+                        var fch = await db.Channels.FindAsync(fb.ChannelId);
+                        var fsrc = await db.Sources.FindAsync(fb.SourceId);
+                        if (fch is not null && fsrc is not null)
+                            fallbacks.Add((fch.Id, fch.StreamId, ResolveUrl(fsrc, fch, xtream)));
+                    }
+
+                    var fbIndex = 0;
+                    var fbList = fallbacks;
+                    next = _ =>
+                        fbIndex < fbList.Count
+                            ? Task.FromResult<(int, int, string)?>(fbList[fbIndex++])
+                            : Task.FromResult<(int, int, string)?>(null);
                 }
 
-                var fbIndex = 0;
-                Func<int, Task<(int channelId, int streamId, string url)?>> next = _ =>
-                    fbIndex < fallbacks.Count
-                        ? Task.FromResult<(int, int, string)?>(fallbacks[fbIndex++])
-                        : Task.FromResult<(int, int, string)?>(null);
-
                 var sup = new RecorderSupervisor(new RecorderSupervisor.Deps(_scopes, _gate, _ffmpeg, _tuner, _bus, _lf));
-                var task = Task.Run(() => sup.RunAsync(recordingId, url, segDir, outputPath, windowEnd, stall, nativeRate, contentVerify, contentDeadTimeout, contentVerifyHwaccel, contentVerifyFps, cleanEof, bitrateFloor, src?.UserAgent, lease, next, cts.Token), CancellationToken.None);
+                var task = Task.Run(() => sup.RunAsync(recordingId, url, segDir, outputPath, windowEnd, stall, nativeRate, contentVerify, contentDeadTimeout, contentVerifyHwaccel, contentVerifyFps, cleanEof, bitrateFloor, src?.UserAgent, lease, next, cts.Token, finiteInput, nextChunk, chunkDur), CancellationToken.None);
                 _active[recordingId] = (task, cts); // swap the reservation placeholder for the running task (same cts)
                 _ = task.ContinueWith(t => { _active.TryRemove(recordingId, out _); cts.Dispose(); }, TaskScheduler.Default);
                 started = true;
@@ -335,7 +476,7 @@ public sealed class RecorderService
     }
 
     private static string ResolveUrl(ProviderSource src, Channel ch, XtreamClient xtream)
-        => !string.IsNullOrWhiteSpace(ch.DirectUrl) ? ch.DirectUrl! : xtream.StreamTsUrl(src, ch.StreamId);
+        => !string.IsNullOrWhiteSpace(ch.DirectUrl) ? ch.DirectUrl! : xtream.StreamUrl(src, ch.StreamId);
 
     private string BuildOutputPath(RecordingEntity rec, Channel ch)
     {
@@ -358,13 +499,19 @@ public sealed class RecorderService
 
     private static string Mask(string url)
     {
-        // hide credentials embedded in an Xtream /live/user/pass/ URL when logging
+        // hide credentials embedded in an Xtream /live|/timeshift path URL or a timeshift.php query when logging
         try
         {
             var u = new Uri(url);
             var segs = u.AbsolutePath.Split('/');
-            if (segs.Length >= 4 && segs[1] == "live") { segs[2] = "***"; segs[3] = "***"; }
-            return $"{u.Scheme}://{u.Host}{(u.IsDefaultPort ? "" : ":" + u.Port)}{string.Join('/', segs)}";
+            if (segs.Length >= 4 && (segs[1] == "live" || segs[1] == "timeshift")) { segs[2] = "***"; segs[3] = "***"; }
+            // Only the timeshift.php query is kept (credentials masked) — it's ours and its params aid debugging.
+            // Any OTHER query (a DirectUrl's ?token=… / ?wmsAuthSign=…) is dropped outright, as the old Mask did:
+            // masking only username/password would log unknown credential-bearing params verbatim.
+            var query = "";
+            if (u.AbsolutePath.Contains("timeshift.php", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrEmpty(u.Query))
+                query = System.Text.RegularExpressions.Regex.Replace(u.Query, @"(username|password)=[^&]*", "$1=***", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            return $"{u.Scheme}://{u.Host}{(u.IsDefaultPort ? "" : ":" + u.Port)}{string.Join('/', segs)}{query}";
         }
         catch { return url; }
     }

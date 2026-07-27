@@ -30,6 +30,7 @@ public static class ApiEndpoints
                 maxStreams = s.MaxStreams, s.Enabled, s.Healthy,
                 expDateUtc = s.ExpDateUtc, isTrial = s.IsTrial, status = s.Status,
                 epgUrl = s.EpgUrl, epgOverride = s.EpgOverride, userAgent = s.UserAgent,
+                streamFormat = s.StreamFormat, catchupShape = s.CatchupShape, timezone = s.Timezone,
                 slotFree = tuner.IsFree(s.Id),
                 channels = chCounts.GetValueOrDefault(s.Id),
                 programmes = pgCounts.GetValueOrDefault(s.Id),
@@ -67,6 +68,7 @@ public static class ApiEndpoints
                 await gate.WriteAsync(async () =>
                 {
                     IngestService.ApplyUserInfo(s, ui, now);
+                    if (!string.IsNullOrWhiteSpace(auth!.ServerInfo?.Timezone)) s.Timezone = auth.ServerInfo!.Timezone!.Trim();
                     await db.SaveChangesAsync(ct);
                 }, ct);
                 return Results.Json(new { ok = true, expDateUtc = s.ExpDateUtc, status = s.Status });
@@ -96,6 +98,7 @@ public static class ApiEndpoints
                 Username = req.Username ?? "",
                 Password = req.Password ?? "",
                 UserAgent = string.IsNullOrWhiteSpace(req.UserAgent) ? null : req.UserAgent!.Trim(),
+                StreamFormat = NormStreamFormat(req.StreamFormat),
                 EpgUrl = string.IsNullOrWhiteSpace(req.EpgUrl) ? null : req.EpgUrl!.Trim(),
                 EpgOverride = req.EpgOverride ?? false,
                 MaxStreams = req.MaxStreams is > 0 ? req.MaxStreams!.Value : 1,
@@ -126,6 +129,7 @@ public static class ApiEndpoints
                 if (!string.IsNullOrEmpty(req.Username)) s.Username = req.Username; // blank = keep existing
                 if (!string.IsNullOrEmpty(req.Password)) s.Password = req.Password!; // blank = keep existing
                 if (req.UserAgent != null) s.UserAgent = string.IsNullOrWhiteSpace(req.UserAgent) ? null : req.UserAgent.Trim();
+                if (req.StreamFormat != null) s.StreamFormat = NormStreamFormat(req.StreamFormat);
                 if (req.EpgUrl != null) s.EpgUrl = string.IsNullOrWhiteSpace(req.EpgUrl) ? null : req.EpgUrl.Trim(); // partial-safe (#17): only when sent
                 if (req.EpgOverride.HasValue) s.EpgOverride = req.EpgOverride.Value;
                 if (req.MaxStreams is > 0) s.MaxStreams = req.MaxStreams!.Value;
@@ -316,7 +320,7 @@ public static class ApiEndpoints
                 .ThenByDescending(c => (c.EpgChannelId != null && c.EpgChannelId != "") || (c.MatchedEpgId != null && c.MatchedEpgId != ""))
                 .ThenBy(c => c.Name)
                 .Take(take is > 0 and <= 400 ? take.Value : 120)
-                .Select(c => new { c.Id, c.Name, c.SourceId, c.EpgChannelId, c.MatchedEpgId, c.StreamId, group = c.GroupName, logo = c.LogoUrl, manual = c.DirectUrl != null && c.DirectUrl != "" })
+                .Select(c => new { c.Id, c.Name, c.SourceId, c.EpgChannelId, c.MatchedEpgId, c.StreamId, group = c.GroupName, logo = c.LogoUrl, manual = c.DirectUrl != null && c.DirectUrl != "", c.TvArchive, c.TvArchiveDuration })
                 .ToListAsync();
 
             // Effective tvg-id = provider's epg_channel_id, else the name-matched one. Programme.EpgChannelId is
@@ -348,6 +352,7 @@ public static class ApiEndpoints
                 channels = chans.Select(c => new
                 {
                     channelId = c.Id, c.Name, c.SourceId, c.StreamId, c.group, c.logo, c.manual, epgChannelId = Eff(c.EpgChannelId, c.MatchedEpgId),
+                    tvArchive = c.TvArchive, tvArchiveDays = c.TvArchiveDuration,
                     programmes = (Eff(c.EpgChannelId, c.MatchedEpgId) is { } eff && progByKey.TryGetValue((c.SourceId, eff.ToLowerInvariant()), out var ps))
                         ? ps.Select(p => new { p.Id, start = p.StartUtc, stop = p.StopUtc, p.Title })
                         : Enumerable.Empty<object>().Select(_ => new { Id = 0, start = 0L, stop = 0L, Title = "" }),
@@ -518,6 +523,46 @@ public static class ApiEndpoints
             catch { /* guardrail is best-effort — never fail the schedule over it */ }
 
             return Results.Json(new { rec.Id, state = rec.State.ToString() });
+        });
+
+        // Record a PAST programme from an archive-enabled channel's catch-up (tv_archive): schedules an immediate
+        // Opportunistic fast download of the archive window, which then flows through the completely normal
+        // finalize/match/import pipeline. Guarded by the channel's advertised archive depth.
+        app.MapPost("/api/recordings/catchup", async (CatchupRecordingRequest req, DVarrDbContext db, DbWriteGate gate, SettingsService settings) =>
+        {
+            if (!await settings.GetBoolAsync("catchup_enabled"))
+                return Results.Json(new { error = "catch-up is disabled in Settings" }, statusCode: 409);
+            var ch = await db.Channels.FindAsync(req.ChannelId);
+            if (ch is null) return Results.BadRequest(new { error = "channel not found" });
+            var src = await db.Sources.FindAsync(ch.SourceId);
+            if (!ch.Enabled || src is null || !src.Enabled) return Results.BadRequest(new { error = "channel's source is disabled" });
+            if (!ch.TvArchive || (ch.TvArchiveDuration ?? 0) <= 0)
+                return Results.BadRequest(new { error = "this channel doesn't advertise catch-up (tv_archive)" });
+            if (req.EndUtc <= req.StartUtc) return Results.BadRequest(new { error = "end time must be after start time" });
+            var now = EpochTime.Now();
+            if (req.EndUtc > now - 60) return Results.BadRequest(new { error = "catch-up is for programmes that have finished airing" });
+            var archiveFloor = now - (long)ch.TvArchiveDuration!.Value * 86400;
+            if (req.StartUtc < archiveFloor + 900)
+                return Results.BadRequest(new { error = $"outside this channel's catch-up window ({ch.TvArchiveDuration} day(s))" });
+            // Modest pads INSIDE the archive: a minute of head-room, ten minutes of tail (clamped to the past).
+            var pullStart = Math.Max(req.StartUtc - 60, archiveFloor);
+            var pullEnd = Math.Min(req.EndUtc + 600, now - 60);
+            var pullDur = (int)Math.Clamp(pullEnd - pullStart, 60, 8 * 3600);
+            var rec = new Recording
+            {
+                ChannelId = ch.Id, SourceId = ch.SourceId, StreamId = ch.StreamId,
+                // EndUtc is the pull's wall-clock TIMEOUT, not its length — a clean chunk-exhaustion ends it
+                // early, so the +50% (min 30 min) slack costs nothing on a fast provider but keeps a ~1x-realtime
+                // archive, arm latency and shape probing from truncating the tail.
+                StartUtc = now, EndUtc = now + pullDur + Math.Max(1800, pullDur / 2), PrePadS = 0, PostPadS = 0,
+                Title = string.IsNullOrWhiteSpace(req.Title) ? ch.Name : req.Title,
+                MatchQuery = string.IsNullOrWhiteSpace(req.MatchQuery) ? null : req.MatchQuery!.Trim(),
+                Priority = RecordingPriority.Opportunistic, ChannelLocked = true, State = RecordingState.Pending,
+                CatchupSourceStartUtc = pullStart, CatchupDurationS = pullDur,
+                CreatedUtc = now, UpdatedUtc = now,
+            };
+            await gate.WriteAsync(async () => { db.Recordings.Add(rec); await db.SaveChangesAsync(); });
+            return Results.Json(new { rec.Id, state = rec.State.ToString(), pullStart, pullDur });
         });
 
         // One-click test against a public stream — creates a "Manual / Test" source + channel,
@@ -971,6 +1016,14 @@ public static class ApiEndpoints
 
     private static string Mask(string? s) => string.IsNullOrEmpty(s) ? "" : "***";
 
+    /// <summary>Normalise a stream-format choice to "auto" | "ts" | "hls" (anything unrecognised → auto).</summary>
+    private static string NormStreamFormat(string? f) => f?.Trim().ToLowerInvariant() switch
+    {
+        "ts" or "mpegts" => "ts",
+        "hls" or "m3u8" => "hls",
+        _ => "auto",
+    };
+
     private static bool ValidEpgUrl(string? u)
         => string.IsNullOrWhiteSpace(u) || (Uri.TryCreate(u, UriKind.Absolute, out var x) && (x.Scheme == "http" || x.Scheme == "https"));
 
@@ -988,4 +1041,5 @@ public sealed record GroupPrefUpdate(string? Source, string? Group, bool? Favori
 public sealed record ReassignRequest(int? SourceId, string? Priority);
 public sealed record ImportAssignRequest(string? LeagueId, string? EventId);
 public sealed record TestRecordingRequest(string Url, string? Name, int? Minutes);
-public sealed record SourceUpsert(string? Label, string? Type, string? Protocol, string? Host, int? Port, string? Username, string? Password, string? EpgUrl, bool? EpgOverride, int? MaxStreams, bool? Enabled, string? UserAgent);
+public sealed record CatchupRecordingRequest(int ChannelId, long StartUtc, long EndUtc, string? Title, string? MatchQuery);
+public sealed record SourceUpsert(string? Label, string? Type, string? Protocol, string? Host, int? Port, string? Username, string? Password, string? EpgUrl, bool? EpgOverride, int? MaxStreams, bool? Enabled, string? UserAgent, string? StreamFormat);

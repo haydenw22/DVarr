@@ -52,14 +52,32 @@ public sealed class RecorderSupervisor
     private const int BitrateSustainS = 30;  // must stay sub-floor this long before treating it as a placeholder
 
     /// <summary>How one ffmpeg capture pass ended — drives whether RunAsync relaunches instantly (clean EOF) or
-    /// walks the back-off + failover ladder (a real fault).</summary>
+    /// walks the back-off + failover ladder (a real fault). OutTimeUs = ffmpeg's output clock at exit (µs), used
+    /// to detect a finite chunk that ended far short of its requested duration.</summary>
     private enum ExitKind { WindowClosed, StopRequested, CleanEof, Crashed, Stalled, DeadPicture, LowBitrate }
-    private sealed record CaptureExit(ExitKind Kind, string Detail);
+    private sealed record CaptureExit(ExitKind Kind, string Detail, long OutTimeUs = 0);
+
+    /// <summary>A finite archive chunk that cleanly EOFs under this fraction of its requested duration is treated
+    /// as an interrupted transfer (retried with its partial segments purged), not a completed chunk.</summary>
+    private const double ChunkShortfallFrac = 0.8;
+    private const int MaxChunkShortfallRetries = 2;
+
+    /// <summary>Recordings a preempt/abandon has been requested for: the supervisor checks this after its capture
+    /// loop ends and, instead of finalizing the partial capture to Done, marks the recording Cancelled (with the
+    /// stored reason) and discards the scratch. Used by live-preempts-opportunistic: a preempted replay/catch-up
+    /// must NOT leave a partial Done copy behind (it would satisfy the rescue "good copy" check and stop the
+    /// re-hunt). Keyed by recording id; the entry is consumed exactly once.</summary>
+    public static readonly System.Collections.Concurrent.ConcurrentDictionary<int, string> AbandonRequested = new();
 
     /// <summary>
     /// Run the full lifecycle. <paramref name="getNextFallbackUrl"/> returns the next
     /// SAME-CREDENTIAL fallback stream URL (or null when none remain). The lease is released
     /// when this returns.
+    /// <paramref name="finiteInput"/>: the input is a finite file/archive (VOD test, DirectUrl, catch-up pull) —
+    /// a clean EOF means "done" (finalize) rather than a momentary live-line drop, and -reconnect_at_eof is
+    /// never sent (it would spin forever at the end of a finite file).
+    /// <paramref name="getNextChunkUrl"/>: for a chunked catch-up pull — called on each clean EOF of a finite
+    /// input; returns the NEXT archive chunk's URL to continue with, or null when the pull is complete.
     /// </summary>
     public async Task RunAsync(
         int recordingId,
@@ -78,12 +96,17 @@ public sealed class RecorderSupervisor
         string? userAgent,
         TunerLease lease,
         Func<int, Task<(int channelId, int streamId, string url)?>> getNextFallbackUrl,
-        CancellationToken stopToken)
+        CancellationToken stopToken,
+        bool finiteInput = false,
+        Func<Task<string?>>? getNextChunkUrl = null,
+        Func<int>? getChunkDurationS = null)
     {
+        finiteInput = finiteInput || nativeRate; // a native-rate (VOD/DirectUrl) input is finite by definition
         Directory.CreateDirectory(segDir);
         var url = initialUrl;
         var attempt = 0;
         var launchSeq = 0; // per-ffmpeg-launch counter baked into segment names (see CaptureUntilStopOrStallAsync)
+        var chunkShortfalls = 0; // consecutive short clean-EOFs of the CURRENT archive chunk (reset on advance)
         var fallbacksUsed = 0;
         var fastVerifyCrashes = 0; // consecutive near-instant crashes while the verify chain is on (bad hwaccel heals here)
         var cleanEofWindow = new Queue<long>(); // wall-clock marks of recent clean EOFs (flap detector)
@@ -133,7 +156,7 @@ public sealed class RecorderSupervisor
                 try
                 {
                     var launchedAt = EpochTime.Now();
-                    var exit = await CaptureUntilStopOrStallAsync(recordingId, url, segDir, CurrentWindowEndAsync, stallTimeoutS, nativeRate, contentVerify, contentDeadTimeoutS, contentVerifyHwaccel, contentVerifyFps, bitrateFloorKbps, userAgent, lease, ++launchSeq, stopToken);
+                    var exit = await CaptureUntilStopOrStallAsync(recordingId, url, segDir, CurrentWindowEndAsync, stallTimeoutS, nativeRate, finiteInput, contentVerify, contentDeadTimeoutS, contentVerifyHwaccel, contentVerifyFps, bitrateFloorKbps, userAgent, lease, ++launchSeq, stopToken);
 
                     // Normal end of window or explicit stop → leave the capture loop and finalize.
                     if (stopToken.IsCancellationRequested || EpochTime.Now() >= await CurrentWindowEndAsync())
@@ -159,10 +182,51 @@ public sealed class RecorderSupervisor
                     // IMMEDIATELY, stay in Recording, and don't emit Recovering churn. The finalize de-overlap
                     // removes any few seconds the provider re-serves on reconnect. Only throttle (2s) if the line
                     // is flapping pathologically (many clean EOFs in 30s).
-                    // A native-rate input (VOD / test / DirectUrl) that cleanly EOFs has simply ENDED — finalize what
-                    // we captured, never loop it. Only a LIVE clean EOF is a momentary line drop worth relaunching.
-                    if (exit.Kind == ExitKind.CleanEof && nativeRate) break;
-                    if (exit.Kind == ExitKind.CleanEof && cleanEofInstantRelaunch && !nativeRate)
+                    // A FINITE input (VOD / test / DirectUrl / catch-up archive) that cleanly EOFs has simply
+                    // ENDED — continue with the next archive chunk when one exists, else finalize what we
+                    // captured; never loop it. Only a LIVE clean EOF is a momentary line drop worth relaunching.
+                    if (exit.Kind == ExitKind.CleanEof && finiteInput)
+                    {
+                        if (getNextChunkUrl is not null)
+                        {
+                            // Shortfall check: an archive transfer that dies mid-chunk usually ends as a CLEAN EOF
+                            // (the socket just closes), which is indistinguishable from "chunk complete" by exit
+                            // code alone. If ffmpeg's output clock is far short of what this chunk requested,
+                            // treat it as interrupted: purge the partial segments (the retry re-serves them — kept
+                            // duplicates can't be healed because de-overlap is off for catch-up) and re-pull the
+                            // SAME chunk. After the retry budget, accept the short chunk (providers that cap a
+                            // single request below the chunk size land here) and move on — a warned gap beats an
+                            // endless retry loop.
+                            var wantS = getChunkDurationS?.Invoke() ?? 0;
+                            // Measured from the segments' PTS span, not ffmpeg's out_time: under -copyts the
+                            // progress clock reports 0/garbage, and wall-clock segment counts under-measure a
+                            // faster-than-realtime pull. exit.OutTimeUs stays as the fallback when probing fails.
+                            var gotS = await MeasureLaunchContentSecondsAsync(segDir, launchSeq);
+                            if (gotS <= 0) gotS = exit.OutTimeUs / 1_000_000;
+                            if (wantS > 0 && gotS < wantS * ChunkShortfallFrac)
+                            {
+                                if (chunkShortfalls < MaxChunkShortfallRetries)
+                                {
+                                    chunkShortfalls++;
+                                    PurgeLaunchSegments(segDir, launchSeq);
+                                    _log.LogWarning("[Recorder] Recording {Id}: archive chunk ended at {Got}s of {Want}s requested — re-pulling the chunk (retry {N}/{Max})",
+                                        recordingId, gotS, wantS, chunkShortfalls, MaxChunkShortfallRetries);
+                                    continue; // same url → same chunk
+                                }
+                                _log.LogWarning("[Recorder] Recording {Id}: archive chunk still short ({Got}s of {Want}s) after {Max} retries — keeping it and moving on (provider likely caps a single request)",
+                                    recordingId, gotS, wantS, MaxChunkShortfallRetries);
+                            }
+                            chunkShortfalls = 0;
+                            if (await getNextChunkUrl() is { } nextChunk)
+                            {
+                                url = nextChunk;
+                                attempt = 0; // a fresh chunk starts with a clean failure ladder
+                                continue;
+                            }
+                        }
+                        break;
+                    }
+                    if (exit.Kind == ExitKind.CleanEof && cleanEofInstantRelaunch && !finiteInput)
                     {
                         var nowEof = EpochTime.Now();
                         cleanEofWindow.Enqueue(nowEof);
@@ -176,6 +240,10 @@ public sealed class RecorderSupervisor
                     }
 
                     // Recoverable FAULT (crash / stall / dead picture): relaunch — never fail.
+                    // A FINITE input restarts from the beginning of the same file/chunk on relaunch, so the failed
+                    // attempt's partial segments would play twice in the final concat (de-overlap is off for
+                    // catch-up). The retry re-serves that content from the archive — purge the partials first.
+                    if (finiteInput) PurgeLaunchSegments(segDir, launchSeq);
                     attempt++;
                     await SetStateAsync(recordingId, RecordingState.Recovering,
                         r => r.AttemptCount = attempt,
@@ -235,11 +303,58 @@ public sealed class RecorderSupervisor
         // recording from arming. ReleaseAsync is idempotent (Interlocked guard), so the finally below is a safe no-op.
         await _d.Tuner.ReleaseAsync(lease);
 
+        // Preempt/abandon (live-preempts-opportunistic): the caller asked for this capture to be DISCARDED, not
+        // finalized — a partial replay/catch-up Done copy would satisfy the rescue "good copy" check and stop the
+        // re-hunt. Mark it Cancelled with the reason, drop the scratch, and skip finalize entirely.
+        if (AbandonRequested.TryRemove(recordingId, out var abandonWhy))
+        {
+            try
+            {
+                // A preempted MANUAL catch-up pull (no rescue ticket to re-hunt it) re-queues itself with a fresh
+                // wall-clock window — the scheduler re-arms it once the login frees, which is the "resumes after"
+                // the UI promises. Ticket-linked captures go Cancelled: the rescue settle pass owns their retry.
+                var requeued = false;
+                using (var abScope = _d.Scopes.CreateScope())
+                {
+                    var abDb = abScope.ServiceProvider.GetRequiredService<DVarrDbContext>();
+                    var row = await abDb.Recordings.AsNoTracking().Where(r => r.Id == recordingId)
+                        .Select(r => new { r.RescueTicketId, r.CatchupSourceStartUtc, r.CatchupDurationS })
+                        .FirstOrDefaultAsync();
+                    if (row is { CatchupSourceStartUtc: not null, RescueTicketId: null, CatchupDurationS: { } cd })
+                    {
+                        await SetStateAsync(recordingId, RecordingState.Pending, r =>
+                        {
+                            var nowAb = EpochTime.Now();
+                            r.StartUtc = nowAb; r.EndUtc = nowAb + cd + Math.Max(1800, cd / 2);
+                            r.OutputPath = null; r.BytesWritten = 0; r.FailureReason = null; r.AttemptCount = 0;
+                        }, NotificationKind.FailedOver, Severity.Info, abandonWhy + " — re-queued; the download restarts when the login frees");
+                        requeued = true;
+                    }
+                }
+                if (!requeued)
+                    await SetStateAsync(recordingId, RecordingState.Cancelled,
+                        r => r.FailureReason = abandonWhy,
+                        NotificationKind.Cancelled, Severity.Info, abandonWhy);
+                var recScratch = Path.GetDirectoryName(segDir) ?? segDir;
+                for (var attemptDel = 0; attemptDel < 2 && Directory.Exists(recScratch); attemptDel++)
+                {
+                    // First delete can race ffmpeg's bounded hard-kill wait — one retry after a beat, else the
+                    // scratch would leak for good (Cancelled/Pending rows are never re-finalized from it; a
+                    // requeued pull wipes the dir itself at its next arm).
+                    try { Directory.Delete(recScratch, recursive: true); }
+                    catch { await Task.Delay(2000); }
+                }
+            }
+            catch (Exception exAb) { _log.LogWarning(exAb, "[Recorder] Recording {Id} abandon cleanup failed", recordingId); }
+            finally { await _d.Tuner.ReleaseAsync(lease); }
+            return;
+        }
+
         // ALWAYS finalize — even after an unexpected error, concatenate whatever segments exist so a
         // transient fault never abandons a captured window. NeedsAttention only if there is truly nothing.
         try
         {
-            await FinalizeToTerminalAsync(recordingId, segDir, outputPath, fallbacksUsed, originalChannelId, originalStreamId);
+            await FinalizeToTerminalAsync(recordingId, segDir, outputPath, fallbacksUsed, originalChannelId, originalStreamId, catchup: getNextChunkUrl is not null);
         }
         catch (Exception exFin)
         {
@@ -263,11 +378,15 @@ public sealed class RecorderSupervisor
     /// Public so catch-up-on-boot can re-finalize a window whose segments survived a crash (docs/05 §3.4).
     /// </summary>
     public async Task FinalizeToTerminalAsync(int recordingId, string segDir, string outputPath, int fallbacksUsed = 0,
-        int? revertChannelId = null, int? revertStreamId = null)
+        int? revertChannelId = null, int? revertStreamId = null, bool? catchup = null)
     {
         await SetStateAsync(recordingId, RecordingState.Stopping);
         await SetStateAsync(recordingId, RecordingState.Finalizing);
-        var (ok, bytes, durationS, gaps) = await FinalizeAsync(recordingId, segDir, outputPath);
+        // The caller that ran the capture KNOWS whether this was a catch-up pull — a DB re-read here could
+        // transiently fail toward the wrong (destructive) default and re-enable de-overlap on chunked archive
+        // footage. Only boot-recovery re-finalizes (which has no capture context) falls back to the DB read.
+        var isCatchup = catchup ?? await IsCatchupAsync(recordingId);
+        var (ok, bytes, durationS, gaps) = await FinalizeAsync(recordingId, segDir, outputPath, isCatchup);
         if (ok)
         {
             // Phase 3: file event-linked recordings into the Plex/Jellyfin library (.nfo + thumbnail).
@@ -298,6 +417,30 @@ public sealed class RecorderSupervisor
                 await libScope.ServiceProvider.GetRequiredService<LibraryService>().UpsertForRecordingAsync(recordingId, finalPath);
             }
             catch (Exception ex) { _log.LogWarning(ex, "[Recorder] library registration failed for {Id} (the scan will adopt it)", recordingId); }
+
+            // Uncorroborated completion (v1.45): the capture finished "successfully", but nothing in the guide ever
+            // showed this fixture on the recorded channel — there's a real chance it's three hours of the wrong
+            // programme. The copy stays in the library, but a rescue ticket opens (flagged RequireCorroborated) so
+            // the sweep hunts the provider archive / re-airs for a guide-VERIFIED copy. HasGoodCopy ignores the
+            // flagged copy, so the ticket actually hunts; the user cancels it if the capture turned out fine.
+            try
+            {
+                using var uncorScope = _d.Scopes.CreateScope();
+                var uncorDb = uncorScope.ServiceProvider.GetRequiredService<DVarrDbContext>();
+                var uncorSettings = uncorScope.ServiceProvider.GetRequiredService<DVarr.Services.SettingsService>();
+                var doneRow = await uncorDb.Recordings.AsNoTracking()
+                    .Where(r => r.Id == recordingId)
+                    .Select(r => new { r.GuideUncorroborated, r.EventId, r.RescueTicketId })
+                    .FirstOrDefaultAsync();
+                if (doneRow is { GuideUncorroborated: true, EventId: not null, RescueTicketId: null }
+                    && await uncorSettings.GetBoolAsync("rescue_uncorroborated_enabled"))
+                {
+                    await DVarr.Services.Events.RescueService.TryOpenTicketAsync(uncorDb, _d.Gate, uncorSettings,
+                        recordingId, "completed without guide corroboration — may have captured the wrong programme", _log,
+                        requireCorroborated: true);
+                }
+            }
+            catch (Exception ex) { _log.LogDebug(ex, "[Recorder] uncorroborated-rescue check failed for {Id}", recordingId); }
 
             // The recording is safely finalized + imported (terminal Done). The 8s TS segments were pure scratch —
             // delete them so they don't accumulate (each recording is 6GB+, which would otherwise double its storage
@@ -355,9 +498,13 @@ public sealed class RecorderSupervisor
     /// touching ffmpeg — the segmenter just keeps rolling until the (possibly extended) window closes.</summary>
     private async Task<CaptureExit> CaptureUntilStopOrStallAsync(
         int recordingId, string url, string segDir, Func<Task<long>> windowEndAsync, int stallTimeoutS, bool nativeRate,
-        bool contentVerify, int contentDeadTimeoutS, string? contentVerifyHwaccel, int contentVerifyFps,
+        bool finiteInput, bool contentVerify, int contentDeadTimeoutS, string? contentVerifyHwaccel, int contentVerifyFps,
         int bitrateFloorKbps, string? userAgent, TunerLease lease, int launchSeq, CancellationToken stopToken)
     {
+        // HLS input (an .m3u8 playlist): the hls demuxer reloads a LIVE playlist itself, and http-level
+        // -reconnect_at_eof fights that (it can pin a finished segment/VOD playlist at EOF forever). Detected from
+        // the URL per launch, so a mixed ladder (ts primary, HLS fallback) each get the right flags.
+        var isHls = url.Contains(".m3u8", StringComparison.OrdinalIgnoreCase);
         // The per-launch counter keeps names unique across relaunches: an instant relaunch (clean-EOF path or the
         // 0s first backoff) within the SAME wall-clock second would otherwise reuse the previous process's last
         // segment filename and truncate it — losing up to 8s of already-captured footage on a flappy line. Ordinal
@@ -378,15 +525,19 @@ public sealed class RecorderSupervisor
         // Use the source's configured user-agent if set (some IPTV providers require a specific UA); else the VLC default.
         args.Add("-user_agent");
         args.Add(string.IsNullOrWhiteSpace(userAgent) ? DVarr.Services.Ingest.XtreamClient.DefaultUserAgent : userAgent!);
-        args.AddRange(new[]
-        {
-            "-reconnect", "1", "-reconnect_streamed", "1",
-            "-reconnect_on_network_error", "1", "-reconnect_delay_max", "10", "-rw_timeout", "15000000",
-        });
-        // -reconnect_at_eof only for LIVE inputs. A native-rate (VOD/DirectUrl) input is finite and cleanly hits
-        // EOF; reconnect_at_eof would then loop forever retrying the end of file (it never "comes back"), so the
-        // segmenter writes nothing. Live provider streams never intentionally EOF, so they keep it to ride out blips.
-        if (!nativeRate) args.AddRange(new[] { "-reconnect_at_eof", "1" });
+        // http-level auto-reconnect for LIVE inputs only. On a finite archive/VOD transfer a reconnect re-opens
+        // the SAME timeshift URL, and providers restart the window from its beginning — silently duplicating
+        // content inside one launch where nothing can heal it. Finite inputs let the connection die instead: the
+        // process-level ladder (with its purge-and-retry) owns recovery. -rw_timeout stays for both, so a dead
+        // socket can't hang a launch.
+        if (!finiteInput)
+            args.AddRange(new[] { "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "10" });
+        args.AddRange(new[] { "-rw_timeout", "15000000" });
+        // -reconnect_at_eof only for LIVE MPEG-TS inputs. A finite input (VOD/DirectUrl/catch-up archive) cleanly
+        // hits EOF; reconnect_at_eof would then loop forever retrying the end of file (it never "comes back"), so
+        // the segmenter writes nothing. An HLS input manages its own live-playlist reload — the http-level flag
+        // fights the demuxer there. Live TS provider streams never intentionally EOF, so they keep it to ride out blips.
+        if (!finiteInput && !isHls) args.AddRange(new[] { "-reconnect_at_eof", "1" });
         // Decode the content-verify pass on the GPU (NVDEC) when enabled — an INPUT option, so it applies to the
         // single shared decode that feeds the black/freeze filters. The -c copy recording output never decodes, so
         // it's untouched. Skipped when content-verify is off (nothing decodes) or hwaccel is none/software.
@@ -459,7 +610,10 @@ public sealed class RecorderSupervisor
 
         // Parse ffmpeg -progress on stdout. out_time_us / total_size are reliable progress
         // signals even on Windows, where an actively-written segment file's size on disk lags.
-        _ = Task.Run(async () =>
+        // The task handle is kept: at process exit the reader is awaited (bounded) so ffmpeg's FINAL
+        // progress block — the authoritative out_time_us of the whole launch — is parsed before the
+        // chunk-shortfall check reads it (a faster-than-realtime pull can exit before the pipe drains).
+        var stdoutReader = Task.Run(async () =>
         {
             try
             {
@@ -492,6 +646,7 @@ public sealed class RecorderSupervisor
         });
 
         long lastOutUs = -1, lastBytes = -1;
+        var launchStartFileCount = MeasureSegments(segDir).count; // segments present BEFORE this launch (for the exit-time duration fallback)
         var lastFileCount = -1;
         var lastGrowth = EpochTime.Now();
         var promoted = false;
@@ -507,9 +662,16 @@ public sealed class RecorderSupervisor
             if (proc.HasExited)
             {
                 var rc = proc.ExitCode;
+                // Drain the -progress pipe before reading the final out_time_us: a faster-than-realtime pull can
+                // exit before the async reader parsed ffmpeg's last progress block, and an unread 0 would make the
+                // shortfall check purge and re-pull chunks that actually completed. The disk floor stays as a
+                // last resort (segments hold ≥8s of wall clock each, a strict LOWER bound on content).
+                try { await stdoutReader.WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
                 var tail = string.Join(" | ", stderrTail.TakeLast(3));
                 // rc==0 is a clean EOF (the live input ended cleanly — a momentary line drop). rc!=0 is a real crash.
-                return new CaptureExit(rc == 0 ? ExitKind.CleanEof : ExitKind.Crashed, $"exited rc={rc}: {tail}");
+                var launchSegs = Math.Max(0, MeasureSegments(segDir).count - launchStartFileCount);
+                var exitOutUs = Math.Max(prog.OutTimeUs, (long)launchSegs * 8_000_000L);
+                return new CaptureExit(rc == 0 ? ExitKind.CleanEof : ExitKind.Crashed, $"exited rc={rc}: {tail}", exitOutUs);
             }
 
             if (stopToken.IsCancellationRequested || EpochTime.Now() >= await windowEndAsync())
@@ -688,6 +850,39 @@ public sealed class RecorderSupervisor
         catch { try { proc.Kill(entireProcessTree: true); } catch { } }
     }
 
+    /// <summary>Seconds of CONTENT one launch captured, from the global PTS span of its segment files. Accurate
+    /// for faster-than-realtime archive pulls (where both ffmpeg's -copyts progress clock and wall-clock segment
+    /// counts mislead); a launch's chunk is continuous so span == duration. 0 when nothing probes.</summary>
+    private async Task<long> MeasureLaunchContentSecondsAsync(string segDir, int launchSeq)
+    {
+        double min = double.PositiveInfinity, max = double.NegativeInfinity; var any = false;
+        try
+        {
+            foreach (var f in Directory.EnumerateFiles(segDir, $"seg-*-L{launchSeq:D3}.ts"))
+            {
+                var (mn, mx, ok) = await ProbePtsRangeAsync(f);
+                if (!ok) continue;
+                any = true;
+                if (mn < min) min = mn;
+                if (mx > max) max = mx;
+            }
+        }
+        catch { }
+        return any ? (long)Math.Max(0, max - min) : 0;
+    }
+
+    /// <summary>Delete the segments a single ffmpeg launch produced (their names embed the launch counter) —
+    /// used before retrying a finite chunk, whose retry re-serves the same content from the archive.</summary>
+    private static void PurgeLaunchSegments(string segDir, int launchSeq)
+    {
+        try
+        {
+            foreach (var f in Directory.EnumerateFiles(segDir, $"seg-*-L{launchSeq:D3}.ts"))
+                try { File.Delete(f); } catch { }
+        }
+        catch { }
+    }
+
     private static (long total, int count) MeasureSegments(string segDir)
     {
         long total = 0; var count = 0;
@@ -703,7 +898,7 @@ public sealed class RecorderSupervisor
     }
 
     /// <summary>Concat the closed TS segments (lossless -c copy) into the final MKV.</summary>
-    private async Task<(bool ok, long bytes, int durationS, string? gaps)> FinalizeAsync(int recordingId, string segDir, string outputPath)
+    private async Task<(bool ok, long bytes, int durationS, string? gaps)> FinalizeAsync(int recordingId, string segDir, string outputPath, bool isCatchup = false)
     {
         var segs = Directory.Exists(segDir)
             ? Directory.EnumerateFiles(segDir, "seg-*.ts").OrderBy(f => f, StringComparer.Ordinal).ToList()
@@ -738,7 +933,13 @@ public sealed class RecorderSupervisor
         // a fully-duplicate segment is dropped outright; a partially-overlapping one starts at an `inpoint` so its
         // duplicate head is skipped. All lossless (-c copy) and a strict improvement over replaying it verbatim
         // (the "going back in time" bug). Falls back to a plain list if PTS can't be read — never worse than before.
-        var deoverlap = await GetBoolSettingAsync("finalize_deoverlap_enabled", true);
+        // De-overlap assumes ONE continuous live timeline, where a backward PTS means the provider re-served
+        // buffered seconds. A CATCH-UP pull breaks that assumption by design: every archive chunk request restarts
+        // the provider's PTS near zero, so chunk 2..N probed as "wholly inside the timeline" and were DROPPED as
+        // duplicates — a 3-chunk pull finalized with only chunk 1 (found by the v1.45 E2E harness). Catch-up
+        // finalizes with the plain in-order concat instead: chunks are sequential and non-overlapping by
+        // construction, and the concat demuxer re-bases timestamps at file boundaries.
+        var deoverlap = await GetBoolSettingAsync("finalize_deoverlap_enabled", true) && !isCatchup;
         var listPath = Path.Combine(segDir, "concat.ffconcat");
         var (listLines, trimmed, dropped, jumpDropped, rebased) = await BuildConcatListAsync(segs, deoverlap);
         await File.WriteAllLinesAsync(listPath, listLines);
@@ -896,6 +1097,19 @@ public sealed class RecorderSupervisor
         await File.WriteAllTextAsync(path, meta);
         _log.LogInformation("[Recorder] Recording {Id}: embedding {Source} chapter mark(s)", recordingId, source);
         return path;
+    }
+
+    /// <summary>True when the recording is a catch-up (archive) pull. Fresh scope; false on any read error.</summary>
+    private async Task<bool> IsCatchupAsync(int recordingId)
+    {
+        try
+        {
+            using var scope = _d.Scopes.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<DVarrDbContext>();
+            return await db.Recordings.AsNoTracking().Where(r => r.Id == recordingId)
+                .Select(r => r.CatchupSourceStartUtc != null).FirstOrDefaultAsync();
+        }
+        catch { return false; }
     }
 
     /// <summary>Resolve a boolean setting from a fresh scope (finalize can run from boot-recovery, with no ambient settings).</summary>

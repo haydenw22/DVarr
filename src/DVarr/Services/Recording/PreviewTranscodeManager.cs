@@ -79,7 +79,7 @@ public sealed class PreviewTranscodeManager : IAsyncDisposable
                 sourceId = src.Id;
                 ua = src.UserAgent;
                 needsLease = string.IsNullOrWhiteSpace(ch.DirectUrl);
-                url = needsLease ? xtream.StreamTsUrl(src, ch.StreamId) : ch.DirectUrl!;
+                url = needsLease ? xtream.StreamUrl(src, ch.StreamId) : ch.DirectUrl!;
             }
 
             // Acquire the slot. Retry briefly: a just-closed mpegts preview on the same credential may still be
