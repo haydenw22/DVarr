@@ -12,6 +12,12 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.45.2] — 2026-07-28
+Completes one v1.45.1 fix that only worked for part of the traffic it was meant to cover.
+
+### Fixed
+- **The LAN-only restriction now applies to traffic arriving through the reverse proxy.** v1.45.1 restricted the credential-free endpoints (the M3U/XMLTV export, the Home Assistant status feed, the stream redirect that carries your provider login) to local-network callers — but it judged that by the address the request arrived *from*, which behind a reverse proxy is always the proxy itself. Every public request therefore still looked local: the channel export and status feed remained reachable from the internet, with only an nginx rule standing between the outside world and the credential-bearing redirect. DVarr now resolves the real client address through the proxy — using the same trust rules as the login rate limiter, so forwarded headers count only when the request genuinely came via the proxy — and refuses these endpoints for anyone off the LAN. Local devices are unaffected.
+
 ## [1.45.1] — 2026-07-28
 A full audit of the codebase, prompted by a Formula 1 recording that quietly lost ~26 minutes. Six independent review passes over the recorder, scheduler, rescue, guide ingest, API and library; everything confirmed is fixed here. No new features.
 

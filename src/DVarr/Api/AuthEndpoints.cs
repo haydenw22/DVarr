@@ -178,13 +178,17 @@ public static class AuthEndpoints
     internal static string ClientIpFor(HttpContext ctx) => ClientIp(ctx);
     internal static bool IsRateLimitedFor(string ip) => IsRateLimited(ip);
     internal static void RecordFailureFor(string ip) => RecordFailure(ip);
-    /// <summary>True when the request's immediate peer is on the LAN/loopback (or the local proxy chain).
-    /// Used by the middleware to keep the credential-free "LAN-only" exempt surfaces off the public internet.</summary>
-    internal static bool IsPrivatePeer(HttpContext ctx)
-    {
-        var peer = ctx.Connection.RemoteIpAddress;
-        return peer is not null && IsPrivate(peer);
-    }
+    /// <summary>True when the EFFECTIVE client is on the LAN — used by the middleware to keep the credential-free
+    /// "LAN-only" exempt surfaces off the public internet.
+    ///
+    /// Deliberately not the raw peer: DVarr sits behind SWAG/nginx, so the peer address of a request that came from
+    /// the internet is the proxy's own (private) container IP — a raw-peer test would call every public request
+    /// "LAN" and exempt it. This reuses <see cref="ClientIp"/>'s trust model instead: forwarded headers are honoured
+    /// ONLY when the immediate peer is the local proxy chain, so a public caller is judged on the real address the
+    /// proxy reports, while a caller who reaches the origin directly is judged on their own peer address no matter
+    /// what headers they invent.</summary>
+    internal static bool IsPrivateClient(HttpContext ctx)
+        => System.Net.IPAddress.TryParse(ClientIp(ctx), out var ip) && IsPrivate(ip);
 
     private static string ClientIp(HttpContext ctx)
     {

@@ -110,13 +110,15 @@ public sealed class BasicAuthMiddleware
         // PathString.Value is the canonical, decoded path. Guard against a null value (e.g. request to "*").
         var p = context.Request.Path.Value ?? string.Empty;
 
-        // LAN-ONLY exemptions are gated on the PEER ADDRESS as well as the path. Each of these is documented as
+        // LAN-ONLY exemptions are gated on the CLIENT ADDRESS as well as the path. Each of these is documented as
         // "the caller can't present auth and is on the LAN" — but the process is published on :1867 and proxied
         // publicly, so a path-only check made them internet-reachable, with nothing but an external nginx rule
         // in between. /api/stream/{id}.ts in particular 302s to the provider URL, which carries the IPTV login
         // in its path: two unauthenticated requests (filtered.m3u → stream) would have disclosed the credential.
-        // Off-LAN callers fall through to the normal session/basic gate.
-        var lan = AuthEndpoints.IsPrivatePeer(context);
+        // The client address is resolved through the proxy (see IsPrivateClient) — testing the raw peer would be
+        // useless behind SWAG, where every request arrives from a private container IP. Off-LAN callers fall
+        // through to the normal session/basic gate.
+        var lan = AuthEndpoints.IsPrivateClient(context);
 
         // The login page itself must render while logged out. It inlines ALL its css/js so this single exact path is
         // the only static asset that needs exempting (no /js/*, /css/*, or logo request travels before login).
