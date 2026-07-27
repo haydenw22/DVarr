@@ -30,6 +30,7 @@ public sealed class BasicAuthMiddleware
 {
     private readonly RequestDelegate _next;
     private readonly string _user;
+    private readonly string _pass;
     private readonly byte[] _userBytes;
     private readonly byte[] _passBytes;
 
@@ -43,10 +44,10 @@ public sealed class BasicAuthMiddleware
 
         // Primary env-var names first; the DVarr: config-section keys are trivial aliases.
         _user = config["DVARR_AUTH_USER"] ?? config["DVarr:AuthUser"] ?? "user";
-        var pass = config["DVARR_AUTH_PASS"] ?? config["DVarr:AuthPass"] ?? "password";
+        _pass = config["DVARR_AUTH_PASS"] ?? config["DVarr:AuthPass"] ?? "password";
 
         _userBytes = Encoding.UTF8.GetBytes(_user);
-        _passBytes = Encoding.UTF8.GetBytes(pass);
+        _passBytes = Encoding.UTF8.GetBytes(_pass);
     }
 
     public async Task InvokeAsync(HttpContext context)
@@ -54,10 +55,31 @@ public sealed class BasicAuthMiddleware
         var request = context.Request;
 
         // Decision order (documented in the PR): exempt surface -> valid session cookie -> valid Basic header.
-        if (IsExempt(request.Path) || await HasValidSessionAsync(context) || IsAuthorizedBasic(request))
+        if (IsExempt(context) || await HasValidSessionAsync(context))
         {
             await _next(context);
             return;
+        }
+
+        // Basic header: rate-limited on the SAME per-IP counter as the login form. Without this, an attacker
+        // simply skipped /api/auth/login and brute-forced any gated path with an Authorization header — unlimited
+        // attempts, no record. A wrong header now counts as a failed attempt and eventually 429s.
+        var hasBasicHeader = !string.IsNullOrEmpty(request.Headers.Authorization);
+        if (hasBasicHeader)
+        {
+            var ip = AuthEndpoints.ClientIpFor(context);
+            if (AuthEndpoints.IsRateLimitedFor(ip))
+            {
+                context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+                await context.Response.WriteAsJsonAsync(new { error = "too many attempts, try again later" });
+                return;
+            }
+            if (IsAuthorizedBasic(request))
+            {
+                await _next(context);
+                return;
+            }
+            AuthEndpoints.RecordFailureFor(ip);
         }
 
         // Not authenticated. A browser navigating to a page should land on the login screen; anything else
@@ -83,10 +105,22 @@ public sealed class BasicAuthMiddleware
     /// segments by the ASP.NET pipeline), compared OrdinalIgnoreCase, so "//" double-slash and case tricks can't
     /// smuggle a protected path past the check.
     /// </summary>
-    private static bool IsExempt(PathString path)
+    private static bool IsExempt(HttpContext context)
     {
         // PathString.Value is the canonical, decoded path. Guard against a null value (e.g. request to "*").
-        var p = path.Value ?? string.Empty;
+        var p = context.Request.Path.Value ?? string.Empty;
+
+        // LAN-ONLY exemptions are gated on the PEER ADDRESS as well as the path. Each of these is documented as
+        // "the caller can't present auth and is on the LAN" — but the process is published on :1867 and proxied
+        // publicly, so a path-only check made them internet-reachable, with nothing but an external nginx rule
+        // in between. /api/stream/{id}.ts in particular 302s to the provider URL, which carries the IPTV login
+        // in its path: two unauthenticated requests (filtered.m3u → stream) would have disclosed the credential.
+        // Off-LAN callers fall through to the normal session/basic gate.
+        var lan = AuthEndpoints.IsPrivatePeer(context);
+
+        // The login page itself must render while logged out. It inlines ALL its css/js so this single exact path is
+        // the only static asset that needs exempting (no /js/*, /css/*, or logo request travels before login).
+        if (string.Equals(p, "/login.html", StringComparison.OrdinalIgnoreCase)) return true;
 
         // The login page itself must render while logged out. It inlines ALL its css/js so this single exact path is
         // the only static asset that needs exempting (no /js/*, /css/*, or logo request travels before login).
@@ -104,18 +138,20 @@ public sealed class BasicAuthMiddleware
         if (p.StartsWith("/api/calendar.ics", StringComparison.OrdinalIgnoreCase)) return true;
 
         // Plex Custom Metadata Provider: the LAN Plex server calls /plex (302) and /api/plex/* and can't send
-        // auth. Public sports metadata only — never the IPTV provider — so no secret is exposed.
-        if (p.StartsWith("/plex", StringComparison.OrdinalIgnoreCase)) return true;
-        if (p.StartsWith("/api/plex/", StringComparison.OrdinalIgnoreCase)) return true;
+        // auth. Public sports metadata only — never the IPTV provider. LAN-only (exact /plex, so an unmatched
+        // /plexanything can't fall through to the SPA shell unauthenticated).
+        if (lan && p.Equals("/plex", StringComparison.OrdinalIgnoreCase)) return true;
+        if (lan && p.StartsWith("/api/plex/", StringComparison.OrdinalIgnoreCase)) return true;
 
         // Sonarr-emulation surface for Prowlarr; already guarded by its own X-Api-Key constant-time check.
         if (p.StartsWith("/api/v3/", StringComparison.OrdinalIgnoreCase)) return true;
 
-        // Credential-free M3U/XMLTV export for LAN IPTV players (no login travels in the exported playlist).
-        if (p.StartsWith("/api/iptv/", StringComparison.OrdinalIgnoreCase)) return true;
+        // Credential-free M3U/XMLTV export for LAN IPTV players (no login travels in the exported playlist —
+        // but it enumerates the channel ids feeding /api/stream/{id}.ts below, so it is LAN-only too).
+        if (lan && p.StartsWith("/api/iptv/", StringComparison.OrdinalIgnoreCase)) return true;
 
-        // Home Assistant polls this REST status endpoint without credentials.
-        if (p.StartsWith("/api/ha/status", StringComparison.OrdinalIgnoreCase)) return true;
+        // Home Assistant polls this REST status endpoint without credentials (LAN-only).
+        if (lan && p.StartsWith("/api/ha/status", StringComparison.OrdinalIgnoreCase)) return true;
 
         // Media-server "watched" webhooks (Plex/Jellyfin): a media server can't present DVarr's login, so these
         // two EXACT endpoints are login-exempt — but each carries its OWN per-install secret token (401 without
@@ -124,17 +160,20 @@ public sealed class BasicAuthMiddleware
         if (p.Equals("/api/webhooks/plex", StringComparison.OrdinalIgnoreCase)
             || p.Equals("/api/webhooks/jellyfin", StringComparison.OrdinalIgnoreCase)) return true;
 
-        // EXACT /api/stream/{digits}.ts only: LAN IPTV players pull the stream proxy with no headers (already
-        // 403-blocked externally at nginx). Deliberately NOT a prefix — /api/stream/recordings (the UI's SSE)
-        // must stay gated so the logged-in browser attaches its session cookie / cached basic creds automatically.
-        if (StreamTsRegex.IsMatch(p)) return true;
+        // EXACT /api/stream/{digits}.ts only, and LAN-only: this endpoint 302-redirects to the PROVIDER URL,
+        // whose path carries the IPTV username/password — reachable from the internet it was a credential
+        // disclosure (pull /api/iptv/filtered.m3u for ids, then read the Location header). Deliberately NOT a
+        // prefix — /api/stream/recordings (the UI's SSE) must stay gated so the logged-in browser attaches its
+        // session cookie / cached basic creds automatically. Digit count bounded so the exempt pattern can't
+        // match paths the {channelId:int} route constraint rejects (which would fall through to the SPA shell).
+        if (lan && StreamTsRegex.IsMatch(p)) return true;
 
         return false;
     }
 
     // ^/api/stream/<digits>.ts$ — anchored so nothing before/after can widen it.
     private static readonly System.Text.RegularExpressions.Regex StreamTsRegex =
-        new(@"^/api/stream/[0-9]+\.ts$",
+        new(@"^/api/stream/[0-9]{1,9}\.ts$",
             System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
     /// <summary>
@@ -163,7 +202,7 @@ public sealed class BasicAuthMiddleware
             }
         }
 
-        return AuthEndpoints.ValidateToken(key, cookie, _user);
+        return AuthEndpoints.ValidateToken(key, cookie, _user, _pass);
     }
 
     private bool IsAuthorizedBasic(HttpRequest request)

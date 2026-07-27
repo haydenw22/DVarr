@@ -23,7 +23,7 @@ public static class HealthEndpoints
             DVarr.Data.RecordingState.Finalizing,
         };
 
-        app.MapGet("/api/health", async (DVarrDbContext db, DVarr.Infrastructure.FfmpegLocator ff, RuntimePaths paths, SettingsService settings) =>
+        app.MapGet("/api/health", async (DVarrDbContext db, DVarr.Infrastructure.FfmpegLocator ff, RuntimePaths paths, SettingsService settings, ILoggerFactory lf) =>
         {
             var now = EpochTime.Now();
 
@@ -55,7 +55,9 @@ public static class HealthEndpoints
                         .FirstOrDefaultAsync();
                 }
             }
-            catch (Exception ex) { dbOk = false; dbErr = ex.Message; }
+            // /api/health is auth-exempt (the container HEALTHCHECK can't log in), so the raw exception text — which
+            // carries the database file path and other internals — must not be published. Log it; report a flag.
+            catch (Exception ex) { dbOk = false; dbErr = "unavailable"; lf.CreateLogger("Health").LogWarning(ex, "[Health] database check failed"); }
             var freeCredentials = Math.Max(0, sources - busyCredentials);
 
             // Disk gauge (dashboard) + the floors that colour it. Media = final library volume; segments = capture

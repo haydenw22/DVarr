@@ -171,7 +171,12 @@ public sealed class RetentionService
         var dueIds = new List<int>();
         foreach (var c in candidates)
         {
-            var mode = c.LeagueId is int lid && leagueModes.TryGetValue(lid, out var lm) ? lm : globalMode;
+            // League-less items (adopted files under a folder matching no local league) are OUT OF SCOPE for this
+            // tick: PlanAsync iterates leagues only, so the Library's "Preview cleanup" and the daily sweep can
+            // never show or delete them. Applying the global mode here deleted files the user was never shown —
+            // silently, and (before the webhook fix above) sometimes on a false watched flag.
+            if (c.LeagueId is not int lid) continue;
+            var mode = leagueModes.TryGetValue(lid, out var lm) ? lm : globalMode;
             if (mode != "watched") continue;
             if (now >= WatchedDeleteEarliest(c.WatchedUtc!.Value, c.DurationS, cfg)) dueIds.Add(c.Id);
         }

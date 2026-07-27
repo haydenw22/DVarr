@@ -172,6 +172,16 @@ public sealed class EpgIngestService
             }
             Complete();             // flush a trailing <programme> whose <title> was the final child read
             await FlushBatchAsync();
+            // A parse that yielded NOTHING is not a good guide — it's an empty <tv/> from a provider mid-maintenance,
+            // or a feed whose timestamps this parser couldn't read. Swapping on it deleted every current and future
+            // programme (the delete keeps only finished history), so a single bad 4am auto-sync silently wiped the
+            // guide until the next good one. Treat it like the truncated case: keep the last-known-good guide.
+            if (total == 0 && !truncated)
+            {
+                await _gate.WriteAsync(async () => { await _db.Programmes.Where(p => p.SourceId == sourceId && p.Id > maxOldId).ExecuteDeleteAsync(ct); }, ct);
+                _log.LogWarning("[EPG] Source {Id}: the feed parsed to ZERO programmes — keeping the previous guide", sourceId);
+                return new EpgResult(sourceId, false, 0, 0, false, "the guide feed contained no programmes — previous guide kept");
+            }
             if (!truncated)
                 // Full parse succeeded → swap: drop the OLD guide, leaving only this run's rows. Stamp the source's
                 // last-good EPG sync time in the same write — the re-pick sweep reads it to detect a >12h-stale guide.
@@ -357,19 +367,46 @@ public sealed class EpgIngestService
             sourceId, changed.Count(x => x.SetMatched != null), changed.Count(x => x.ClearProviderId));
     }
 
-    /// <summary>Parse XMLTV time "yyyyMMddHHmmss [+/-HHMM]" to a UTC epoch.</summary>
+    /// <summary>Parse an XMLTV time to a UTC epoch. The DTD allows a truncated date ("yyyyMMdd", "yyyyMMddHHmm")
+    /// and an offset of "+HHMM", "+HH:MM" or "+HH" — all seen in the wild. Previously only the exact
+    /// "yyyyMMddHHmmss [+HHMM]" form parsed: a colon in the offset THREW (dropping the programme entirely, so a
+    /// feed in that format yielded zero rows), a bare "+HH" was silently treated as UTC (shifting a whole guide by
+    /// hours), and short stamps were rejected outright. An unreadable OFFSET now degrades to UTC instead of
+    /// discarding the programme — a shifted listing beats no listing.</summary>
     internal static long? ParseXmltvTime(string? s)
     {
-        if (string.IsNullOrWhiteSpace(s) || s.Length < 14) return null;
+        if (string.IsNullOrWhiteSpace(s)) return null;
         try
         {
-            var dt = DateTime.ParseExact(s.Substring(0, 14), "yyyyMMddHHmmss", CultureInfo.InvariantCulture, DateTimeStyles.None);
+            var t = s.Trim();
+            // Split the stamp from the optional offset at the first space, else at the first +/- after the digits.
+            var sp = t.IndexOf(' ');
+            string stamp, rest;
+            if (sp > 0) { stamp = t[..sp]; rest = t[(sp + 1)..].Trim(); }
+            else
+            {
+                var signIdx = t.IndexOfAny(new[] { '+', '-' }, 1);
+                if (signIdx > 0) { stamp = t[..signIdx]; rest = t[signIdx..].Trim(); }
+                else { stamp = t; rest = ""; }
+            }
+            stamp = new string(stamp.Where(char.IsDigit).ToArray());
+            if (stamp.Length < 8) return null;
+            // Right-pad a truncated stamp: yyyyMMdd → yyyyMMdd000000.
+            if (stamp.Length < 14) stamp = stamp.PadRight(14, '0');
+            else if (stamp.Length > 14) stamp = stamp[..14];
+            var dt = DateTime.ParseExact(stamp, "yyyyMMddHHmmss", CultureInfo.InvariantCulture, DateTimeStyles.None);
+
             var off = TimeSpan.Zero;
-            var rest = s.Length > 14 ? s.Substring(14).Trim() : "";
-            if (rest.Length >= 5 && (rest[0] == '+' || rest[0] == '-'))
+            if (rest.Length >= 2 && (rest[0] == '+' || rest[0] == '-'))
             {
                 var sign = rest[0] == '-' ? -1 : 1;
-                off = new TimeSpan(sign * int.Parse(rest.Substring(1, 2)), sign * int.Parse(rest.Substring(3, 2)), 0);
+                var digits = new string(rest.Skip(1).Where(char.IsDigit).ToArray());   // tolerates "+10:00"
+                if (digits.Length >= 2 && int.TryParse(digits[..2], out var oh))
+                {
+                    var om = 0;
+                    if (digits.Length >= 4) int.TryParse(digits.Substring(2, 2), out om);
+                    if (oh <= 14 && om < 60) off = new TimeSpan(sign * oh, sign * om, 0);
+                }
             }
             return new DateTimeOffset(DateTime.SpecifyKind(dt, DateTimeKind.Unspecified), off).ToUnixTimeSeconds();
         }

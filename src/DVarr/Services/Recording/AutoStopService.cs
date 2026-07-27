@@ -216,7 +216,11 @@ public sealed class AutoStopService : BackgroundService
                 // NEVER shortens a window: the terminal branch only trims a previous EXTENSION back (never below
                 // the scheduled end), the in-play branch only grows.
                 if (!autoStop || (c.AutoStopMode is not null && c.AutoStopMode != "auto")) continue;
-                if (now < c.RecEndUtc - DecideAheadS) continue;
+                // The DecideAheadS gate belongs to the EXTEND branch only. Applied to both, a game that finished
+                // right after an extension couldn't be clamped until 120s before the (already extended) end, so the
+                // trim never recovered more than ~2 of the 15 extra minutes and the credential stayed occupied.
+                var canClamp = cls == StatusClass.Terminal && c.RecEndUtc > originalEnd && now < c.RecEndUtc;
+                if (now < c.RecEndUtc - DecideAheadS && !canClamp) continue;
 
                 if (cls == StatusClass.Terminal)
                 {
@@ -238,9 +242,17 @@ public sealed class AutoStopService : BackgroundService
 
                     // Slot boundary: never let this window (incl. post-pad) reach into the NEXT recording's pre-roll
                     // on the same credential (1 stream/login) — queried fresh each step so a cancelled blocker frees us.
+                    // Only a genuinely UPCOMING live recording bounds the extension. Excluded:
+                    //  • catch-up pulls — their window is a download timeout, they're created with StartUtc=now
+                    //    (so they'd compute an allowedEnd in the PAST and pin the extension to zero), and a queued
+                    //    pull simply slides or is preempted; its content sits in the archive either way;
+                    //  • anything whose padded window has already started — that's a contemporaneous row, not a
+                    //    future booking, and it can't be "protected" by clipping the game currently in play.
                     var next = await db.Recordings.AsNoTracking()
                         .Where(n => n.Id != c.Id && n.SourceId == c.SourceId
                                     && (n.State == RecordingState.Pending || n.State == RecordingState.Starting)
+                                    && n.CatchupSourceStartUtc == null
+                                    && n.StartUtc - n.PrePadS > now
                                     && n.EndUtc + n.PostPadS > now)
                         .OrderBy(n => n.StartUtc - n.PrePadS)
                         .Select(n => new { n.StartUtc, n.PrePadS })

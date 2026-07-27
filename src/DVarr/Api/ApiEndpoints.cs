@@ -152,6 +152,10 @@ public static class ApiEndpoints
             };
             if (await db.Recordings.AnyAsync(r => r.SourceId == id && blocked.Contains(r.State)))
                 return Results.Json(new { error = "source has active or pending recordings" }, statusCode: 409);
+            // An in-flight preview/probe holds an Active lease whose row cascade-deletes with the source, pulling
+            // the channel out from under a streaming connection and leaving its release to update a vanished row.
+            if (await db.TunerLeases.AnyAsync(l => l.SourceId == id && l.State == LeaseState.Active))
+                return Results.Json(new { error = "source is streaming right now (preview or probe) — stop it and retry" }, statusCode: 409);
             await gate.WriteAsync(async () =>
             {
                 var chIds = await db.Channels.Where(c => c.SourceId == id).Select(c => c.Id).ToListAsync();
@@ -622,7 +626,10 @@ public static class ApiEndpoints
                 await gate.WriteAsync(async () =>
                 {
                     var rr = await db.Recordings.FindAsync(id);
-                    if (rr is null) return;
+                    // Re-check inside the gate: the scheduler can arm a due Pending row between the IsActive test
+                    // above and this write, and cancelling it here would leave a live supervisor writing to a row
+                    // marked Cancelled (state bookkeeping and the capture diverge).
+                    if (rr is null || terminal.Contains(rr.State) || rec.IsActive(id)) return;
                     rr.State = RecordingState.Cancelled; rr.UpdatedUtc = EpochTime.Now(); rr.FailureReason = "cancelled by user";
                     db.Notifications.Add(new Notification { RecordingId = id, TsUtc = EpochTime.Now(), Kind = NotificationKind.Cancelled, Severity = Severity.Info, ToState = "Cancelled", Message = "cancelled by user" });
                     await db.SaveChangesAsync();
@@ -694,6 +701,11 @@ public static class ApiEndpoints
                 if (!settled)
                     return Results.Json(new { deleted = false, finalizing = true, error = "recording is still finalizing — try delete again in a moment" }, statusCode: 409);
             }
+            // Second stop AFTER the active check: the scheduler can arm a due Pending row in the gap between the
+            // check above and the recursive scratch delete below, which would otherwise pull /segments/{id} out
+            // from under a live ffmpeg. StopAsync is a no-op when nothing is running.
+            if (!await rec.StopAsync(id))
+                return Results.Json(new { deleted = false, finalizing = true, error = "recording just started and is still settling — try delete again in a moment" }, statusCode: 409);
             // Snapshot the disk artifacts from a FRESH read, not the entity tracked above (audit REC-01): StopAsync
             // settles only after finalize + media import, and the import MOVES the file and rewrites OutputPath in a
             // different scope — the tracked row still holds the pre-import flat path, so cleaning up from it would
@@ -776,7 +788,7 @@ public static class ApiEndpoints
         });
 
         // Manual override from the Conflicts view: move a pending/conflicted recording to another login and/or bump priority.
-        app.MapPost("/api/recordings/{id:int}/reassign", async (int id, ReassignRequest req, DVarrDbContext db, DbWriteGate gate, ResolverService resolver) =>
+        app.MapPost("/api/recordings/{id:int}/reassign", async (int id, ReassignRequest req, DVarrDbContext db, DbWriteGate gate, ResolverService resolver, RecorderService recorder) =>
         {
             var r = await db.Recordings.FindAsync(id);
             if (r is null) return Results.NotFound();
@@ -799,6 +811,11 @@ public static class ApiEndpoints
             {
                 // Re-validate inside the gate: the chosen login could have been disabled between EquivalentChannelsAsync
                 // (un-gated) and here — don't re-point onto a now-disabled credential.
+                // Re-validate the RECORDING too, not just the target source: it may have armed since the (un-gated)
+                // state check above, and re-pointing a running capture's channel/source would corrupt its bookkeeping.
+                var fresh = await db.Recordings.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id);
+                if (fresh is null || fresh.State is not (RecordingState.Pending or RecordingState.Conflict) || recorder.IsActive(id))
+                { aborted = true; return; }
                 if (equiv is not null)
                 {
                     var es = await db.Sources.FindAsync(equiv.SourceId);
@@ -830,7 +847,7 @@ public static class ApiEndpoints
         // Re-resolve a scheduled recording's channel against the league's CURRENT mapping (e.g. after you re-pin the
         // channel) — updates channel/source/stream + the same-credential fallback ladder IN PLACE, no delete/recreate.
         // Pending/Conflict only (never an active capture); event-linked only (a manual recording has no league mapping).
-        app.MapPost("/api/recordings/{id:int}/resolve", async (int id, DVarrDbContext db, DbWriteGate gate, ResolverService resolver) =>
+        app.MapPost("/api/recordings/{id:int}/resolve", async (int id, DVarrDbContext db, DbWriteGate gate, ResolverService resolver, RecorderService recorder) =>
         {
             var r = await db.Recordings.FindAsync(id);
             if (r is null) return Results.NotFound();
@@ -849,6 +866,11 @@ public static class ApiEndpoints
             {
                 // Re-validate inside the gate: the resolved source/channel could have been disabled between the
                 // (un-gated) resolver read and here — don't re-point a recording onto a now-disabled credential.
+                // The RECORDING is re-checked too: the scheduler may have armed it while the resolver ran, and
+                // re-pointing a live capture corrupts its channel/source bookkeeping mid-flight.
+                var freshRec = await db.Recordings.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id);
+                if (freshRec is null || freshRec.State is not (RecordingState.Pending or RecordingState.Conflict) || recorder.IsActive(id))
+                { aborted = true; return; }
                 var src = await db.Sources.FindAsync(p.SourceId);
                 var rch = await db.Channels.FindAsync(p.ChannelId);
                 if (src is null || !src.Enabled || rch is null || !rch.Enabled) { aborted = true; return; }

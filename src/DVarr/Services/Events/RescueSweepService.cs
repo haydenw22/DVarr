@@ -115,6 +115,15 @@ public sealed class RescueSweepService : BackgroundService
                 // Replay failed / was cancelled → hunt again (unless we're already past the deadline).
                 if (rep is null || rep.State is RecordingState.NeedsAttention or RecordingState.Missed or RecordingState.Cancelled)
                 {
+                    // The USER cancelling the scheduled replay means "stop", not "try again": re-opening the ticket
+                    // re-found the same re-air on the next sweep and armed a fresh recording, so the cancel button
+                    // appeared to do nothing. Honour it by cancelling the ticket instead.
+                    if (rep is { State: RecordingState.Cancelled } && (rep.FailureReason ?? "").Contains("cancelled by user", StringComparison.OrdinalIgnoreCase))
+                    {
+                        await UpdateTicketAsync(db, t.Id, x => { x.State = RescueTicketState.Cancelled; x.Note = "the scheduled replay was cancelled by the user"; }, ct);
+                        _log.LogInformation("[Rescue] ticket {Id}: user cancelled the scheduled replay — hunt stopped", t.Id);
+                        continue;
+                    }
                     // A live-preempted catch-up pull never contacted the archive — refund its attempt so two busy
                     // evenings can't exhaust the archive path without a single real failure.
                     var refund = rep is { CatchupSourceStartUtc: not null }
@@ -161,11 +170,15 @@ public sealed class RescueSweepService : BackgroundService
         foreach (var sid in sourceIds) await MaybeRefreshEpgAsync(scope, db, sid, t.Title, ct);
 
         // Effective EPG id → channel (prefer the provider tvg-id, else the name-matched id).
+        // Keyed on the UPPERCASED tvg-id: Programme.EpgChannelId is COLLATE NOCASE, so the SQL filter below matches
+        // case-insensitively while this dictionary did not — a provider whose lineup says "FoxSports3.au" and whose
+        // XMLTV says "foxsports3.au" made every candidate on that channel invisible to the sweep, and the ticket
+        // expired reporting "no re-air appeared". (The national fallback already normalises both sides this way.)
         var byKey = new Dictionary<(int Source, string Epg), Channel>();
         foreach (var c in candidates)
         {
             var eid = !string.IsNullOrEmpty(c.EpgChannelId) ? c.EpgChannelId : c.MatchedEpgId;
-            if (!string.IsNullOrEmpty(eid)) byKey.TryAdd((c.SourceId, eid!), c);
+            if (!string.IsNullOrEmpty(eid)) byKey.TryAdd((c.SourceId, eid!.ToUpperInvariant()), c);
         }
         if (byKey.Count == 0) { await BumpAsync(db, t.Id, now + interval, now, "mapped channels aren't linked to the guide", ct); return; }
 
@@ -192,7 +205,7 @@ public sealed class RescueSweepService : BackgroundService
         // Page through the WHOLE window by keyset instead of scoring an arbitrary 400-row prefix — with
         // whole-source search enabled, early unrelated programmes used to crowd the real re-air out of the
         // candidate set entirely (audit RESCUE-04). Hard cap is a runaway backstop, far above any real window.
-        var found = new List<(Programme P, double Score, Channel Chan)>();
+        var found = new List<(Programme P, double Score, Channel Chan, int Coverage)>();
         long curStart = long.MinValue; var curId = 0; var scanned = 0;
         while (scanned < 50_000)
         {
@@ -207,7 +220,7 @@ public sealed class RescueSweepService : BackgroundService
             curStart = page[^1].StartUtc; curId = page[^1].Id;
             foreach (var p in page)
             {
-                var chan = byKey.GetValueOrDefault((p.SourceId, p.EpgChannelId));
+                var chan = byKey.GetValueOrDefault((p.SourceId, p.EpgChannelId.ToUpperInvariant()));
                 if (chan is null) continue;
                 var score = ResolverService.EventSimilarity(p.Title, query, sideA, sideB);
                 if (twoSided)
@@ -215,19 +228,21 @@ public sealed class RescueSweepService : BackgroundService
                     if (score < MinTitleScore || !ResolverService.ShowsBothTeams(p.Title, sideA, sideB)) continue;
                 }
                 else if (score < MinSingleSidedScore) continue;
-                found.Add((p, score, chan));
+                found.Add((p, score, chan, ResolverService.SideTokenCoverage(p.Title, sideA, sideB)));
             }
         }
 
         if (found.Count == 0) { await BumpAsync(db, t.Id, now + interval, now, "no re-air in the guide yet", ct); return; }
 
-        // Best title match wins; earliest air breaks ties. But two DIFFERENT programmes scoring within the margin
-        // is a coin flip (doubleheaders, similarly-named fixtures) — wait for a clearer guide rather than guess.
-        // The same title on another channel/time is just the same re-air and never blocks.
-        var ordered = found.OrderByDescending(x => x.Score).ThenBy(x => x.P.StartUtc).ToList();
+        // The title NAMING MORE of the fixture wins first, then the best similarity, then the earliest air. Ranking
+        // on similarity alone let a terser wrong programme (a same-city fixture from another competition) beat the
+        // fuller right one, because Jaccard punishes the extra words in a complete title. Two DIFFERENT programmes
+        // at the same coverage and within the score margin is still a coin flip (doubleheaders) — wait for a
+        // clearer guide rather than guess. The same title on another channel/time is just the same re-air.
+        var ordered = found.OrderByDescending(x => x.Coverage).ThenByDescending(x => x.Score).ThenBy(x => x.P.StartUtc).ToList();
         var best = ordered[0];
         var rival = ordered.Skip(1).FirstOrDefault(x => !string.Equals(x.P.Title, best.P.Title, StringComparison.OrdinalIgnoreCase));
-        if (rival.P is not null && best.Score - rival.Score < AmbiguityMargin)
+        if (rival.P is not null && rival.Coverage == best.Coverage && best.Score - rival.Score < AmbiguityMargin)
         {
             await BumpAsync(db, t.Id, now + interval, now,
                 "two different programmes match almost equally — waiting for a clearer guide", ct);
@@ -298,7 +313,7 @@ public sealed class RescueSweepService : BackgroundService
             c.TvArchive && (c.TvArchiveDuration ?? 0) > 0
             && t.EventStartUtc >= now - (long)c.TvArchiveDuration!.Value * 86400 + 3600;
 
-        (Channel Chan, long PullStart, long PullEnd, double Sim, bool Corroborated)? best = null;
+        (Channel Chan, long PullStart, long PullEnd, double Sim, bool Corroborated, int Coverage)? best = null;
 
         foreach (var kv in byKey)
         {
@@ -315,8 +330,12 @@ public sealed class RescueSweepService : BackgroundService
                     if (score < MinTitleScore || !ResolverService.ShowsBothTeams(p.Title, sideA, sideB)) continue;
                 }
                 else if (score < MinSingleSidedScore) continue;
-                if (best is null || score > best.Value.Sim)
-                    best = (chan, p.StartUtc - CatchupHeadPadS, Math.Max(p.StopUtc, t.EventEndUtc) + CatchupTailPadS, score, true);
+                // Same ranking rule as the re-air hunt: the listing that NAMES more of the fixture wins before the
+                // one that merely scores higher (see SideTokenCoverage) — a catch-up pull commits to a download.
+                var coverage = ResolverService.SideTokenCoverage(p.Title, sideA, sideB);
+                if (best is null || coverage > best.Value.Coverage
+                    || (coverage == best.Value.Coverage && score > best.Value.Sim))
+                    best = (chan, p.StartUtc - CatchupHeadPadS, Math.Max(p.StopUtc, t.EventEndUtc) + CatchupTailPadS, score, true, coverage);
             }
         }
 
@@ -333,16 +352,21 @@ public sealed class RescueSweepService : BackgroundService
                          ?? await db.Channels.AsNoTracking().FirstOrDefaultAsync(c => c.Id == ocid && c.Enabled
                                 && db.Sources.Any(s => s.Id == c.SourceId && s.Enabled), ct);
                 if (oc is not null && oc.Enabled && ArchiveCovers(oc))
-                    best = (oc, t.EventStartUtc - CatchupHeadPadS, t.EventEndUtc + CatchupTailPadS, 0, false);
+                    best = (oc, t.EventStartUtc - CatchupHeadPadS, t.EventEndUtc + CatchupTailPadS, 0, false, 0);
             }
         }
         if (best is null) return false;
 
         var pick = best.Value;
-        var pullStart = Math.Max(pick.PullStart, now - (long)(pick.Chan.TvArchiveDuration ?? 1) * 86400);
+        // Same +3600 safety margin ArchiveCovers uses: a pull anchored exactly at the retention edge would lose
+        // its head as the window rolls forward mid-download.
+        var pullStart = Math.Max(pick.PullStart, now - (long)(pick.Chan.TvArchiveDuration ?? 1) * 86400 + 3600);
         var pullEnd = Math.Min(pick.PullEnd, now - 60); // never ask the archive for the future
         if (pullEnd - pullStart < 600) return false;    // nothing meaningful left to pull
-        var pullDur = (int)Math.Min(pullEnd - pullStart, CatchupMaxPullS);
+        // If the window exceeds the runaway cap, trim the HEAD, not the tail — house rule: never cut the ending
+        // off a game (a bad guide StopUtc must not cost the final minutes).
+        if (pullEnd - pullStart > CatchupMaxPullS) pullStart = pullEnd - CatchupMaxPullS;
+        var pullDur = (int)(pullEnd - pullStart);
 
         var scheduled = false;
         await _gate.WriteAsync(async () =>

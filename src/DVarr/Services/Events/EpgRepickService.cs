@@ -92,7 +92,8 @@ public sealed class EpgRepickService
         // fixture? Re-evaluated every sweep (the guide firms up over time) and frozen once the capture arms. A
         // recording that finalizes Done with the flag still set very likely captured the wrong programme — the
         // finalize path then opens a rescue ticket that keeps hunting a guide-verified copy (v1.45).
-        await UpdateUncorroboratedFlagAsync(rec, ev, ct);
+        var currentShowsFixture = await CurrentChannelShowsFixtureAsync(rec, ev, ct);
+        await SetUncorroboratedIfChangedAsync(rec, currentShowsFixture == false, ct);
 
         // National-broadcast fallback: when NO mapped channel actually shows this game (best mapped EPG match is
         // weak/zero — EpgScore now only counts a both-team match), the game may be on a channel the user didn't map
@@ -106,7 +107,10 @@ public sealed class EpgRepickService
         // showing a blackout slate or studio filler. Say so ONCE, close to air, instead of handing back three hours
         // of the wrong programme with no indication. A warning only: guide data is patchy and must never block a
         // recording that would otherwise have worked.
-        if (best.EpgScore < MinEpgScore) await WarnNoGuideCorroborationAsync(rec, ev, ct);
+        // …unless the channel it is ALREADY on shows the fixture (a previous national-fallback move landed it on an
+        // unmapped channel, which the mapped ladder can't score) — warning "nothing lists this fixture" about a
+        // recording sitting on a channel whose guide names both teams is just wrong.
+        if (best.EpgScore < MinEpgScore && currentShowsFixture != true) await WarnNoGuideCorroborationAsync(rec, ev, ct);
 
         if (best.ChannelId == rec.ChannelId) return false;                       // already on the guide's pick
         if (best.EpgScore < MinEpgScore || best.EpgScore < curEpg + Hysteresis) return false; // move only for a real guide reason
@@ -201,11 +205,10 @@ public sealed class EpgRepickService
     /// with no EPG linkage or a blank window is unknowable and never flagged, or every correct capture on an
     /// EPG-less channel would trigger a bogus re-hunt. Pending, unlocked recordings only; written via a
     /// tracker-bypassing update so nothing else on this scoped context is flushed as a side effect.</summary>
-    private async Task UpdateUncorroboratedFlagAsync(Data.Entities.Recording rec, Event ev, CancellationToken ct)
+    private async Task SetUncorroboratedIfChangedAsync(Data.Entities.Recording rec, bool shouldFlag, CancellationToken ct)
     {
         try
         {
-            var shouldFlag = await CurrentChannelShowsFixtureAsync(rec, ev, ct) == false;
             if (rec.GuideUncorroborated == shouldFlag) return;
             await SetUncorroboratedAsync(rec.Id, shouldFlag, ct);
             rec.GuideUncorroborated = shouldFlag; // keep the in-memory copy honest for this sweep's later checks

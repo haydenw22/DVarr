@@ -12,6 +12,44 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.45.1] — 2026-07-28
+A full audit of the codebase, prompted by a Formula 1 recording that quietly lost ~26 minutes. Six independent review passes over the recorder, scheduler, rescue, guide ingest, API and library; everything confirmed is fixed here. No new features.
+
+### Fixed — recordings
+- **A flapping feed no longer costs you minutes of the race.** When a provider restarts its timestamps *inside* a segment file, DVarr used to discard that whole segment. That was designed for a one-off glitch; on a 4K feed that kept re-splicing, ~200 consecutive segments were discarded and about 26 minutes of a Grand Prix went with them — reported only as a routine line in the log. DVarr now looks inside such a segment, keeps the timestamps belonging to the recording's own timeline and drops only the stray ones, so the footage survives. If a segment genuinely can't be salvaged you now get a loud warning naming roughly how many minutes were affected.
+- **Sustained "duplicate" drops are recognised as a second clock.** A feed alternating between two timelines less than five minutes apart looked like endless re-served content: one capture silently dropped 305 of 798 segments. The re-serve window is now 30 seconds (a provider only ever repeats a few buffered seconds), and after a short run of whole-segment drops DVarr treats it as a restarted clock and keeps the footage instead.
+- **Recordings no longer get killed during a slow start.** The very first progress check counted as "progress" before any data arrived, which consumed the longer grace period reserved for a stream that's still opening — so a slow 4K/HLS channel could be killed at 25 seconds and relaunched over and over. That churn is what produced the segment damage above.
+- **Dead-feed detection actually works now.** The black/frozen-picture check silently never received its data (ffmpeg's detection messages were being filtered out), so a channel showing an "offline" slate was never detected and "picture verified" was reported for feeds nobody had checked.
+- **A stall on a manually-added channel no longer deletes what was already captured.** Cleanup meant for re-downloadable catch-up chunks was also applied to live channels added by direct URL, where a single stall could discard hours of captured footage.
+- **A stuck check can no longer wedge a recording in "Finalizing" forever**, and a finished recording can no longer overwrite a cancellation you made while it was wrapping up.
+
+### Fixed — scheduling
+- **A queued catch-up download no longer cuts a live game short.** A download waiting for the login counted as "the next recording", so extra time couldn't be recorded — the game was clipped at its scheduled end. Only genuinely upcoming live recordings can limit an extension now.
+- **A finished game stops recording promptly again.** After an extension, a game confirmed finished couldn't be trimmed back until the last two minutes, so up to ~13 minutes of dead air was recorded and the login stayed busy.
+- **Recordings can no longer get stuck in "Conflict" forever.** A manual recording, replay or catch-up download bumped into Conflict was skipped by the re-planner and never resolved — never recorded, never reported. It now settles properly.
+- **A cancelled recording can't come back.** Cancelling one while the scheduler was mid-decision could see it silently re-armed and take the login; the same protection now covers deleting, reassigning and re-resolving.
+- **A catch-up download interrupted by a restart resumes** instead of being written off as missed — its content is still in the provider's archive.
+
+### Fixed — matching, guide and rescue
+- **Sharper fixture matching.** The v1.44 improvement could, for two clubs sharing a word ("United"), score a *fuller correct* listing below a shorter wrong one. Matching now takes the better of both readings and, when choosing what to record, prefers the listing that names more of the fixture.
+- **Motorsport sessions aren't mistaken for fixtures.** A title like "Adelaide 500 - Race 1" was read as two opponents, so a correct race capture could be flagged as possibly-wrong and trigger a pointless re-hunt.
+- **Replays are found on providers with inconsistent channel ids.** A capitalisation difference between a provider's channel list and its guide made every re-air on that channel invisible; the hunt would run its full deadline and report "no re-air appeared".
+- **Cancelling a scheduled replay now actually stops it** instead of the hunt rescheduling the same re-air minutes later.
+- **A bad guide feed can't wipe your guide.** A feed that returned nothing (provider maintenance, or timestamps DVarr couldn't read) was treated as a successful sync and deleted the entire current and upcoming guide. It's now rejected and the previous guide is kept.
+- **More guide formats are read correctly** — times written as "+10:00" or "+10", and shortened date stamps, were previously dropped or silently misread by hours.
+- **Large guides can finish downloading.** A fixed 100-second limit aborted big guide downloads mid-stream, so a large lineup could never sync.
+
+### Fixed — security and privacy
+- **Provider login could be exposed to the internet.** Two endpoints meant for LAN devices were reachable from anywhere, and one of them redirects to the provider's URL — which contains your IPTV username and password. They're now restricted to local network callers, with only an external proxy rule previously standing in the way.
+- **Changing your password now signs out existing devices.** "Remember this device" sessions lasted 180 days and kept working after a password change, so a leaked password couldn't be revoked.
+- **Password guessing is now throttled everywhere.** The limit only covered the login form; sending credentials directly bypassed it entirely, allowing unlimited attempts.
+- **Less information to unauthenticated callers** — the status endpoint no longer names what you're recording, and health checks no longer return raw database errors.
+- **Catch-up URLs are redacted in logs.** The archive URL shape added in v1.45.0 wasn't covered by the log redactor, so a failed download could write your provider login into the log file and Logs page.
+
+### Fixed — library
+- **The "watched" webhook can no longer flag the wrong recording.** A filename match wasn't anchored to the path, so a reported file could match a *different* recording whose name merely ended the same way — and with delete-after-watched enabled, that deleted the wrong file.
+- **Files outside your leagues are no longer auto-deleted.** They were invisible to the cleanup preview and the daily sweep, but a background pass deleted them anyway.
+
 ## [1.45.0] — 2026-07-27
 Catch-up arrives: DVarr can now pull finished games straight from a provider's archive — to rescue a failed or missed recording without waiting days for a re-air, or on demand from the Guide. Alongside it: HLS stream support, live games now outrank replays for the login's slot, and three community-reported failure modes are fixed.
 

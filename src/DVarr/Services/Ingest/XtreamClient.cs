@@ -135,15 +135,23 @@ public sealed class XtreamClient
     public Task<XtreamShortEpgResponse?> GetShortEpgAsync(ProviderSource s, int streamId, int limit, CancellationToken ct = default)
         => GetAsync<XtreamShortEpgResponse>(Api(s, $"&action=get_short_epg&stream_id={streamId}&limit={limit}"), s.UserAgent, ct);
 
+    /// <summary>Bound for a player_api.php JSON call. The shared HttpClient has NO timeout (the guide stream needs
+    /// that), so each finite API call brings its own — otherwise a black-holed provider would hang a caller that
+    /// passed CancellationToken.None forever. Generous: a huge get_live_streams payload is slow but finite.</summary>
+    private static readonly TimeSpan ApiCallTimeout = TimeSpan.FromMinutes(3);
+
     private async Task<T?> GetAsync<T>(string url, string? userAgent, CancellationToken ct)
     {
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeoutCts.CancelAfter(ApiCallTimeout);
+        var callCt = timeoutCts.Token;
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
         // Honour the source's configured UA (some providers gate EVERY call on it, not just streams); VLC default otherwise.
         req.Headers.UserAgent.ParseAdd(string.IsNullOrWhiteSpace(userAgent) ? DefaultUserAgent : userAgent);
-        using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
+        using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, callCt);
         resp.EnsureSuccessStatusCode();
-        await using var stream = await resp.Content.ReadAsStreamAsync(ct);
-        return await JsonSerializer.DeserializeAsync<T>(stream, Json, ct);
+        await using var stream = await resp.Content.ReadAsStreamAsync(callCt);
+        return await JsonSerializer.DeserializeAsync<T>(stream, Json, callCt);
     }
 
     /// <summary>Open the EPG XMLTV stream — the external override URL if set, else the provider's xmltv.php.</summary>

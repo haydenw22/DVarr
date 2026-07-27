@@ -83,8 +83,16 @@ builder.Services.AddScoped<CreditAwarePlanner>();
 builder.Services.AddScoped<DVarr.Services.Media.MediaImportService>();
 builder.Services.AddScoped<DVarr.Services.Media.LibraryService>();
 builder.Services.AddScoped<DVarr.Services.Media.RetentionService>();
-builder.Services.AddHttpClient<XtreamClient>()
-    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AutomaticDecompression = System.Net.DecompressionMethods.All });
+// XtreamClient STREAMS the provider's XMLTV guide (hundreds of MB on a large lineup) — and HttpClient.Timeout
+// bounds the whole response INCLUDING the body read, even with ResponseHeadersRead. At the 100s default, any
+// guide that took longer to download-and-parse was aborted mid-stream, so a big lineup could never sync at all.
+// The per-call CancellationToken remains the real bound; ConnectTimeout keeps a dead host from hanging forever.
+builder.Services.AddHttpClient<XtreamClient>(c => c.Timeout = Timeout.InfiniteTimeSpan)
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+    {
+        AutomaticDecompression = System.Net.DecompressionMethods.All,
+        ConnectTimeout = TimeSpan.FromSeconds(30),
+    });
 builder.Services.AddHttpClient<EventFetcher>()
     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AutomaticDecompression = System.Net.DecompressionMethods.All });
 builder.Services.AddHttpClient<TheSportsDbClient>()

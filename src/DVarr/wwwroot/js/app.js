@@ -1002,7 +1002,11 @@ PAGES.guide = {
     const draw = async () => {
       const my = ++drawSeq;
       $('#gWrap').innerHTML = '<div class="loading">Loading guide…</div>';
-      const g = await api.get(`/api/guide?source=${state.sourceId}&group=${encodeURIComponent(state.group)}&q=${encodeURIComponent(state.q)}&start=${state.start}&hours=${state.hours}`);
+      let g;
+      // A rejected fetch (network drop, proxy hiccup) used to leave "Loading guide…" up forever with an
+      // unhandled rejection — render the failure instead.
+      try { g = await api.get(`/api/guide?source=${state.sourceId}&group=${encodeURIComponent(state.group)}&q=${encodeURIComponent(state.q)}&start=${state.start}&hours=${state.hours}`); }
+      catch (e) { g = { error: (e && e.message) || 'request failed' }; }
       if (my !== drawSeq) return; // superseded by a newer draw
       renderGuide($('#gWrap'), g);
     };
@@ -1022,6 +1026,9 @@ PAGES.guide = {
 };
 
 function renderGuide(wrap, g) {
+  // Distinguish a server/proxy failure from a genuinely empty guide: rendering the "ingest channels and sync
+  // EPG" coaching text on a 500 sent people off to re-ingest over a transient error.
+  if (!g || g.error) { wrap.innerHTML = emptyBox(`Couldn’t load the guide: ${esc((g && g.error) || 'the server didn’t respond')}. Try again in a moment.`); return; }
   if (!g.channels || !g.channels.length) { wrap.innerHTML = emptyBox('No channels/EPG for this view. Ingest channels and sync this source’s EPG (Sources page).'); return; }
   const chCol = guideChCol();
   window._guideChans = {}; g.channels.forEach(c => window._guideChans[c.channelId] = c);

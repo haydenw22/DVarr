@@ -164,7 +164,17 @@ public static class WebhookEndpoints
                 var name = Path.GetFileName(path);
                 if (!string.IsNullOrWhiteSpace(name))
                 {
-                    var byName = await db.LibraryItems.Where(i => i.FilePath.EndsWith(name)).Select(i => i.Id).ToListAsync();
+                    // Match the FULL final path segment, not any suffix: a bare EndsWith(name) also matched a
+                    // DIFFERENT file whose name merely ENDS with the reported one ("…/Match of the Day 2.mkv"
+                    // reported ⇒ "…/NRL Match of the Day 2.mkv" in the library). That is a single hit, so the
+                    // ambiguity guard passed and the WRONG item was flagged watched — which, under the
+                    // delete-after-watched retention mode, then deleted the wrong recording from disk. The
+                    // separator anchors are evaluated in SQL; the in-memory check re-verifies exactly.
+                    var byName = (await db.LibraryItems
+                            .Where(i => i.FilePath.EndsWith("/" + name) || i.FilePath.EndsWith("\\" + name))
+                            .Select(i => new { i.Id, i.FilePath }).ToListAsync())
+                        .Where(i => string.Equals(Path.GetFileName(i.FilePath), name, StringComparison.OrdinalIgnoreCase))
+                        .Select(i => i.Id).ToList();
                     if (byName.Count > 1)
                     {
                         log.LogWarning("[Webhook] filename '{Name}' matches {N} library files — ambiguous, not marking watched", name, byName.Count);

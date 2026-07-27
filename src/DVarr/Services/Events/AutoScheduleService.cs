@@ -431,6 +431,20 @@ public sealed class AutoScheduleService : BackgroundService
         {
             try
             {
+                // Window-elapsed check FIRST, against the ROW's own window, so a conflict that can't be replanned
+                // still settles instead of living forever. Previously the EventId/ChannelLocked filters below
+                // returned early and nothing else ever looked at a parked Conflict row: a preempted MANUAL
+                // recording (no event) or a preempted replay/catch-up pull sat in Conflict permanently — never
+                // recorded, never Missed, never notified, invisible to the user and to rescue.
+                if (now >= r.EndUtc + r.PostPadS)
+                {
+                    await MarkConflictMissedAsync(db, r.Id, now);
+                    continue;
+                }
+                // A ChannelLocked row (rescue replay / catch-up pull) is pinned to a window that is NOT the
+                // event's — retiming it onto the event below would drag it into the past and expire it. Its owner
+                // (the rescue settle pass, or the scheduler's catch-up slide) handles retries.
+                if (r.ChannelLocked) continue;
                 if (r.EventId is not { } eid) continue; // only event-linked conflicts are auto-replanned
                 // Reconcile to the event's CURRENT time before planning AND before arming. The event may have moved on
                 // re-sync while this recording sat parked (the row keeps the old time); promoting on the stale row time
@@ -468,11 +482,16 @@ public sealed class AutoScheduleService : BackgroundService
                 var decision = planner.Decide(opts, winStartC, winEndC, rank, slots);
                 if (!decision.Placed || decision.Option is not { } opt) continue; // still no room → stays Conflict
 
+                var promotedOk = false;
                 await _gate.WriteAsync(async () =>
                 {
-                    if (decision.PreemptRecordingId is { } vid) await PreemptAsync(vid, $"preempted by recording #{r.Id} (won on {decision.PreemptWhy})");
+                    // Re-check the row INSIDE the gate before preempting anything: `conflicts` is a snapshot from
+                    // the top of a tick that can run for minutes, and a user cancel / rescue-settle cancel /
+                    // manual reassign committed in between would otherwise be silently resurrected to Pending
+                    // (a cancelled recording re-arming and taking the slot).
                     var rec = await db.Recordings.FindAsync(r.Id);
-                    if (rec is null) return;
+                    if (rec is null || rec.State != RecordingState.Conflict) return;
+                    if (decision.PreemptRecordingId is { } vid) await PreemptAsync(vid, $"preempted by recording #{r.Id} (won on {decision.PreemptWhy})");
                     // SourceId is part of the (Id, SourceId) alternate key — re-point via RecordingRepoint (delete
                     // fallbacks + tracker-bypassing UPDATE of source/channel/stream). Mutating the tracked entity here
                     // would throw "part of a key cannot be modified" when a parked conflict is promoted to a DIFFERENT
@@ -487,7 +506,11 @@ public sealed class AutoScheduleService : BackgroundService
                     // satisfied; one SaveChanges now persists the non-key fields + the new ladder + the notification.
                     await WriteFallbacksAsync(r.Id, opt.SourceId, opt.Fallbacks);
                     await db.SaveChangesAsync(ct);
+                    promotedOk = true;
                 }, ct);
+                // Only book the slot when the gated write actually applied — a phantom slot for a row that stayed
+                // Conflict would block real placements for the rest of this tick.
+                if (!promotedOk) continue;
                 slots.Add(new CreditAwarePlanner.Slot(opt.SourceId, winStartC, winEndC, r.Id, RecordingState.Pending, rank));
                 promoted++;
             }

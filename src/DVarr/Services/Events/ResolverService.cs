@@ -182,21 +182,43 @@ public sealed class ResolverService
     /// (ShowsBothTeams already refuses shared tokens as evidence), yet they dilute the Jaccard score of every real
     /// match: that AFL fixture scored 0.43 and sat under the 0.5 pin-override bar while the game aired one channel
     /// over. Stripping the shared tokens from both titles scores only the words that identify the matchup. For a
-    /// programme that names the teams the stripped score is never lower than the plain one (both sets shrink
-    /// together), while noise-only titles ("Football Club Show") drop toward 0 — strictly better in both
-    /// directions. Single-sided events (motorsport — EventSides returned one shared instance) have no side split,
-    /// so they keep the plain metric.</summary>
+    /// programme that names the teams the stripped score is never lower than the plain one, while noise-only
+    /// titles ("Football Club Show") drop toward 0. Single-sided events (motorsport — EventSides returned one
+    /// shared instance) have no side split, so they keep the plain metric.
+    ///
+    /// The "never lower" property only holds because of the MAX below. Stripping alone does NOT guarantee it: when
+    /// the programme title also CONTAINS a shared token, stripping removes a genuine intersection member, and
+    /// (i−s)/(u−s) &lt; i/u — so a full, correct title ("Adelaide United v Melbourne United Replay") could be pushed
+    /// BELOW a terser wrong one that never mentioned the shared word ("Adelaide v Melbourne", a different sport's
+    /// fixture between same-city clubs), inverting the ranking the metric exists to get right. Taking the better of
+    /// the two scores keeps the intended boost for noise-diluted titles without ever penalising a fuller one.</summary>
     public static double EventSimilarity(string? progTitle, string? evTitle, HashSet<string> sideA, HashSet<string> sideB)
     {
-        if (ReferenceEquals(sideA, sideB)) return Similarity(progTitle, evTitle);
+        var plain = Similarity(progTitle, evTitle);
+        if (ReferenceEquals(sideA, sideB)) return plain;
         var shared = new HashSet<string>(sideA); shared.IntersectWith(sideB);
-        if (shared.Count == 0) return Similarity(progTitle, evTitle);
+        if (shared.Count == 0) return plain;
         var ta = Tokens(progTitle); ta.ExceptWith(shared);
         var tb = Tokens(evTitle); tb.ExceptWith(shared);
-        if (ta.Count == 0 || tb.Count == 0) return Similarity(progTitle, evTitle); // stripping ate a whole title — fall back
+        if (ta.Count == 0 || tb.Count == 0) return plain; // stripping ate a whole title — fall back
         var inter = ta.Intersect(tb).Count();
         var union = ta.Union(tb).Count();
-        return union == 0 ? 0 : (double)inter / union;
+        var stripped = union == 0 ? 0 : (double)inter / union;
+        return Math.Max(plain, stripped);
+    }
+
+    /// <summary>How many of the event's distinct side tokens the programme title actually names. Jaccard rewards
+    /// BREVITY — a terser wrong title ("Adelaide v Melbourne", a different competition between same-city clubs) can
+    /// out-score the fuller right one ("Adelaide United v Melbourne United Replay") because the extra words inflate
+    /// the union. Coverage doesn't care about length, so ranking on it FIRST and similarity second picks the title
+    /// that names more of the fixture. Used where a wrong pick means recording the wrong programme.</summary>
+    public static int SideTokenCoverage(string? progTitle, HashSet<string> sideA, HashSet<string> sideB)
+    {
+        var t = Tokens(progTitle);
+        if (t.Count == 0) return 0;
+        var sides = new HashSet<string>(sideA);
+        sides.UnionWith(sideB);
+        return sides.Count(tok => t.Contains(tok));
     }
 
     private static HashSet<string> Tokens(string? s)
@@ -208,6 +230,17 @@ public sealed class ResolverService
 
     private static readonly string[] VsSeparators = { " vs ", " vs. ", " v ", " @ ", " x ", " - ", " – " };
 
+    /// <summary>Words that mark a SESSION/qualifier rather than an opponent. A dash in a title is punctuation far
+    /// more often than a fixture separator ("Adelaide 500 - Race 1"), and treating the tail as "the away team"
+    /// invents a two-sided event: nothing in the guide can then prove the phantom side, so a perfectly good
+    /// motorsport capture scores 0 and — since v1.45 — gets flagged as having recorded the wrong programme.</summary>
+    private static readonly HashSet<string> SessionWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "race", "qualifying", "quali", "practice", "sprint", "shootout", "testing", "fp1", "fp2", "fp3",
+        "heat", "final", "finals", "round", "session", "warmup", "highlights", "replay", "preview", "live",
+        "day", "stage", "leg", "part",
+    };
+
     /// <summary>Split an event title "Home vs Away" into each side's significant tokens, for a "does this programme
     /// show THIS game (both teams), not just this team" test. With no separator both sides get the whole title's
     /// tokens (single-name events — motorsport etc. — still match on their own tokens); the two returned sets are the
@@ -218,7 +251,17 @@ public sealed class ResolverService
         foreach (var sep in VsSeparators)
         {
             var i = title.IndexOf(sep, StringComparison.OrdinalIgnoreCase);
-            if (i > 0 && i + sep.Length < title.Length) return (Tokens(title[..i]), Tokens(title[(i + sep.Length)..]));
+            if (i <= 0 || i + sep.Length >= title.Length) continue;
+            var a = Tokens(title[..i]);
+            var b = Tokens(title[(i + sep.Length)..]);
+            if (a.Count == 0 || b.Count == 0) continue;
+            // A DASH is only a fixture separator when neither side reads as a session/qualifier. "Adelaide 500 -
+            // Race 1" is one event, not Adelaide-500 versus Race-1; the explicit "vs"/"v"/"@" forms are never
+            // ambiguous and skip this test.
+            var dash = sep is " - " or " – ";
+            if (dash && (b.All(t => SessionWords.Contains(t) || t.All(char.IsDigit))
+                         || a.All(t => SessionWords.Contains(t) || t.All(char.IsDigit)))) continue;
+            return (a, b);
         }
         var all = Tokens(title);
         return (all, all);

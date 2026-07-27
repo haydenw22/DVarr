@@ -77,8 +77,11 @@ public static class ParityEndpoints
         app.MapGet("/api/ha/status", async (DVarrDbContext db) =>
         {
             var now = EpochTime.Now();
+            // No TITLES here: this endpoint is credential-free (a Home Assistant REST sensor can't log in), so it
+            // must not narrate what the owner is watching/recording to anyone who can reach it. Id + state is all
+            // a sensor needs; the authenticated /api/recordings carries the detail.
             var active = await db.Recordings.Where(r => Active.Contains(r.State))
-                .Select(r => new { r.Id, r.Title, state = r.State.ToString() }).ToListAsync();
+                .Select(r => new { r.Id, state = r.State.ToString() }).ToListAsync();
             var nextStart = await db.Recordings.Where(r => r.State == RecordingState.Pending && r.StartUtc > now)
                 .OrderBy(r => r.StartUtc).Select(r => (long?)r.StartUtc).FirstOrDefaultAsync();
             // Only enabled sources can lease a tuner, so free_credentials must count enabled — not total — sources

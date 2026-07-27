@@ -46,8 +46,11 @@ public sealed class LogRingBuffer
     private static readonly Regex QuerySecret =
         new(@"((?:^|[?&\s])(?:username|password|pass|token|apikey|api_key|secret)=)[^&\s""'<]+",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    // "timeshift" included (v1.45 catch-up): the archive path shape is /timeshift/USER/PASS/{min}/{stamp}/{id}.ts,
+    // so a failing pull quoted by ffmpeg's stderr wrote the provider login verbatim into the log file and the
+    // Logs page. (The timeshift.php shape is covered by QuerySecret above.)
     private static readonly Regex XtreamPathSecret =
-        new(@"(https?://[^\s/]+/(?:live|movie|series)/)[^/\s]+/[^/\s]+(/)",
+        new(@"(https?://[^\s/]+/(?:live|movie|series|timeshift)/)[^/\s]+/[^/\s]+(/)",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     internal static string Redact(string message)

@@ -71,7 +71,7 @@ public static class AuthEndpoints
             var key = await EnsureSessionSigningKeyAsync(db, gate);
             var remember = req!.Remember ?? true;
             var expiry = EpochTime.Now() + RememberSeconds;
-            var token = MakeToken(key, expiry, user);
+            var token = MakeToken(key, expiry, user, pass);
 
             ctx.Response.Cookies.Append(CookieName, token, new CookieOptions
             {
@@ -123,19 +123,27 @@ public static class AuthEndpoints
         return keyBytes;
     }
 
-    /// <summary>Build the cookie value: {expiry}.{base64url(HMAC(key, expiry + "|" + username))}.</summary>
-    public static string MakeToken(byte[] key, long expiry, string username)
+    /// <summary>Build the cookie value: {expiry}.{base64url(HMAC(key, expiry + "|" + username + "|" + passDigest))}.
+    /// The PASSWORD is bound into the MAC (via a digest — the password itself never leaves this method) so that
+    /// changing DVARR_AUTH_PASS invalidates every issued cookie. Without it, a leaked password could not be
+    /// revoked: 180-day "remember this device" cookies minted before the change kept working, and the only way
+    /// out was hand-deleting the session_signing_key row.</summary>
+    public static string MakeToken(byte[] key, long expiry, string username, string password)
     {
-        var mac = HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(expiry + "|" + username));
+        var mac = HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(TokenPayload(expiry, username, password)));
         return expiry + "." + Base64UrlEncode(mac);
     }
+
+    /// <summary>The signed payload. The password contributes only as a SHA-256 digest.</summary>
+    private static string TokenPayload(long expiry, string username, string password)
+        => expiry + "|" + username + "|" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(password)));
 
     /// <summary>
     /// Validate a session cookie value. Returns true only when the token parses, is unexpired, and the recomputed
     /// HMAC matches in constant time. Any malformed input (missing dot, non-numeric expiry, bad base64) returns
     /// false — never throws — so junk cookies are treated as "not authenticated", not a 500.
     /// </summary>
-    public static bool ValidateToken(byte[] key, string? token, string expectedUsername)
+    public static bool ValidateToken(byte[] key, string? token, string expectedUsername, string expectedPassword)
     {
         if (string.IsNullOrEmpty(token)) return false;
         var dot = token.IndexOf('.');
@@ -148,7 +156,7 @@ public static class AuthEndpoints
         try { providedMac = Base64UrlDecode(token.Substring(dot + 1)); }
         catch { return false; }
 
-        var expectedMac = HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(expiry + "|" + expectedUsername));
+        var expectedMac = HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(TokenPayload(expiry, expectedUsername, expectedPassword)));
         // FixedTimeEquals short-circuits on length mismatch, but both operands are fixed 32-byte SHA-256 digests
         // (a truncated/oversized providedMac just fails the length check without leaking anything useful).
         return CryptographicOperations.FixedTimeEquals(providedMac, expectedMac);
@@ -167,6 +175,17 @@ public static class AuthEndpoints
     /// hop) are trusted only in that case, must parse as real IPs, and are canonicalised. A caller reaching the
     /// origin directly from a public address is bucketed by their raw peer IP no matter what headers they send.
     /// </summary>
+    internal static string ClientIpFor(HttpContext ctx) => ClientIp(ctx);
+    internal static bool IsRateLimitedFor(string ip) => IsRateLimited(ip);
+    internal static void RecordFailureFor(string ip) => RecordFailure(ip);
+    /// <summary>True when the request's immediate peer is on the LAN/loopback (or the local proxy chain).
+    /// Used by the middleware to keep the credential-free "LAN-only" exempt surfaces off the public internet.</summary>
+    internal static bool IsPrivatePeer(HttpContext ctx)
+    {
+        var peer = ctx.Connection.RemoteIpAddress;
+        return peer is not null && IsPrivate(peer);
+    }
+
     private static string ClientIp(HttpContext ctx)
     {
         var peer = ctx.Connection.RemoteIpAddress;

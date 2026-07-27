@@ -114,7 +114,10 @@ public static class PlexEndpoints
             if (item is null) return NotFound();
             if (string.Equals(ctx.Request.Query["includeChildren"].FirstOrDefault(), "1", StringComparison.Ordinal))
             {
-                var (kids, total) = await KidsAsync(db, ratingKey, origin, 0, int.MaxValue);
+                // Capped like the paged route: int.MaxValue deliberately bypassed the 500 clamp, so one
+                // unauthenticated request could materialise a whole season's children (and this endpoint is
+                // reachable without auth by design, for the LAN Plex server).
+                var (kids, total) = await KidsAsync(db, ratingKey, origin, 0, 500);
                 if (total > 0)
                 {
                     // Items are anonymous objects, so graft Children on via a JsonNode rather than duplicating shapes.
@@ -272,8 +275,15 @@ public static class PlexEndpoints
 
     private static async Task<List<Event>> SeasonEventsAsync(DVarrDbContext db, int leagueId, int year)
     {
+        // Narrow in SQL to a UTC window around the requested year before materialising: this ran on EVERY
+        // unauthenticated Plex metadata request and loaded the league's ENTIRE event history each time (thousands
+        // of rows for a full-season sync). The ±2-day cushion covers any display-zone offset; the exact
+        // display-year filter still runs in memory, so the result is identical.
+        var from = new DateTimeOffset(year - 1, 12, 29, 0, 0, 0, TimeSpan.Zero).ToUnixTimeSeconds();
+        var to = new DateTimeOffset(year + 1, 1, 3, 0, 0, 0, TimeSpan.Zero).ToUnixTimeSeconds();
         // ThenBy(Id): stable tie-break so this ordinal matches MediaImportService's on-disk SxxExx exactly.
-        var all = await db.Events.Where(e => e.LeagueId == leagueId).OrderBy(e => e.StartUtc).ThenBy(e => e.Id).ToListAsync();
+        var all = await db.Events.Where(e => e.LeagueId == leagueId && e.StartUtc >= from && e.StartUtc <= to)
+            .OrderBy(e => e.StartUtc).ThenBy(e => e.Id).ToListAsync();
         return all.Where(e => EpochTime.ToDisplay(e.StartUtc).Year == year).ToList();
     }
 

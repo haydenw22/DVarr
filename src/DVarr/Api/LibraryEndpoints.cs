@@ -22,8 +22,11 @@ public static class LibraryEndpoints
         // ---- Library list (flat rows + rollups; the client groups league → [team →] season → game) ----
         app.MapGet("/api/library", async (DVarrDbContext db, RuntimePaths paths, LibraryScanService scanner) =>
         {
+            // Capped like every other list endpoint: a multi-season library otherwise serialised every row (with
+            // per-item enrichment) into one multi-hundred-megabyte response.
             var items = await db.LibraryItems.AsNoTracking()
                 .OrderBy(i => i.ShowName).ThenByDescending(i => i.SeasonYear).ThenByDescending(i => i.StartUtc)
+                .Take(5000)
                 .ToListAsync();
             var disk = DiskSpace(paths.MediaDir);
 

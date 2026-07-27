@@ -406,6 +406,14 @@ public sealed class RecorderService
             }
             else if (now >= winEnd)
             {
+                // A catch-up pull's window is a download TIMEOUT, not airtime: its content is still sitting in the
+                // provider archive, so a lapse during downtime is not a miss. Leave it Pending — the scheduler's
+                // first tick re-validates archive coverage and either slides the window forward or marks it Missed.
+                if (r.CatchupSourceStartUtc is not null && r.State == RecordingState.Pending)
+                {
+                    _log.LogInformation("[Recorder] catch-up pull {Id}'s window lapsed while DVarr was down — leaving it queued for the scheduler to re-window", r.Id);
+                    continue;
+                }
                 // The window passed during downtime. If segments survived on disk (esp. a crash mid-finalize),
                 // re-finalize them rather than throwing the capture away (docs/05 §3.4). MISSED only if nothing exists.
                 var segDir = Path.Combine(_paths.SegmentDir, r.Id.ToString(), "A");
