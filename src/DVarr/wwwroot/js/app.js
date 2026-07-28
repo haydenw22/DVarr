@@ -2074,6 +2074,9 @@ function startPreview(channelId) {
   _player.attachMediaElement(video);
   _player.on(mpegts.Events.ERROR, (type, detail, info) => {
     if (type === mpegts.ErrorTypes.MEDIA_ERROR) { startHls(channelId); return; } // codec not browser-playable → transcode
+    // 415 = the source serves HLS, so there is no raw .ts to proxy — take the transcoded path (which reads the
+    // provider's .m3u8 natively). Same ladder as a codec failure, just decided server-side up front.
+    if (info && info.code === 415) { startHls(channelId); return; }
     const busy = info && (info.code === 409 || /conflict/i.test(info.msg || ''));
     // The preview proxy passes the PROVIDER's status through (e.g. 403/458/512), so show the number the
     // provider actually answered with instead of the player library's opaque error name.

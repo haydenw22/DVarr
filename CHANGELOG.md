@@ -12,6 +12,12 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.45.3] — 2026-07-28
+Fixes channel preview on HLS sources, reported straight after v1.45.2.
+
+### Fixed
+- **Channel preview works again on HLS sources.** v1.45.1 correctly stopped the direct preview from handing an HLS playlist to a player that can't read one (its segment links carry your provider login), and the intent was for the browser to fall back to the transcoded preview automatically. It didn't: the refusal used the same status code as "this source's single stream is busy", so the player stopped there and showed that message instead. Preview on an HLS source now goes straight to the transcoded stream, exactly like a channel whose codec the browser can't play. Recording was never affected.
+
 ## [1.45.2] — 2026-07-28
 Completes one v1.45.1 fix that only worked for part of the traffic it was meant to cover.
 

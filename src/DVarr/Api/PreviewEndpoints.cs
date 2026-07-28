@@ -34,8 +34,11 @@ public static class PreviewEndpoints
             // ffmpeg input handles HLS natively).
             if (string.IsNullOrWhiteSpace(ch.DirectUrl) && XtreamClient.EffectiveStreamExt(src) == "m3u8")
             {
-                ctx.Response.StatusCode = 409;
-                await ctx.Response.WriteAsJsonAsync(new { error = "hls_source", message = "this source streams HLS — preview uses the transcoder" });
+                // 415, NOT 409: the client maps 409 to "this source's single stream is busy" and stops, which left
+                // HLS sources with a wrong message and no preview at all. 415 means "not available in this
+                // representation" and is the client's signal to go straight to the transcoded variant.
+                ctx.Response.StatusCode = StatusCodes.Status415UnsupportedMediaType;
+                await ctx.Response.WriteAsJsonAsync(new { error = "hls_source", message = "this source streams HLS — use the transcoded preview" });
                 return;
             }
             var directUrl = ch.DirectUrl;
