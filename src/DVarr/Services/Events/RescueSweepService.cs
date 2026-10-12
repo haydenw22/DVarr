@@ -77,6 +77,8 @@ public sealed class RescueSweepService : BackgroundService
             .ToListAsync(ct);
         foreach (var t in live)
         {
+            if (await FollowEventChangeAsync(db, t, now, ct)) continue;
+
             // A good copy landed (the replay finished, or the game got recorded some other way) → close.
             if (await RescueService.HasGoodCopyAsync(db, t.EventId, ct))
             {
@@ -197,10 +199,12 @@ public sealed class RescueSweepService : BackgroundService
         var (sideA, sideB) = ResolverService.EventSides(query);
         var twoSided = !ReferenceEquals(sideA, sideB);
 
+        var siblings = await SiblingStartsAsync(db, t, t.EventStartUtc - 86400, t.ExpiresUtc + 86400, ct);
+
         // ---- Catch-up first (v1.45): before waiting days for a re-air, try pulling the finished game straight
         // from the provider's tv_archive. Immediate, and it can't collide with live games (Opportunistic + the
         // live-preempt rule). Falls through to the re-air hunt when no archive-enabled channel can serve it.
-        if (await TryCatchupAsync(scope, db, t, byKey, query, sideA, sideB, twoSided, now, ct)) return;
+        if (await TryCatchupAsync(scope, db, t, byKey, query, sideA, sideB, twoSided, siblings, now, ct)) return;
 
         // Page through the WHOLE window by keyset instead of scoring an arbitrary 400-row prefix — with
         // whole-source search enabled, early unrelated programmes used to crowd the real re-air out of the
@@ -222,6 +226,7 @@ public sealed class RescueSweepService : BackgroundService
             {
                 var chan = byKey.GetValueOrDefault((p.SourceId, p.EpgChannelId.ToUpperInvariant()));
                 if (chan is null) continue;
+                if (IsSiblingAiring(p.StartUtc, t.EventStartUtc, siblings)) continue; // the series' next game, live
                 var score = ResolverService.EventSimilarity(p.Title, query, sideA, sideB);
                 if (twoSided)
                 {
@@ -297,7 +302,7 @@ public sealed class RescueSweepService : BackgroundService
     /// scheduled (the sweep stops for this ticket; settle re-opens it if the pull fails).</summary>
     private async Task<bool> TryCatchupAsync(IServiceScope scope, DVarrDbContext db, RescueTicket t,
         Dictionary<(int Source, string Epg), Channel> byKey, string query,
-        HashSet<string> sideA, HashSet<string> sideB, bool twoSided, long now, CancellationToken ct)
+        HashSet<string> sideA, HashSet<string> sideB, bool twoSided, IReadOnlyCollection<long> siblings, long now, CancellationToken ct)
     {
         var settings = scope.ServiceProvider.GetRequiredService<SettingsService>();
         if (!await settings.GetBoolAsync("catchup_enabled")) return false;
@@ -324,6 +329,7 @@ public sealed class RescueSweepService : BackgroundService
                 .OrderBy(p => p.StartUtc).Select(p => new { p.StartUtc, p.StopUtc, p.Title }).Take(50).ToListAsync(ct);
             foreach (var p in progs)
             {
+                if (IsSiblingAiring(p.StartUtc, t.EventStartUtc, siblings)) continue; // a doubleheader's other game
                 var score = ResolverService.EventSimilarity(p.Title, query, sideA, sideB);
                 if (twoSided)
                 {
@@ -425,6 +431,123 @@ public sealed class RescueSweepService : BackgroundService
         }
         catch (Exception ex) { _log.LogWarning(ex, "[Rescue] guide refresh failed for source {Id}", sourceId); }
     }
+
+    /// <summary>
+    /// Keep a ticket in step with its event. The ticket snapshots the event's window when it opens and every search
+    /// runs against that snapshot — so when TheSportsDB re-dated the event (29 July: a rainout made up as the second
+    /// game of a doubleheader, 24h later), the hunt kept looking for a re-air of the OLD airing, took the next day's
+    /// live game 1 for it, and pulled an archive window that was then filed as game 2. Returns true when the ticket
+    /// was settled here (the caller moves on).
+    /// <list type="bullet">
+    /// <item>Event postponed/cancelled → nothing to rescue: cancel the ticket and its not-yet-started replay.</item>
+    /// <item>Event moved into the FUTURE → the game hasn't been played: cancel the ticket; the auto-scheduler records
+    /// it live at its new time.</item>
+    /// <item>Event moved but still in the past → re-snapshot the window and hunt again from scratch.</item>
+    /// </list>
+    /// A replay that is already capturing is left alone until it settles.
+    /// </summary>
+    private async Task<bool> FollowEventChangeAsync(DVarrDbContext db, RescueTicket t, long now, CancellationToken ct)
+    {
+        var ev = await db.Events.AsNoTracking().FirstOrDefaultAsync(e => e.Id == t.EventId, ct);
+        if (ev is null) return false;
+        // Judge "moved" against the window the original capture actually covered (the auto-scheduler judges the
+        // same row the same way — see AutoScheduleService.CoversAiring), falling back to the ticket's snapshot.
+        var orig = await db.Recordings.AsNoTracking().Where(r => r.Id == t.RecordingId)
+            .Select(r => new { Start = r.StartUtc - r.PrePadS, End = r.EndUtc + r.PostPadS }).FirstOrDefaultAsync(ct);
+        var evEnd = ev.EndUtc ?? ev.StartUtc + Math.Max(1800, t.EventEndUtc - t.EventStartUtc);
+        var change = ClassifyEventChange(ev.Status, ev.StartUtc, evEnd, orig?.Start ?? t.EventStartUtc, orig?.End ?? t.EventEndUtc,
+            t.EventStartUtc, t.EventEndUtc, now);
+        if (change == EventChange.None) return false;
+        if (t.ReplayRecordingId is { } activeId && _recorder.IsActive(activeId)) return false;
+
+        string? cancelledReplayWhy = null;
+        if (change == EventChange.Dead)
+        {
+            await UpdateTicketAsync(db, t.Id, x => { x.State = RescueTicketState.Cancelled; x.Note = $"the game was {ev.Status.ToString().ToLowerInvariant()} — nothing to rescue"; }, ct);
+            cancelledReplayWhy = $"rescue cancelled — the game was {ev.Status.ToString().ToLowerInvariant()}";
+            _log.LogInformation("[Rescue] ticket {Id} '{Title}': event is {Status} — closing the hunt", t.Id, t.Title, ev.Status);
+        }
+        else if (change == EventChange.MovedToFuture)
+        {
+            var when = EpochTime.ToDisplay(ev.StartUtc).ToString("ddd d MMM HH:mm");
+            await UpdateTicketAsync(db, t.Id, x => { x.State = RescueTicketState.Cancelled; x.Note = $"the game was moved to {when} — it will be recorded live then"; }, ct);
+            cancelledReplayWhy = $"rescue cancelled — the game was moved to {when} and will be recorded live";
+            await NotifyAsync(db, t.RecordingId, NotificationKind.ReplayScheduled, Severity.Info,
+                $"“{t.Title}” was rescheduled to {when} — stopped hunting for a replay; it will be recorded live at the new time", now, ct);
+            _log.LogInformation("[Rescue] ticket {Id} '{Title}': event moved from {Old} to {New} (in the future) — the game hasn't been played; closing the hunt",
+                t.Id, t.Title, t.EventStartUtc, ev.StartUtc);
+        }
+        else
+        {
+            await UpdateTicketAsync(db, t.Id, x =>
+            {
+                x.EventStartUtc = ev.StartUtc; x.EventEndUtc = evEnd; x.Title = ev.Title;
+                x.State = RescueTicketState.Open; x.ReplayRecordingId = null; x.NextSweepUtc = now;
+                x.Note = "the game's time changed — hunting again against the new time";
+            }, ct);
+            cancelledReplayWhy = "rescue re-targeted — the game's time changed";
+            _log.LogInformation("[Rescue] ticket {Id} '{Title}': event moved from {Old} to {New} — re-hunting against the new window",
+                t.Id, t.Title, t.EventStartUtc, ev.StartUtc);
+        }
+
+        if (t.ReplayRecordingId is { } repId && cancelledReplayWhy is not null)
+            await _gate.WriteAsync(async () =>
+            {
+                var rep = await db.Recordings.FindAsync(new object?[] { repId }, ct);
+                if (rep is not null && rep.State is RecordingState.Pending or RecordingState.Conflict && !_recorder.IsActive(repId))
+                {
+                    rep.State = RecordingState.Cancelled; rep.FailureReason = cancelledReplayWhy; rep.UpdatedUtc = now;
+                    db.Notifications.Add(new Notification { RecordingId = repId, TsUtc = now, Kind = NotificationKind.Cancelled, Severity = Severity.Info, ToState = "Cancelled", Message = cancelledReplayWhy });
+                    await db.SaveChangesAsync(ct);
+                }
+            }, ct);
+        return true;
+    }
+
+    public enum EventChange { None, Dead, MovedToFuture, MovedInPast }
+
+    /// <summary>How a ticket's event has changed.
+    /// <list type="bullet">
+    /// <item>Postponed/cancelled → <see cref="EventChange.Dead"/>.</item>
+    /// <item>Still to come, and the original capture window [capStart, capEnd] doesn't cover it → the game hasn't been
+    /// played: <see cref="EventChange.MovedToFuture"/>. Judged with <see cref="AutoScheduleService.CoversAiring"/>, the
+    /// same rule the auto-scheduler uses — so whenever the hunt stands down, the scheduler records the game live.</item>
+    /// <item>In the past, and the ticket's own snapshot [snapStart, snapEnd] doesn't cover it → re-target the hunt:
+    /// <see cref="EventChange.MovedInPast"/>. Compared to the SNAPSHOT (which the re-target updates), so it fires once.</item>
+    /// </list></summary>
+    internal static EventChange ClassifyEventChange(EventStatus status, long eventStart, long eventEnd,
+        long capStart, long capEnd, long snapStart, long snapEnd, long now)
+    {
+        if (status is EventStatus.Postponed or EventStatus.Cancelled) return EventChange.Dead;
+        if (eventStart > now - 600)
+            return AutoScheduleService.CoversAiring(capStart, capEnd, eventStart, eventEnd) ? EventChange.None : EventChange.MovedToFuture;
+        return AutoScheduleService.CoversAiring(snapStart, snapEnd, eventStart, eventEnd) ? EventChange.None : EventChange.MovedInPast;
+    }
+
+    /// <summary>Start times of the OTHER games between the same two sides in this league around the hunt window —
+    /// a series (MLB plays the same opponent three or four days running) or a doubleheader. A guide listing that
+    /// starts near one of these is that game, live — never a re-air of this ticket's game.</summary>
+    private static async Task<List<long>> SiblingStartsAsync(DVarrDbContext db, RescueTicket t, long from, long to, CancellationToken ct)
+    {
+        var ev = await db.Events.AsNoTracking().FirstOrDefaultAsync(e => e.Id == t.EventId, ct);
+        var title = ev?.Title ?? t.Title;
+        var home = ev?.HomeTeamId; var away = ev?.AwayTeamId;
+        var rows = await db.Events.AsNoTracking()
+            .Where(e => e.LeagueId == t.LeagueId && e.Id != t.EventId && e.StartUtc >= from && e.StartUtc <= to
+                        && e.Status != EventStatus.Cancelled && e.Status != EventStatus.Postponed)
+            .Select(e => new { e.StartUtc, e.Title, e.HomeTeamId, e.AwayTeamId })
+            .ToListAsync(ct);
+        return rows.Where(e => string.Equals(e.Title, title, StringComparison.OrdinalIgnoreCase)
+                               || (home is not null && away is not null
+                                   && ((e.HomeTeamId == home && e.AwayTeamId == away) || (e.HomeTeamId == away && e.AwayTeamId == home))))
+            .Select(e => e.StartUtc).ToList();
+    }
+
+    /// <summary>True when a listing starting at <paramref name="start"/> is another game of this fixture airing live
+    /// rather than this ticket's game: it starts within 45 minutes of a sibling's start, and closer to that sibling
+    /// than to this game.</summary>
+    internal static bool IsSiblingAiring(long start, long ticketEventStart, IReadOnlyCollection<long> siblingStarts)
+        => siblingStarts.Any(s => Math.Abs(start - s) <= 2700 && Math.Abs(start - s) < Math.Abs(start - ticketEventStart));
 
     private Task BumpAsync(DVarrDbContext db, int ticketId, long nextSweep, long now, string note, CancellationToken ct)
         => UpdateTicketAsync(db, ticketId, x => { x.NextSweepUtc = nextSweep; x.LastSweepUtc = now; x.Note = note; }, ct);

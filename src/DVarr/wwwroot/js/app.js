@@ -511,6 +511,8 @@ function recTable(rows, withActions) {
   return `<table class="rtable"><thead><tr>${withActions ? '<th style="width:1%"><input type="checkbox" id="recAll" onclick="recToggleAll(this)" aria-label="Select all recordings"></th>' : ''}<th>Title</th><th>State</th><th>Channel</th><th>Source</th><th>Size</th><th>Window (${esc(tzLabel())})</th>${withActions ? '<th></th>' : ''}</tr></thead><tbody>${rows.map(r => {
     // Same conditions as the inline desktop buttons — the phone kebab mirrors them 1:1 so no action is lost.
     const pendingish = r.state === 'Pending' || r.state === 'Conflict';
+    // Stop stays offered on Stopping/Finalizing rows so an orphan left by a crash can still be cleared; the server
+    // refuses (with an explanation) when a finalize really is running.
     const stoppable = ACTIVE.includes(r.state) || pendingish;
     const live = ACTIVE.includes(r.state) && r.state !== 'Stopping' && r.state !== 'Finalizing';
     // A failed recording keeps its capture segments on disk — the same preview player shows the forensics.
@@ -1775,6 +1777,7 @@ const SETTINGS_META = {
   retry_at_event_start: { g: 'Recording', t: 'Retry at event start', h: 'If a recording captures nothing during pre-roll (the channel isn’t live yet), make one fresh attempt at the real start time.', ty: 'bool' },
   conflict_min_remaining_pct: { g: 'Recording', t: 'Conflict: min % of game left to record', h: 'When a conflicting recording’s login finally frees, only record it if at least this much of the game is still to come — otherwise you’d capture just the tail (e.g. the postgame). Below this, it’s marked Missed and a replay of the full game is hunted instead. Set to 0 to always record whatever’s left.', ty: 'int' },
   auto_stop_enabled: { g: 'Recording', t: 'Smart auto-stop', h: 'Near a live recording’s scheduled end, watch the match status and extend while it’s still in play (extra time, penalty shoot-outs) — never shortens the scheduled window.', ty: 'bool' },
+  auto_stop_early_on_final: { g: 'Recording', t: 'Stop at the final whistle', h: 'When the guide confirms a game is over, end the recording then (your post-roll padding still runs) instead of waiting out the full scheduled window. Off by default: the scheduled window never clips a game.', ty: 'bool' },
   chapter_marks_enabled: { g: 'Recording', t: 'Chapter markers', h: 'Track the match status while recording and embed chapters (Kick-off, Half-time, Extra time, Penalty shoot-out, Full time) into the finished file — Plex, Jellyfin, Kodi and VLC all read them natively.', ty: 'bool' },
   replay_rescue_enabled: { g: 'Recording', t: 'Second-chance replay rescue', h: 'When a game fails to record (dead feed, missed window, or an unresolved conflict), hunt the guide for a re-air and record it automatically as a low-priority replay that never bumps a live game.', ty: 'bool' },
   replay_rescue_whole_source: { g: 'Recording', t: 'Search the whole provider for re-airs', h: 'Widen the replay search from the league’s mapped channels to every channel on those providers. Finds more re-airs; may match less precisely.', ty: 'bool' },
@@ -2337,7 +2340,7 @@ const stopRecReq = id => api.post(`/api/recordings/${id}/stop`);
 const reresolveRecReq = id => api.post(`/api/recordings/${id}/resolve`);
 const delRecReq = (id, keepFile) => api.del(`/api/recordings/${id}${keepFile ? '?keepFile=true' : ''}`);
 async function startRec(id) { const r = await startRecReq(id); if (r.error) toast(r.error, 'err'); else toast(r.started ? 'Starting…' : 'Already running', 'ok'); render(); }
-async function stopRec(id) { const r = await stopRecReq(id); toast(r.cancelled ? 'Cancelled' : r.stopping ? 'Stopping…' : 'No change', r.error ? 'err' : 'ok'); render(); }
+async function stopRec(id) { const r = await stopRecReq(id); toast(r.error || (r.cancelled ? 'Cancelled' : r.stopping ? 'Stopping…' : 'No change'), r.error ? 'err' : 'ok'); render(); }
 async function reresolveRec(id) { const r = await reresolveRecReq(id); if (r.error) toast(r.error, 'err'); else toast(r.changed ? `Re-resolved → ${r.channel}` : `Already on ${r.channel}`, 'ok'); render(); }
 async function reresolveLeague(id) { const r = await api.post(`/api/leagues/${id}/reresolve`); if (r.error) toast(r.error, 'err'); else toast(`Re-resolved ${r.updated} scheduled recording${r.updated === 1 ? '' : 's'}${r.changed ? ` (${r.changed} changed channel)` : ''}`, 'ok'); render(); }
 // Delete confirmation with the "also delete file" choice (single + bulk share it). The pending callback pattern
@@ -2442,11 +2445,11 @@ function openSourceModal(id) {
   modal(`<h2>${edit ? 'Edit' : 'Add'} source</h2>
     <div class="fields" style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
       <label class="field">Label<input id="sLabel" value="${esc(x?.label || '')}" placeholder="e.g. My IPTV (login 2)"/></label>
-      <label class="field">Type<select id="sType"><option ${sel(x?.type, 'm3u') ? '' : 'selected'}>xtream</option><option ${sel(x?.type, 'm3u')}>m3u</option></select></label>
+      <label class="field">Type<select id="sType"><option ${sel(x?.type, 'm3u') ? '' : 'selected'}>xtream</option>${x?.type === 'm3u' ? `<option value="m3u" selected>m3u (not supported yet)</option>` : ''}</select><span class="muted" style="font-size:12px">M3U playlist links aren't supported yet — use your provider's Xtream login, or put the playlist through Threadfin / Dispatcharr / Stationarr.</span></label>
       <label class="field">Protocol<select id="sProto"><option ${x?.protocol === 'https' ? '' : 'selected'}>http</option><option ${sel(x?.protocol, 'https')}>https</option></select></label>
       <label class="field">Host<input id="sHost" value="${esc(x?.host || '')}" placeholder="provider.example.com"/></label>
       <label class="field">Port<input id="sPort" type="number" value="${x?.port || 0}"/></label>
-      <label class="field">Max streams<input id="sMax" type="number" value="${x?.maxStreams || 1}" title="Provider enforces 1 per login"/></label>
+      <label class="field">Max streams<input id="sMax" type="number" value="${x?.maxStreams || 1}" title="DVarr currently records one stream per login at a time; honouring a higher limit is planned"/></label>
       <label class="field">Username${edit ? ' <span class="muted">(blank = keep)</span>' : ''}<input id="sUser" value="" placeholder="${edit ? esc(x.username) : ''}"/></label>
       <label class="field">Password${edit ? ' <span class="muted">(blank = keep)</span>' : ''}<input id="sPass" type="password" placeholder="${edit ? '••••••' : ''}"/></label>
       <label class="field" style="grid-column:1/3">External EPG URL (optional)<input id="sEpg" value="${esc(x?.epgUrl || '')}" placeholder="https://…/epg.xml.gz"/></label>

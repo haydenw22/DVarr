@@ -65,6 +65,18 @@ public sealed class AutoScheduleService : BackgroundService
         }
     }
 
+    /// <summary>True when a capture over [recStart, recEnd] covers the event's CURRENT airing [evStart, evEnd] — it
+    /// overlaps at least half of it. TheSportsDB nudges times by minutes routinely (still the same airing); when it
+    /// re-dates a game (a rainout made up the next day, a corrected kick-off hours later) the old capture never saw
+    /// the game, and it must be recorded again. The ONE rule both the auto-scheduler ("is this event handled?") and
+    /// the rescue sweep ("did the game move?") use, so they can never disagree about whether a game is still to come.</summary>
+    internal static bool CoversAiring(long recStart, long recEnd, long evStart, long evEnd)
+    {
+        var len = Math.Max(1, evEnd - evStart);
+        var overlap = Math.Min(recEnd, evEnd) - Math.Max(recStart, evStart);
+        return overlap * 2 >= len;
+    }
+
     /// <summary>Parse League.MonitoredTeamsJson (a JSON array of {id,name}, or a plain ["id",...] array) into a set of
     /// TheSportsDB team ids. Empty / invalid / absent → empty set (= follow ALL teams).</summary>
     public static HashSet<string> ParseMonitoredTeamIds(string? json)
@@ -285,9 +297,23 @@ public sealed class AutoScheduleService : BackgroundService
         // the cap is simply picked up by a later tick.
         if (candidates.Count > 500) candidates = candidates.Take(500).ToList();
 
-        var handledEventIds = (await db.Recordings
-            .Where(r => r.EventId != null && Handled.Contains(r.State))
-            .Select(r => r.EventId!.Value).Distinct().ToListAsync(ct)).ToHashSet();
+        // An event is "handled" when a recording already covers its CURRENT airing. Two kinds of row don't:
+        //  • rescue replays / catch-up pulls (RescueTicketId set) — they're copies hunted for an earlier failure, on
+        //    their own windows, and must never stop the event itself being recorded live;
+        //  • a finished/failed capture from an airing the event has since MOVED away from (TheSportsDB re-dated it —
+        //    a rainout made up the next day). That row recorded the old date; the game itself is still to come.
+        // 29 July: a rescue pull linked to a rained-out game kept the make-up (doubleheader game 2) from ever getting
+        // a live recording — and was filed as game 2 instead.
+        var candidateWindows = candidates.ToDictionary(c => c.Id, c => (c.StartUtc, End: c.EndUtc ?? c.StartUtc + 3 * 3600));
+        var handledRows = await db.Recordings.AsNoTracking()
+            .Where(r => r.EventId != null && Handled.Contains(r.State) && r.RescueTicketId == null)
+            .Select(r => new { EventId = r.EventId!.Value, r.State, r.StartUtc, r.EndUtc, r.PrePadS, r.PostPadS })
+            .ToListAsync(ct);
+        var handledEventIds = handledRows
+            .Where(r => !(r.State is RecordingState.Done or RecordingState.NeedsAttention or RecordingState.FinalizeRetry)
+                        || !candidateWindows.TryGetValue(r.EventId, out var w)
+                        || CoversAiring(r.StartUtc - r.PrePadS, r.EndUtc + r.PostPadS, w.StartUtc, w.End))
+            .Select(r => r.EventId).ToHashSet();
 
         // ---- Credit-aware conflict planning ----
         // Current occupancy: every slot-holding recording reserves [Start-PrePad, End+PostPad] on its credential.

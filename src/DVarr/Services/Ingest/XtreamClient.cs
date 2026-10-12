@@ -149,9 +149,35 @@ public sealed class XtreamClient
         // Honour the source's configured UA (some providers gate EVERY call on it, not just streams); VLC default otherwise.
         req.Headers.UserAgent.ParseAdd(string.IsNullOrWhiteSpace(userAgent) ? DefaultUserAgent : userAgent);
         using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, callCt);
+        // A 404 here almost always means the address isn't an Xtream server at all (an M3U playlist link pasted as
+        // the host, or the wrong port/path) — say that instead of a bare status code.
+        if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
+            throw new XtreamResponseException("the provider has no Xtream API at this address (404) — check the host, port and http/https, and that this is an Xtream login rather than an M3U playlist link");
         resp.EnsureSuccessStatusCode();
-        await using var stream = await resp.Content.ReadAsStreamAsync(callCt);
+        await using var net = await resp.Content.ReadAsStreamAsync(callCt);
+        // Peek the first meaningful byte: a provider (or a captive/parking page) answering with HTML used to surface
+        // as "'<' is an invalid start of a value" from the JSON parser.
+        var lead = new byte[64];
+        var got = 0;
+        while (got < lead.Length)
+        {
+            var n = await net.ReadAsync(lead.AsMemory(got, lead.Length - got), callCt);
+            if (n == 0) break;
+            got += n;
+        }
+        if (LooksLikeHtml(lead.AsSpan(0, got)))
+            throw new XtreamResponseException("the provider answered with a web page instead of data — check the host, port and http/https, and that this is an Xtream login (M3U playlist links aren't supported yet)");
+        await using var stream = new LeadingBytesStream(lead, got, net);
         return await JsonSerializer.DeserializeAsync<T>(stream, Json, callCt);
+    }
+
+    /// <summary>True when a response body opens like an HTML/XML page rather than JSON (after any BOM/whitespace).</summary>
+    internal static bool LooksLikeHtml(ReadOnlySpan<byte> lead)
+    {
+        var i = 0;
+        if (lead.Length >= 3 && lead[0] == 0xEF && lead[1] == 0xBB && lead[2] == 0xBF) i = 3;
+        while (i < lead.Length && (lead[i] is (byte)' ' or (byte)'\t' or (byte)'\r' or (byte)'\n')) i++;
+        return i < lead.Length && lead[i] == (byte)'<';
     }
 
     /// <summary>Open the EPG XMLTV stream — the external override URL if set, else the provider's xmltv.php.</summary>
@@ -230,4 +256,10 @@ public sealed class XtreamClient
         try { return Encoding.UTF8.GetString(Convert.FromBase64String(s)); }
         catch { return s; }
     }
+}
+
+/// <summary>A provider response DVarr can't use, with a message meant for the user (shown on the Sources page).</summary>
+public sealed class XtreamResponseException : Exception
+{
+    public XtreamResponseException(string message) : base(message) { }
 }

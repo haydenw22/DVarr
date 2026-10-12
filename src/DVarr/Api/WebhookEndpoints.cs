@@ -47,15 +47,8 @@ public static class WebhookEndpoints
                         var series = FirstString(meta, "grandparentTitle");
                         var season = IntField(meta, "parentIndex");
                         var episode = IntField(meta, "index");
-                        var (result, fresh) = await MarkWatchedAsync(db, gate, path, series, season, episode, log);
-                        if (result == WatchResult.Marked)
-                            // Just flag it — the retention tick/sweep delete it later, once past the watched safety
-                            // window (never mid-watch: the server scrobbles at ~90% position, not true end-of-play).
-                            log.LogInformation("[Webhook] plex scrobble '{Title}' (series={Series} S{Season}E{Episode}, path={Path}) → {N} item(s) marked watched",
-                                title ?? "?", series ?? "?", season, episode, path ?? "(none)", fresh.Count);
-                        else if (result == WatchResult.NoMatch)
-                            log.LogInformation("[Webhook] plex scrobble '{Title}' (series={Series} S{Season}E{Episode}, path={Path}) → no matching library file",
-                                title ?? "?", series ?? "?", season, episode, path ?? "(none)");
+                        var (result, fresh) = await MarkWatchedAsync(db, gate, path, series, season, episode, title, log);
+                        LogOutcome(log, "plex scrobble", result, fresh, title, series, season, episode, path);
                     }
                 }
             }
@@ -78,7 +71,7 @@ public static class WebhookEndpoints
                 {
                     using var doc = JsonDocument.Parse(json);
                     var root = doc.RootElement;
-                    if (BoolField(root, "PlayedToCompletion") || BoolField(root, "Played"))
+                    if ((BoolField(root, "PlayedToCompletion") || BoolField(root, "Played")) && !IsProgressSave(root))
                     {
                         var path = FirstString(root, "ItemPath") ?? FirstString(root, "Path")
                                    ?? (root.TryGetProperty("Item", out var it) ? FirstString(it, "Path") : null);
@@ -86,16 +79,8 @@ public static class WebhookEndpoints
                         var series = FirstString(root, "SeriesName");
                         var season = IntField(root, "SeasonNumber");
                         var episode = IntField(root, "EpisodeNumber");
-                        var (result, fresh) = await MarkWatchedAsync(db, gate, path, series, season, episode, log);
-                        if (result == WatchResult.Marked)
-                            // Just flag it — the retention tick/sweep delete it later, once past the watched safety
-                            // window (never mid-watch: Jellyfin marks played at ~90% position, not true end-of-play).
-                            log.LogInformation("[Webhook] jellyfin '{Title}' (series={Series} S{Season}E{Episode}, path={Path}) → {N} item(s) marked watched",
-                                title ?? "?", series ?? "?", season, episode, path ?? "(none)", fresh.Count);
-                        else if (result == WatchResult.NoMatch)
-                            log.LogInformation("[Webhook] jellyfin '{Title}' (series={Series} S{Season}E{Episode}, path={Path}) → no matching library file",
-                                title ?? "?", series ?? "?", season, episode, path ?? "(none)");
-                        // AlreadyWatched → silent no-op (a duplicate end-of-play event)
+                        var (result, fresh) = await MarkWatchedAsync(db, gate, path, series, season, episode, title, log);
+                        LogOutcome(log, "jellyfin", result, fresh, title, series, season, episode, path);
                     }
                 }
             }
@@ -148,10 +133,67 @@ public static class WebhookEndpoints
     /// League/Season/Game filing) — Jellyfin's "watched" webhook frequently carries no file path at all, so the
     /// structured key is what actually lands. Every path refuses ambiguity: a key resolving to several rows is skipped,
     /// not guessed at (audit SEC-08), because watched state can feed the auto-delete plan. Returns rows flagged.</summary>
-    private enum WatchResult { Marked, AlreadyWatched, NoMatch }
+    internal enum WatchResult { Marked, AlreadyWatched, NoMatch, Ambiguous }
+
+    /// <summary>Jellyfin's webhook plugin posts "UserDataSaved" on every PROGRESS save, and once an item is played its
+    /// Played flag rides along on each one — so a single viewing fired the watched path several times a minute (and
+    /// logged an ambiguity warning each time). Only a user toggling Played, or playback finishing, is a watched signal.</summary>
+    internal static bool IsProgressSave(JsonElement root)
+        => string.Equals(FirstString(root, "NotificationType"), "UserDataSaved", StringComparison.OrdinalIgnoreCase)
+           && FirstString(root, "SaveReason") is { } reason
+           && !string.Equals(reason, "TogglePlayed", StringComparison.OrdinalIgnoreCase)
+           && !string.Equals(reason, "PlaybackFinished", StringComparison.OrdinalIgnoreCase);
+
+    // Last time an ambiguity was logged, per key — a media server repeats the same event, so say it once per 10 min.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _ambiguityLogged = new();
+
+    private static void LogOutcome(ILogger log, string what, WatchResult result, List<int> fresh, string? title, string? series, int? season, int? episode, string? path)
+    {
+        switch (result)
+        {
+            case WatchResult.Marked:
+                // Just flag it — the retention tick/sweep delete it later, once past the watched safety window (never
+                // mid-watch: servers mark played at a ~90% position, not true end-of-play).
+                log.LogInformation("[Webhook] {What} '{Title}' (series={Series} S{Season}E{Episode}, path={Path}) → {N} item(s) marked watched",
+                    what, title ?? "?", series ?? "?", season, episode, path ?? "(none)", fresh.Count);
+                break;
+            case WatchResult.NoMatch:
+                log.LogInformation("[Webhook] {What} '{Title}' (series={Series} S{Season}E{Episode}, path={Path}) → no matching library file",
+                    what, title ?? "?", series ?? "?", season, episode, path ?? "(none)");
+                break;
+            case WatchResult.Ambiguous:
+                var key = $"{series}|{season}|{episode}|{path}";
+                var now = EpochTime.Now();
+                if (_ambiguityLogged.TryGetValue(key, out var last) && now - last < 600) break;
+                _ambiguityLogged[key] = now;
+                if (_ambiguityLogged.Count > 500) foreach (var kv in _ambiguityLogged) if (now - kv.Value > 600) _ambiguityLogged.TryRemove(kv.Key, out _);
+                log.LogWarning("[Webhook] {What} '{Title}' (series={Series} S{Season}E{Episode}) matches several different games in the library — not marking any watched (repeats of this are suppressed for 10 min)",
+                    what, title ?? "?", series ?? "?", season, episode);
+                break;
+            // AlreadyWatched → silent no-op (a duplicate end-of-play event)
+        }
+    }
+
+    /// <summary>Several library rows answered one key. Copies of the SAME game (a replay or catch-up filed beside the
+    /// first capture) are one watched event — mark them all. Different games (a numbering clash) are told apart by
+    /// the episode title the server reports; still more than one → genuinely ambiguous, refuse.</summary>
+    internal static List<int>? Disambiguate(IReadOnlyList<(int Id, int? EventId, string Title)> rows, string? reportedTitle)
+    {
+        if (rows.Count <= 1) return rows.Select(r => r.Id).ToList();
+        if (rows.All(r => r.EventId is not null) && rows.Select(r => r.EventId).Distinct().Count() == 1)
+            return rows.Select(r => r.Id).ToList();
+        if (!string.IsNullOrWhiteSpace(reportedTitle))
+        {
+            var t = reportedTitle.Trim();
+            var byTitle = rows.Where(r => string.Equals(r.Title.Trim(), t, StringComparison.OrdinalIgnoreCase)).ToList();
+            if (byTitle.Count > 0 && (byTitle.Count == 1 || (byTitle.All(r => r.EventId is not null) && byTitle.Select(r => r.EventId).Distinct().Count() == 1)))
+                return byTitle.Select(r => r.Id).ToList();
+        }
+        return null;
+    }
 
     private static async Task<(WatchResult Result, List<int> Fresh)> MarkWatchedAsync(DVarrDbContext db, DbWriteGate gate,
-        string? path, string? series, int? season, int? episode, ILogger log)
+        string? path, string? series, int? season, int? episode, string? reportedTitle, ILogger log)
     {
         var ids = new List<int>();
 
@@ -172,15 +214,12 @@ public static class WebhookEndpoints
                     // separator anchors are evaluated in SQL; the in-memory check re-verifies exactly.
                     var byName = (await db.LibraryItems
                             .Where(i => i.FilePath.EndsWith("/" + name) || i.FilePath.EndsWith("\\" + name))
-                            .Select(i => new { i.Id, i.FilePath }).ToListAsync())
+                            .Select(i => new { i.Id, i.FilePath, i.EventId, i.Title }).ToListAsync())
                         .Where(i => string.Equals(Path.GetFileName(i.FilePath), name, StringComparison.OrdinalIgnoreCase))
-                        .Select(i => i.Id).ToList();
-                    if (byName.Count > 1)
-                    {
-                        log.LogWarning("[Webhook] filename '{Name}' matches {N} library files — ambiguous, not marking watched", name, byName.Count);
-                        return (WatchResult.NoMatch, new());
-                    }
-                    ids = byName;
+                        .Select(i => (i.Id, i.EventId, i.Title)).ToList();
+                    var pick = Disambiguate(byName, reportedTitle);
+                    if (pick is null) return (WatchResult.Ambiguous, new());
+                    ids = pick;
                 }
             }
         }
@@ -189,18 +228,18 @@ public static class WebhookEndpoints
         if (ids.Count == 0 && !string.IsNullOrWhiteSpace(series) && season is > 0 && episode is > 0)
         {
             var s = series.Trim();
-            ids = await db.LibraryItems
+            var rows = (await db.LibraryItems
                 .Where(i => i.SeasonYear == season!.Value && i.EpisodeNum == episode!.Value && i.ShowName == s)
-                .Select(i => i.Id).ToListAsync();
-            if (ids.Count == 0) // the media server's series casing can differ from DVarr's folder name
-                ids = await db.LibraryItems
+                .Select(i => new { i.Id, i.EventId, i.Title }).ToListAsync())
+                .Select(i => (i.Id, i.EventId, i.Title)).ToList();
+            if (rows.Count == 0) // the media server's series casing can differ from DVarr's folder name
+                rows = (await db.LibraryItems
                     .Where(i => i.SeasonYear == season!.Value && i.EpisodeNum == episode!.Value && i.ShowName.ToLower() == s.ToLower())
-                    .Select(i => i.Id).ToListAsync();
-            if (ids.Count > 1)
-            {
-                log.LogWarning("[Webhook] '{Series}' S{Season}E{Episode} matches {N} library files — ambiguous, not marking watched", s, season, episode, ids.Count);
-                return (WatchResult.NoMatch, new());
-            }
+                    .Select(i => new { i.Id, i.EventId, i.Title }).ToListAsync())
+                    .Select(i => (i.Id, i.EventId, i.Title)).ToList();
+            var pick = Disambiguate(rows, reportedTitle);
+            if (pick is null) return (WatchResult.Ambiguous, new());
+            ids = pick;
         }
 
         if (ids.Count == 0) return (WatchResult.NoMatch, new());

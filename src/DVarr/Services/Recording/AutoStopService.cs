@@ -13,10 +13,14 @@ namespace DVarr.Services.Recording;
 /// 15-minute steps while the event is still in play (or its status is unknown — fail LONG, never clip a live
 /// game), then closes it back down once the guide reports a terminal status (FT/AET/AP…). The running
 /// <see cref="RecorderSupervisor"/> re-reads Recording.EndUtc live, so an extension takes effect mid-capture.
+/// The decisions themselves live in <see cref="AutoStopPolicy"/>.
 ///
 /// Guarantees:
-///  - NEVER shortens a window below the scheduled end (Event.EndUtc) — a terminal status only trims an
-///    extension back, and the post-pad always still runs ("keep full race endings" stays intact).
+///  - Never shortens a window below the scheduled end (Event.EndUtc) — a terminal status only trims an
+///    extension back, and the post-pad always still runs ("keep full race endings" stays intact). The one
+///    exception is opt-in: auto_stop_early_on_final ends at a CONFIRMED final, post-pad still included.
+///  - Only extends a capture that is actually running, holds (rather than extends) while a final is being
+///    confirmed, and treats "not started" long after kick-off as a stale feed rather than a reason to extend.
 ///  - Total extension is capped (per-league override, else 2h motorsport / 1h other sports) AND never eats
 ///    into the NEXT recording's pre-roll on the same credential (1 stream per login).
 ///  - Per-league opt-out (League.AutoStopMode = "fixed") and a global kill-switch (auto_stop_enabled).
@@ -26,6 +30,7 @@ public sealed class AutoStopService : BackgroundService
 {
     private readonly IServiceScopeFactory _scopes;
     private readonly DbWriteGate _gate;
+    private readonly RecorderService _recorder;
     private readonly ILogger<AutoStopService> _log;
 
     /// <summary>Recording states an auto-stop decision may apply to — every "capture is (or is about to be) live"
@@ -36,33 +41,6 @@ public sealed class AutoStopService : BackgroundService
         RecordingState.FailingOver, RecordingState.Degraded,
     };
 
-    /// <summary>Guide statuses that mean the event is OVER (case-insensitive, trimmed). Soccer: FT / AET / AP
-    /// (after penalties); generic feeds also emit the spelled-out forms; AW/WO = awarded/walk-over.
-    /// NOTE "PEN"/"P"/"PT" are deliberately NOT here — feeds are inconsistent about whether they mean a
-    /// shoot-out IN PROGRESS or finished-after-penalties, and clamping mid-shootout is the one mistake this
-    /// service exists to prevent. They classify as in-play; AET/AP/Match Finished land shortly after anyway.</summary>
-    private static readonly HashSet<string> TerminalStatuses = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "FT", "AET", "AP", "Match Finished", "Finished", "Full Time", "Race Finished",
-        "Cancelled", "Postponed", "Abandoned", "AW", "WO",
-        // Non-soccer terminals (baseball / basketball / NFL / hockey on TheSportsDB): a finished game reports
-        // "Final" (sometimes "Final/OT", "Final/SO") or a spelled-out finish. Without these a finished baseball
-        // game with no clean "FT" classified as Unknown and auto-stop over-extended to the cap (recorded ~1h long).
-        // "Final*" scoreline suffixes are caught by the prefix test in Classify.
-        "Final", "Game Finished", "Ended", "Complete", "Completed", "After Over Time", "AOT",
-    };
-
-    /// <summary>Guide statuses that mean the event is IN PLAY (1st/2nd half, half-time, extra time, penalty
-    /// shoot-out, generic Live). Presence in the livescore feed or a non-empty strProgress also counts.</summary>
-    private static readonly HashSet<string> InPlayStatuses = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "1H", "2H", "HT", "ET", "BREAK", "P", "PT", "PEN", "Live",
-        "1st Half", "2nd Half", "First Half", "Second Half", "Half Time", "Halftime",
-        "Extra Time", "Penalties", "Penalty Shootout",
-    };
-
-    private enum StatusClass { Terminal, InPlay, Unknown }
-
     /// <summary>Per-recording auto-stop bookkeeping. Static so it survives the (singleton) service instance the same
     /// way AutoScheduleService's warn stamps do; pruned by <see cref="Prune"/>. Only the single tick loop mutates it.</summary>
     private sealed class RecTrack
@@ -71,6 +49,7 @@ public sealed class AutoStopService : BackgroundService
         public string? LastStatus;        // last strStatus seen from lookup/event (cached between polls)
         public long? OriginalEndFallback; // first-seen Recording.EndUtc — cap base ONLY when Event.EndUtc is null
         public bool CapWarned;            // "cannot extend further" already notified (one Warn, not one per tick)
+        public bool HoldWarned;           // "feed looks stale — holding" already notified
         public long LastSeenUtc;          // last tick this recording was a candidate (prune key)
         public long FirstTerminalUtc;     // terminal debounce: when a terminal status was FIRST seen (0 = not currently terminal)
         public string? LastMarkStatus;    // last raw status written to LiveMarksJson (dedupe transitions)
@@ -94,8 +73,8 @@ public sealed class AutoStopService : BackgroundService
     /// status-flapping feed can't grow LiveMarksJson without bound.</summary>
     private const int MaxMarks = 40;
 
-    public AutoStopService(IServiceScopeFactory scopes, DbWriteGate gate, ILogger<AutoStopService> log)
-    { _scopes = scopes; _gate = gate; _log = log; }
+    public AutoStopService(IServiceScopeFactory scopes, DbWriteGate gate, RecorderService recorder, ILogger<AutoStopService> log)
+    { _scopes = scopes; _gate = gate; _recorder = recorder; _log = log; }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -122,6 +101,7 @@ public sealed class AutoStopService : BackgroundService
         var autoStop = await settings.GetBoolAsync("auto_stop_enabled");
         var chapterMarks = await settings.GetBoolAsync("chapter_marks_enabled");
         if (!autoStop && !chapterMarks) return;
+        var stopEarlyOnFinal = await settings.GetBoolAsync("auto_stop_early_on_final");
 
         var now = EpochTime.Now();
 
@@ -139,8 +119,8 @@ public sealed class AutoStopService : BackgroundService
                                 where ActiveStates.Contains(r.State) && r.CatchupSourceStartUtc == null
                                 select new
                                 {
-                                    r.Id, RecEndUtc = r.EndUtc, r.PostPadS, r.SourceId,
-                                    e.TsdbEventId, e.Title, EventEndUtc = e.EndUtc,
+                                    r.Id, RecEndUtc = r.EndUtc, r.PostPadS, r.SourceId, r.ChannelId,
+                                    e.TsdbEventId, e.Title, EventStartUtc = e.StartUtc, EventEndUtc = e.EndUtc,
                                     l.Sport, l.AutoStopMaxExtendS, l.AutoStopMode,
                                 }).ToListAsync(ct);
         if (candidates.Count == 0) { Prune(now); return; }
@@ -170,6 +150,11 @@ public sealed class AutoStopService : BackgroundService
             // silently stop protecting every other live recording).
             try
             {
+                // Only a capture that is actually running can be extended. A row left in an active state with no
+                // supervisor (or one already finalizing) used to collect extension after extension — five in two
+                // minutes on 30 July for a recording that wasn't even running.
+                if (!_recorder.IsActive(c.Id) || RecorderSupervisor.Finalizing.ContainsKey(c.Id)) continue;
+
                 var track = _track.GetOrAdd(c.Id, _ => new RecTrack());
                 track.LastSeenUtc = now;
                 // Cap base = the event's SCHEDULED end (events keep it; only the recording row is extended). A rare
@@ -194,7 +179,7 @@ public sealed class AutoStopService : BackgroundService
 
                 // Effective status: the livescore entry is the freshest signal when present; else the event lookup.
                 var status = !string.IsNullOrWhiteSpace(live?.Status) ? live!.Status : track.LastStatus;
-                var cls = Classify(status, live);
+                var cls = AutoStopPolicy.Classify(status, live is not null);
 
                 // Chapter marks: persist every raw status TRANSITION (kick-off, HT, 2H, ET, penalties, FT…)
                 // with its wall-clock — finalize turns them into embedded MKV chapters. Independent of the
@@ -203,81 +188,72 @@ public sealed class AutoStopService : BackgroundService
                     await RecordMarkAsync(db, c.Id, track, status, live?.Progress, now, ct);
 
                 // Terminal debounce: real feeds briefly show "FT" at the end of regulation before flipping to
-                // ET/penalties. A terminal sample only counts once it has PERSISTED across polls; until then it
-                // classifies as Unknown (fail LONG — hold, don't clamp). Any non-terminal sighting resets it.
-                if (cls == StatusClass.Terminal)
-                {
-                    if (track.FirstTerminalUtc == 0) track.FirstTerminalUtc = now;
-                    if (now - track.FirstTerminalUtc < TerminalConfirmS) cls = StatusClass.Unknown;
-                }
+                // ET/penalties. A terminal sample only counts once it has PERSISTED across polls; until then the
+                // policy HOLDS (no clamp — and no extension either). Any non-terminal sighting resets it.
+                if (cls == AutoStopPolicy.StatusClass.Terminal) { if (track.FirstTerminalUtc == 0) track.FirstTerminalUtc = now; }
                 else track.FirstTerminalUtc = 0;
+                var terminalConfirmed = track.FirstTerminalUtc != 0 && now - track.FirstTerminalUtc >= TerminalConfirmS;
 
-                // Decisions only for auto-stop-enabled Auto leagues, and only just before the current end — Auto
-                // NEVER shortens a window: the terminal branch only trims a previous EXTENSION back (never below
-                // the scheduled end), the in-play branch only grows.
                 if (!autoStop || (c.AutoStopMode is not null && c.AutoStopMode != "auto")) continue;
-                // The DecideAheadS gate belongs to the EXTEND branch only. Applied to both, a game that finished
-                // right after an extension couldn't be clamped until 120s before the (already extended) end, so the
-                // trim never recovered more than ~2 of the 15 extra minutes and the credential stayed occupied.
-                var canClamp = cls == StatusClass.Terminal && c.RecEndUtc > originalEnd && now < c.RecEndUtc;
-                if (now < c.RecEndUtc - DecideAheadS && !canClamp) continue;
 
-                if (cls == StatusClass.Terminal)
+                // Extension ceiling: the per-sport cap past the scheduled end, and never into the NEXT recording's
+                // pre-roll on the same credential (1 stream/login) — queried fresh so a cancelled blocker frees us.
+                // Only a genuinely UPCOMING live recording bounds the extension: catch-up pulls (a download timeout,
+                // created with StartUtc=now) and anything whose padded window has already started are excluded.
+                var cap = await settings.GetAutoStopCapSecondsAsync(c.Sport, c.AutoStopMaxExtendS);
+                var allowedEnd = originalEnd + cap;
+                var next = await db.Recordings.AsNoTracking()
+                    .Where(n => n.Id != c.Id && n.SourceId == c.SourceId
+                                && (n.State == RecordingState.Pending || n.State == RecordingState.Starting)
+                                && n.CatchupSourceStartUtc == null
+                                && n.StartUtc - n.PrePadS > now
+                                && n.EndUtc + n.PostPadS > now)
+                    .OrderBy(n => n.StartUtc - n.PrePadS)
+                    .Select(n => new { n.StartUtc, n.PrePadS })
+                    .FirstOrDefaultAsync(ct);
+                if (next is not null)
+                    allowedEnd = Math.Min(allowedEnd, next.StartUtc - next.PrePadS - SlotGuardS - c.PostPadS);
+
+                // A stale "not started" may still extend as far as the broadcaster's own guide slot — looked up only
+                // when that is the question being asked.
+                long? guideSlotEnd = null;
+                if (cls == AutoStopPolicy.StatusClass.NotStarted && now >= c.RecEndUtc - DecideAheadS
+                    && now >= c.EventStartUtc + AutoStopPolicy.StaleNotStartedAfterS)
+                    guideSlotEnd = await GuideSlotEndAsync(db, c.ChannelId, c.EventStartUtc, ct);
+
+                var d = AutoStopPolicy.Decide(cls, terminalConfirmed, now, c.RecEndUtc, originalEnd, c.EventStartUtc,
+                    allowedEnd, guideSlotEnd, stopEarlyOnFinal, DecideAheadS, ExtendStepS);
+                switch (d.Kind)
                 {
-                    // Finished per guide. If we previously extended past the scheduled end and that extension is
-                    // still ahead of the clock, clamp back to now (never below the scheduled end) so the capture
-                    // stops after its normal post-pad instead of riding out the whole unused extension.
-                    if (c.RecEndUtc > originalEnd && now < c.RecEndUtc)
-                    {
-                        var clampTo = Math.Max(now, originalEnd);
-                        if (clampTo < c.RecEndUtc)
-                            await ClampAsync(db, c.Id, c.RecEndUtc, clampTo, status, now, ct);
-                    }
-                    // Never extended (or already elapsed): nothing to do — the fixed window + post-pad already covers it.
-                }
-                else // InPlay or Unknown — unknown fails LONG (F1/motorsport report no strStatus at all)
-                {
-                    var cap = await settings.GetAutoStopCapSecondsAsync(c.Sport, c.AutoStopMaxExtendS);
-                    var allowedEnd = originalEnd + cap;
-
-                    // Slot boundary: never let this window (incl. post-pad) reach into the NEXT recording's pre-roll
-                    // on the same credential (1 stream/login) — queried fresh each step so a cancelled blocker frees us.
-                    // Only a genuinely UPCOMING live recording bounds the extension. Excluded:
-                    //  • catch-up pulls — their window is a download timeout, they're created with StartUtc=now
-                    //    (so they'd compute an allowedEnd in the PAST and pin the extension to zero), and a queued
-                    //    pull simply slides or is preempted; its content sits in the archive either way;
-                    //  • anything whose padded window has already started — that's a contemporaneous row, not a
-                    //    future booking, and it can't be "protected" by clipping the game currently in play.
-                    var next = await db.Recordings.AsNoTracking()
-                        .Where(n => n.Id != c.Id && n.SourceId == c.SourceId
-                                    && (n.State == RecordingState.Pending || n.State == RecordingState.Starting)
-                                    && n.CatchupSourceStartUtc == null
-                                    && n.StartUtc - n.PrePadS > now
-                                    && n.EndUtc + n.PostPadS > now)
-                        .OrderBy(n => n.StartUtc - n.PrePadS)
-                        .Select(n => new { n.StartUtc, n.PrePadS })
-                        .FirstOrDefaultAsync(ct);
-                    if (next is not null)
-                        allowedEnd = Math.Min(allowedEnd, next.StartUtc - next.PrePadS - SlotGuardS - c.PostPadS);
-
-                    var newEnd = Math.Min(c.RecEndUtc + ExtendStepS, allowedEnd);
-                    if (newEnd <= c.RecEndUtc)
-                    {
+                    case AutoStopPolicy.ActionKind.Clamp:
+                        await ClampAsync(db, c.Id, c.RecEndUtc, d.NewEnd, status, now, ct);
+                        break;
+                    case AutoStopPolicy.ActionKind.Extend:
+                        track.CapWarned = false; // a blocker freed / cap raised — future clips may warn again
+                        track.HoldWarned = false;
+                        await ExtendAsync(db, c.Id, c.RecEndUtc, d.NewEnd, StatusText(status, live, cls), now, ct);
+                        break;
+                    case AutoStopPolicy.ActionKind.CapReached:
                         // Step clipped to zero (cap reached or the credential is needed) — warn ONCE, then let the
                         // capture stop at its current window like a fixed recording.
                         if (!track.CapWarned)
                         {
                             track.CapWarned = true;
                             await NotifyAsync(db, c.Id, Severity.Warn,
-                                $"cannot extend further (cap/slot boundary) — will stop at {EpochTime.ToDisplay(c.RecEndUtc + c.PostPadS).ToString("HH:mm")}", ct);
+                                $"cannot extend further (cap/slot boundary) — will stop at {EpochTime.ToDisplay(c.RecEndUtc + c.PostPadS):HH:mm}", ct);
                             _log.LogWarning("[AutoStop] Recording {Id} '{Title}': still in play but cannot extend further (cap/slot boundary)", c.Id, c.Title);
                         }
-                    }
-                    else
-                    {
-                        track.CapWarned = false; // a blocker freed / cap raised — future clips may warn again
-                        await ExtendAsync(db, c.Id, c.RecEndUtc, newEnd, StatusText(status, live, cls), now, ct);
-                    }
+                        break;
+                    case AutoStopPolicy.ActionKind.None when cls == AutoStopPolicy.StatusClass.NotStarted && d.Why.Length > 0:
+                        if (!track.HoldWarned)
+                        {
+                            track.HoldWarned = true;
+                            await NotifyAsync(db, c.Id, Severity.Info,
+                                $"the guide still says this game hasn't started, long after its start time — treating that as a stale feed and stopping at {EpochTime.ToDisplay(c.RecEndUtc + c.PostPadS):HH:mm}", ct);
+                            _log.LogInformation("[AutoStop] Recording {Id} '{Title}': status '{Status}' {Min} min after the start — stale feed, not extending",
+                                c.Id, c.Title, status, (now - c.EventStartUtc) / 60);
+                        }
+                        break;
                 }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
@@ -287,26 +263,12 @@ public sealed class AutoStopService : BackgroundService
         Prune(now);
     }
 
-    /// <summary>TERMINAL / IN-PLAY / UNKNOWN per the spec sets. Terminal wins over livescore presence (a feed can
-    /// briefly keep an FT row); livescore presence or a match-minute means in-play even with an unmapped status.</summary>
-    private static StatusClass Classify(string? status, TsdbLiveScore? live)
-    {
-        var s = status?.Trim();
-        // Terminal wins over livescore presence. "Final" as a prefix covers baseball/basketball/hockey scoreline
-        // suffixes ("Final/OT", "Final/SO", "Final/12") that the exact-match set can't enumerate.
-        if (!string.IsNullOrEmpty(s) && (TerminalStatuses.Contains(s) || s.StartsWith("Final", StringComparison.OrdinalIgnoreCase)))
-            return StatusClass.Terminal;
-        if (live is not null) return StatusClass.InPlay;
-        if (!string.IsNullOrEmpty(s) && InPlayStatuses.Contains(s)) return StatusClass.InPlay;
-        return StatusClass.Unknown; // empty / "Not Started" / anything unmapped
-    }
-
     /// <summary>Human status for notifications: "2H 97'" / "ET" / "in play" (unknown). Progress is the livescore
     /// match minute when available.</summary>
-    private static string StatusText(string? status, TsdbLiveScore? live, StatusClass cls)
+    private static string StatusText(string? status, TsdbLiveScore? live, AutoStopPolicy.StatusClass cls)
     {
         var s = status?.Trim();
-        if (string.IsNullOrEmpty(s)) s = cls == StatusClass.InPlay ? "live" : "in play";
+        if (string.IsNullOrEmpty(s)) s = cls == AutoStopPolicy.StatusClass.InPlay ? "live" : "in play";
         var p = live?.Progress?.Trim().TrimEnd('\'');
         return string.IsNullOrEmpty(p) ? s! : $"{s} {p}'";
     }
@@ -331,7 +293,7 @@ public sealed class AutoStopService : BackgroundService
             applied = true;
         }, ct);
         if (applied)
-            _log.LogInformation("[AutoStop] Recording {Id}: still in play ({Status}) — extended end to {End} (Brisbane {Bne})",
+            _log.LogInformation("[AutoStop] Recording {Id}: still in play ({Status}) — extended end to {End} ({Local} local)",
                 recId, statusText, newEnd, EpochTime.ToDisplay(newEnd).ToString("HH:mm"));
     }
 
@@ -405,6 +367,19 @@ public sealed class AutoStopService : BackgroundService
             });
             await db.SaveChangesAsync(ct);
         }, ct);
+    }
+
+    /// <summary>End of the guide programme the recorded channel had airing ten minutes into the event — the slot the
+    /// broadcaster set aside for the game. Null when the channel isn't linked to the guide or nothing is listed.</summary>
+    private static async Task<long?> GuideSlotEndAsync(DVarrDbContext db, int channelId, long eventStart, CancellationToken ct)
+    {
+        var ch = await db.Channels.AsNoTracking().Where(x => x.Id == channelId)
+            .Select(x => new { x.SourceId, Epg = x.EpgChannelId ?? x.MatchedEpgId }).FirstOrDefaultAsync(ct);
+        if (ch?.Epg is not { Length: > 0 } epg) return null;
+        var at = eventStart + 600;
+        return await db.Programmes.AsNoTracking()
+            .Where(p => p.SourceId == ch.SourceId && p.EpgChannelId == epg && p.StartUtc <= at && p.StopUtc > at)
+            .OrderByDescending(p => p.StartUtc).Select(p => (long?)p.StopUtc).FirstOrDefaultAsync(ct);
     }
 
     /// <summary>Drop per-recording tracking not seen for 6h (its capture ended) and stale livescore sport caches,

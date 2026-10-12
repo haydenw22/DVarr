@@ -12,6 +12,28 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.46.0] — 2026-10-12
+Recordings you can trust: every recording problem reported in the community since v1.45 has been traced to a cause in the code and fixed. Recordings no longer come out with the wrong length, overrun by hours, or let a replay take a live game's place, and the M3U and Jellyfin issues are sorted. This release also adds DVarr's first automated test suite.
+
+### Fixed — recordings
+- **Finished recordings no longer report the wrong length or stop playing partway through.** When a provider restarted its stream clock, half a second of audio could land on the new clock while the picture was still on the old one. Joining the segments then threw everything after that point hours down the timeline: a ~3.5-hour game finished as a "7h" file that stopped at 2:30, and a catch-up download came out as "22h 46m" and wouldn't play. DVarr now checks every segment's audio as well as its video, and repairs any segment that straddles two clocks before joining (losslessly, keeping the picture's clock). Catch-up downloads, which used to be joined with no checks at all, get the same repair. If a finished file ever reports far more time than was captured, it's flagged on the recording instead of being filed as a clean copy.
+- **Games no longer run hours past the final.** When TheSportsDB kept a game marked "not started" long after it began (seen on a doubleheader), DVarr counted that as "unknown" and kept extending, by three hours in one case. A "not started" status well after the start time is now treated as a stale feed: the recording stops at its scheduled end, or at the end of the broadcaster's guide slot if that's later. Two smaller causes of overruns are fixed too: a first "final" sighting used to buy another 15 minutes while it was being confirmed, and extensions were applied to recordings that weren't actually running.
+- **New opt-in setting: Stop at the final whistle** (Settings → Recording). Once the guide confirms a game is over, the recording ends then (your post-roll padding still runs) instead of waiting out the scheduled window. It's off by default, because the scheduled window never clips a game.
+- **A finalize can no longer hold up everything else.** Finalizing recordings no longer count toward "Max simultaneous recordings", since they've already let go of their login. A big finalize resumed after a restart now runs in the background, so recordings can start straight away. Stop is no longer offered on a recording that's finalizing: it can't speed that up, and after a restart it could mark the recording cancelled while the finalize carried on.
+- **Catch-up downloads no longer pin the CPU.** Dead-feed checking decoded every frame of a download arriving at many times real speed. It's now skipped for downloads, which have no live feed to fail over from.
+
+### Fixed — scheduling and replays
+- **Live games always get their login.** "Live games bump replays" now also applies when you're at the simultaneous-recordings limit. Previously the limit check ran first, so a higher-priority game could sit in Pending behind a replay. A queued catch-up download now also waits rather than starting on a login a live game needs within the hour.
+- **Doubleheaders and rescheduled games are handled properly.** When TheSportsDB moved a rained-out game to the next day, DVarr's replay hunt kept searching for the old date. It took the next day's live game for a "replay", and the real make-up game never got a recording. A replay hunt now follows its game: if the game is postponed or moved into the future it stops hunting (the game gets recorded live at its new time), and if the time changed but the game is in the past it starts again with the new time. A listing for another game in the same series is never mistaken for a replay, and an earlier copy no longer stops the rescheduled game from being recorded.
+
+### Fixed — integrations and sources
+- **Jellyfin "delete after watched" works when there are two copies of a game.** Jellyfin sends a webhook on every progress save, so one viewing triggered dozens of "ambiguous" warnings, and a game with two files (for example the original capture plus a replay) was never marked watched. Progress saves are now ignored, copies of the same game are marked watched together, two different games sharing an episode number are told apart by title, and an ambiguous case is logged once instead of every few seconds.
+- **M3U sources now say plainly that they aren't supported yet**, instead of failing every refresh with "404 (Not Found)" (GitHub #11). DVarr reads Xtream logins only for now. Until M3U support arrives, put the playlist through Threadfin, Dispatcharr or Stationarr and add that as an Xtream source. Xtream sources that answer with a web page or have no API at the address now get a clear explanation instead of `'<' is an invalid start of a value`.
+- **Clearer wrong-channel messages.** When a pinned channel is why DVarr didn't move a game to the national broadcaster, the notification now says that, and how to fix it. Previously it said no channel in your lineup carried the game. A routine guide refresh is no longer logged as "guide blank", and auto-stop log times are no longer labelled "Brisbane".
+
+### Under the hood
+- **First automated test suite** (`tests/DVarr.Tests`, 81 tests). It covers the finalize timeline planner, including end-to-end ffmpeg tests that rebuild the real broken-segment shapes, plus auto-stop decisions, webhook matching, rescue re-dating and source errors. The Docker image now only publishes when every test passes.
+
 ## [1.45.3] — 2026-07-28
 Fixes channel preview on HLS sources, reported straight after v1.45.2.
 

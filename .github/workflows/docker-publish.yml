@@ -23,7 +23,34 @@ permissions:
   packages: write
 
 jobs:
+  # The image only publishes when the test suite passes. ffmpeg is installed so the finalize integration tests
+  # (real MPEG-TS segments with broken timelines) run here rather than being skipped.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # The SAME static ffmpeg build the image ships (see Dockerfile), so the timeline tests exercise production's
+      # demuxer/muxer behaviour rather than Ubuntu's older packaged ffmpeg.
+      - name: Install ffmpeg (BtbN n8.1 static, as in the image)
+        run: |
+          mkdir -p "$RUNNER_TEMP/ffmpeg"
+          wget -qO "$RUNNER_TEMP/ffmpeg.tar.xz" https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz
+          tar -xJf "$RUNNER_TEMP/ffmpeg.tar.xz" -C "$RUNNER_TEMP/ffmpeg" --strip-components=1
+          echo "$RUNNER_TEMP/ffmpeg/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/ffmpeg/bin/ffmpeg" -hide_banner -version | head -n1
+
+      - name: Test
+        run: dotnet test DVarr.sln -c Release
+
   build-and-push:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

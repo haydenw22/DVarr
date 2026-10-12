@@ -94,12 +94,38 @@ public sealed class RecorderService
             // background auto-record pipeline. This is the structural enforcement of the "don't touch Source 1" rule.
             if (!src.Enabled) return $"source '{src.Label}' is disabled — refusing to contact it";
 
-            // Global concurrency cap: DVarr won't run more than max_global_concurrent_recordings at once across ALL
-            // logins (bounds CPU/disk/network beyond the per-credential 1-stream limit). _active already holds this
-            // recording's own reservation (added above), so subtract it. Over the cap → stay Pending and retry next
-            // tick, exactly like a busy credential — never a hard failure. 0/blank = no global cap.
+            // A queued catch-up DOWNLOAD must not grab a login a higher-priority live game is about to need: it would
+            // be preempted minutes later (wasting the pull) — or, worse, hold the global cap so the live game can't
+            // start at all (29 July: a 3h archive pull armed two minutes before the Yankees' pre-roll). Its content
+            // sits in the archive, so it simply waits for the next quiet stretch on this login.
+            if (rec.CatchupSourceStartUtc is not null && rec.Priority == RecordingPriority.Opportunistic)
+            {
+                var nowLa = EpochTime.Now();
+                var horizon = nowLa + Math.Min(rec.CatchupDurationS ?? 3600, 3600) + 300;
+                var upcoming = await db.Recordings.AsNoTracking()
+                    .Where(u => u.Id != recordingId && u.SourceId == rec.SourceId
+                                && u.Priority != RecordingPriority.Opportunistic && u.CatchupSourceStartUtc == null
+                                && (u.State == RecordingState.Pending || u.State == RecordingState.Conflict)
+                                && u.StartUtc - u.PrePadS <= horizon && u.EndUtc + u.PostPadS > nowLa)
+                    .OrderBy(u => u.StartUtc - u.PrePadS)
+                    .Select(u => new { u.Title, u.StartUtc, u.PrePadS })
+                    .FirstOrDefaultAsync(stoppingToken);
+                if (upcoming is not null)
+                    return $"waiting — live recording “{upcoming.Title}” needs this login at {EpochTime.ToDisplay(upcoming.StartUtc - upcoming.PrePadS):HH:mm}; the download runs once it's clear";
+            }
+
+            // Global concurrency cap: DVarr won't run more than max_global_concurrent_recordings CAPTURES at once
+            // across ALL logins (bounds CPU/disk/network beyond the per-credential 1-stream limit). Only captures
+            // count: a recording that is finalizing has already released its login, and counting it let one long
+            // finalize hold the cap while the next game sat in Pending (29 July). _active also holds this recording's
+            // own reservation (added above), so exclude it. Over the cap, a LIVE recording may bump a running
+            // replay/catch-up pull (they can always be re-hunted; the broadcast can't) — but only once it actually
+            // holds a login (see below), so a pull is never stopped for a game that still couldn't start. Here we
+            // only bail out early when bumping can't help at all. 0/blank = no cap.
             var maxConcurrent = await settings.GetIntAsync("max_global_concurrent_recordings");
-            if (maxConcurrent > 0 && _active.Count - 1 >= maxConcurrent)
+            var mayBumpForCap = rec.Priority != RecordingPriority.Opportunistic && await settings.GetBoolAsync("live_preempts_opportunistic");
+            if (maxConcurrent > 0 && CapturingCount(except: recordingId) >= maxConcurrent
+                && (!mayBumpForCap || !await AnyOpportunisticCapturingAsync(db, recordingId, stoppingToken)))
                 return $"at the global limit of {maxConcurrent} simultaneous recording(s) — will start when one frees";
 
             // Acquire the credential's single slot. If THIS recording's credential is busy, SPREAD to the same
@@ -157,56 +183,34 @@ public sealed class RecorderService
                 // copy can't satisfy the rescue "good copy" check; the rescue settle pass then re-opens its
                 // ticket and hunts again (archive pulls simply re-run later).
                 if (acquired is null && rec.Priority != RecordingPriority.Opportunistic
-                    && await settings.GetBoolAsync("live_preempts_opportunistic"))
+                    && await settings.GetBoolAsync("live_preempts_opportunistic")
+                    && await TryPreemptOpportunisticAsync(db, rec, src.Label, sameSourceOnly: true, stoppingToken))
                 {
-                    var activeIds = ActiveIds.ToList();
-                    var victim = await db.Recordings.AsNoTracking()
-                        .Where(v => activeIds.Contains(v.Id) && v.Id != recordingId && v.SourceId == rec.SourceId
-                                    && v.Priority == RecordingPriority.Opportunistic
-                                    && (v.State == RecordingState.Starting || v.State == RecordingState.Recording
-                                        || v.State == RecordingState.Recovering || v.State == RecordingState.FailingOver
-                                        || v.State == RecordingState.Degraded))
-                        .Select(v => new { v.Id, v.Title, v.CatchupSourceStartUtc })
-                        .FirstOrDefaultAsync(stoppingToken);
-                    if (victim is not null)
+                    // The victim's lease releases as soon as its capture stops (before any finalize) — poll
+                    // briefly for the freed slot rather than waiting a whole scheduler tick.
+                    for (var w = 0; w < 30 && acquired is null && !stoppingToken.IsCancellationRequested; w++)
                     {
-                        var kind = victim.CatchupSourceStartUtc is not null ? "catch-up download" : "replay";
-                        _log.LogWarning("[Recorder] Recording {Id}: preempting Opportunistic {Kind} {Vid} '{VTitle}' on '{Label}' — a live recording needs the slot",
-                            recordingId, kind, victim.Id, victim.Title, src.Label);
-                        RecorderSupervisor.AbandonRequested[victim.Id] = $"preempted — live recording '{rec.Title}' needs this login (the {kind} will be retried)";
-                        await _gate.WriteAsync(async () =>
-                        {
-                            db.Notifications.Add(new Notification
-                            {
-                                RecordingId = recordingId, TsUtc = EpochTime.Now(), Kind = NotificationKind.FailedOver, Severity = Severity.Info,
-                                Message = $"preempted the {kind} of “{victim.Title}” to free '{src.Label}' for this live recording",
-                            });
-                            await db.SaveChangesAsync();
-                        });
-                        var settled = await StopAsync(victim.Id);
-                        // If the victim's supervisor finished on its own before consuming the abandon flag (raced a
-                        // natural completion), the stale entry would wrongly cancel that recording's NEXT run. Once
-                        // the task has settled the flag is either consumed (gone) or unreachable — safe to drop.
-                        // While NOT settled the supervisor may still be heading for the check, so the flag stays.
-                        // (The abandon path itself re-queues a preempted MANUAL catch-up pull to Pending; ticket-
-                        // linked captures go Cancelled and the rescue settle pass owns their retry.)
-                        if (settled)
-                        {
-                            RecorderSupervisor.AbandonRequested.TryRemove(victim.Id, out _);
-                            var post = await db.Recordings.AsNoTracking().Where(v => v.Id == victim.Id).Select(v => v.State).FirstOrDefaultAsync(stoppingToken);
-                            if (post == RecordingState.Done)
-                                _log.LogWarning("[Recorder] preempt of {Vid} raced its natural completion — it finalized Done before the abandon took effect", victim.Id);
-                        }
-                        // The victim's lease releases as soon as its capture stops (before any finalize) — poll
-                        // briefly for the freed slot rather than waiting a whole scheduler tick.
-                        for (var w = 0; w < 30 && acquired is null && !stoppingToken.IsCancellationRequested; w++)
-                        {
-                            acquired = await _tuner.TryAcquireAsync(rec.SourceId, LeasePurpose.Recording, recordingId, rec.ChannelId, rec.StreamId, stoppingToken);
-                            if (acquired is null) await Task.Delay(500, stoppingToken);
-                        }
+                        acquired = await _tuner.TryAcquireAsync(rec.SourceId, LeasePurpose.Recording, recordingId, rec.ChannelId, rec.StreamId, stoppingToken);
+                        if (acquired is null) await Task.Delay(500, stoppingToken);
                     }
                 }
                 if (acquired is null) return $"credential '{src.Label}' is busy and no equivalent login has a free slot (1 stream/login)";
+            }
+
+            // Cap check, part two — now that this recording HOLDS a login. If still over the cap, bump a running
+            // replay/catch-up pull to make room; if that doesn't free a slot, hand the login back and wait.
+            if (maxConcurrent > 0 && CapturingCount(except: recordingId) >= maxConcurrent)
+            {
+                try
+                {
+                    if (mayBumpForCap) await TryPreemptOpportunisticAsync(db, rec, src.Label, sameSourceOnly: false, stoppingToken);
+                }
+                catch { await _tuner.ReleaseAsync(acquired); throw; }
+                if (CapturingCount(except: recordingId) >= maxConcurrent)
+                {
+                    await _tuner.ReleaseAsync(acquired);
+                    return $"at the global limit of {maxConcurrent} simultaneous recording(s) — will start when one frees";
+                }
             }
             lease = acquired;
 
@@ -219,6 +223,7 @@ public sealed class RecorderService
                 finiteInput = nativeRate;
                 nextChunk = null;
                 chunkDur = null;
+                var isCatchupPull = false;
                 int catchupShapeIdx = 0;
                 List<string>? catchupShapes = null;
                 Func<int, string>? catchupUrlFor = null;
@@ -246,6 +251,7 @@ public sealed class RecorderService
                     chunkDur = () => ChunkDur(catchupChunkIdx);
                     nativeRate = false;
                     finiteInput = true;
+                    isCatchupPull = true;
                     // A fresh pull always starts from chunk 0 — stale segments from an interrupted earlier run of
                     // this same recording (boot recovery, preempt requeue) would duplicate everything re-pulled.
                     var staleScratch = Path.Combine(_paths.SegmentDir, recordingId.ToString());
@@ -279,7 +285,11 @@ public sealed class RecorderService
                 windowEnd = rec.EndUtc + rec.PostPadS;
                 stall = await settings.GetIntAsync("segment_no_progress_timeout_s");
                 if (stall <= 0) stall = 25;
-                contentVerify = await settings.GetBoolAsync("content_verify_enabled");
+                // Dead-feed checking decodes the picture as it arrives. A catch-up download arrives at many times
+                // real speed, so that decode pinned every core (29 July: CPU at 80% across the board, with a game
+                // finalizing alongside) — and it guards nothing a download needs: there's no live feed to fail over
+                // from, and the archive content is fixed. Downloads skip it.
+                contentVerify = !isCatchupPull && await settings.GetBoolAsync("content_verify_enabled");
                 contentDeadTimeout = await settings.GetIntAsync("content_dead_timeout_s");
                 if (contentDeadTimeout <= 0) contentDeadTimeout = 30;
                 // The dead-feed decode runs on the GPU (NVDEC) and samples only a few fps, so it costs almost no CPU.
@@ -368,6 +378,68 @@ public sealed class RecorderService
         }
     }
 
+    /// <summary>Recordings that are actually capturing (holding a provider stream) — active supervisors minus those in
+    /// finalize, which have already released their login.</summary>
+    private int CapturingCount(int except) => _active.Keys.Count(k => k != except && !RecorderSupervisor.Finalizing.ContainsKey(k));
+
+    /// <summary>True when some OTHER recording is capturing at Opportunistic priority — i.e. bumping could free a
+    /// global-cap slot.</summary>
+    private async Task<bool> AnyOpportunisticCapturingAsync(DVarrDbContext db, int recordingId, CancellationToken ct)
+    {
+        var capturingIds = _active.Keys.Where(k => k != recordingId && !RecorderSupervisor.Finalizing.ContainsKey(k)).ToList();
+        return capturingIds.Count > 0 && await db.Recordings.AsNoTracking()
+            .AnyAsync(v => capturingIds.Contains(v.Id) && v.Priority == RecordingPriority.Opportunistic, ct);
+    }
+
+    /// <summary>Live-preempts-opportunistic: stop one running Opportunistic capture (a rescue replay or a catch-up
+    /// pull) so a live recording can take its place — a replay can always be re-hunted; the live broadcast cannot.
+    /// The victim is stopped WITHOUT finalizing (AbandonRequested → Cancelled, scratch discarded) so its partial copy
+    /// can't satisfy the rescue "good copy" check; the rescue settle pass re-opens its ticket (archive pulls simply
+    /// re-run later). <paramref name="sameSourceOnly"/>: only a victim on this recording's login (to free that
+    /// login), else any login, preferring this one (to free a global-cap slot). True when a victim was stopped.</summary>
+    private async Task<bool> TryPreemptOpportunisticAsync(DVarrDbContext db, RecordingEntity rec, string label, bool sameSourceOnly, CancellationToken ct)
+    {
+        var capturingIds = _active.Keys.Where(k => k != rec.Id && !RecorderSupervisor.Finalizing.ContainsKey(k)).ToList();
+        var victim = await db.Recordings.AsNoTracking()
+            .Where(v => capturingIds.Contains(v.Id) && (!sameSourceOnly || v.SourceId == rec.SourceId)
+                        && v.Priority == RecordingPriority.Opportunistic
+                        && (v.State == RecordingState.Starting || v.State == RecordingState.Recording
+                            || v.State == RecordingState.Recovering || v.State == RecordingState.FailingOver
+                            || v.State == RecordingState.Degraded))
+            .OrderByDescending(v => v.SourceId == rec.SourceId)
+            .Select(v => new { v.Id, v.Title, v.CatchupSourceStartUtc })
+            .FirstOrDefaultAsync(ct);
+        if (victim is null) return false;
+
+        var kind = victim.CatchupSourceStartUtc is not null ? "catch-up download" : "replay";
+        _log.LogWarning("[Recorder] Recording {Id}: preempting Opportunistic {Kind} {Vid} '{VTitle}' — live recording on '{Label}' needs the slot",
+            rec.Id, kind, victim.Id, victim.Title, label);
+        RecorderSupervisor.AbandonRequested[victim.Id] = $"preempted — live recording '{rec.Title}' needs the slot (the {kind} will be retried)";
+        await _gate.WriteAsync(async () =>
+        {
+            db.Notifications.Add(new Notification
+            {
+                RecordingId = rec.Id, TsUtc = EpochTime.Now(), Kind = NotificationKind.FailedOver, Severity = Severity.Info,
+                Message = $"preempted the {kind} of “{victim.Title}” to make room for this live recording",
+            });
+            await db.SaveChangesAsync();
+        });
+        var settled = await StopAsync(victim.Id);
+        // If the victim's supervisor finished on its own before consuming the abandon flag (raced a natural
+        // completion), the stale entry would wrongly cancel that recording's NEXT run. Once the task has settled the
+        // flag is either consumed (gone) or unreachable — safe to drop. While NOT settled the supervisor may still be
+        // heading for the check, so the flag stays. (The abandon path itself re-queues a preempted MANUAL catch-up
+        // pull to Pending; ticket-linked captures go Cancelled and the rescue settle pass owns their retry.)
+        if (settled)
+        {
+            RecorderSupervisor.AbandonRequested.TryRemove(victim.Id, out _);
+            var post = await db.Recordings.AsNoTracking().Where(v => v.Id == victim.Id).Select(v => v.State).FirstOrDefaultAsync(ct);
+            if (post == RecordingState.Done)
+                _log.LogWarning("[Recorder] preempt of {Vid} raced its natural completion — it finalized Done before the abandon took effect", victim.Id);
+        }
+        return true;
+    }
+
     /// <summary>Cancel an active recording and wait (bounded) for the supervisor to fully unwind — finalize,
     /// persist/abandon segments, and release the tuner lease. Returns true if it actually SETTLED within the wait
     /// (so callers like delete can avoid removing the row mid-finalize). Returns true immediately if not active.</summary>
@@ -395,6 +467,7 @@ public sealed class RecorderService
         }
 
         var now = EpochTime.Now();
+        var refinalize = new List<RecordingEntity>();
         foreach (var r in rows)
         {
             var winStart = r.StartUtc - r.PrePadS;
@@ -418,18 +491,54 @@ public sealed class RecorderService
                 // re-finalize them rather than throwing the capture away (docs/05 §3.4). MISSED only if nothing exists.
                 var segDir = Path.Combine(_paths.SegmentDir, r.Id.ToString(), "A");
                 if (r.State is RecordingState.Finalizing or RecordingState.Stopping || HasSegments(segDir))
-                {
-                    _log.LogInformation("[Recorder] Re-finalizing recording {Id} from surviving segments after restart", r.Id);
-                    try { await ReFinalizeAsync(r); }
-                    catch (Exception ex) { _log.LogError(ex, "[Recorder] Re-finalize of {Id} failed", r.Id); await MarkMissedAsync(r.Id, "re-finalize failed: " + ex.Message); }
-                }
+                    refinalize.Add(r);
                 else
-                {
                     await MarkMissedAsync(r.Id, "window elapsed while DVarr was down (no segments captured)");
-                }
             }
             // future windows stay PENDING for the scheduler to arm.
         }
+
+        if (refinalize.Count > 0) StartBackgroundReFinalize(refinalize, stoppingToken);
+    }
+
+    /// <summary>Re-finalize recordings whose segments survived a restart, in the BACKGROUND, one at a time. This used
+    /// to run inline before the scheduler's first tick, so a big finalize after a restart (24 minutes for a 15.6 GB
+    /// game) kept every other recording from arming. Each row is registered as active while it waits and runs, so the
+    /// Stop/Delete endpoints see it as in-flight instead of cancelling the row underneath a finalize that would still
+    /// import the file and delete the segments.</summary>
+    private void StartBackgroundReFinalize(List<RecordingEntity> rows, CancellationToken stoppingToken)
+    {
+        var queue = new List<(RecordingEntity Row, TaskCompletionSource Done)>();
+        foreach (var r in rows)
+        {
+            var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var cts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+            if (!_active.TryAdd(r.Id, (tcs.Task, cts))) { cts.Dispose(); continue; }
+            RecorderSupervisor.Finalizing[r.Id] = 0; // queued for finalize — holds no login, so not a capture for the global cap
+            queue.Add((r, tcs));
+        }
+        _ = Task.Run(async () =>
+        {
+            foreach (var (r, done) in queue)
+            {
+                try
+                {
+                    _log.LogInformation("[Recorder] Re-finalizing recording {Id} from surviving segments after restart", r.Id);
+                    await ReFinalizeAsync(r);
+                }
+                catch (Exception ex)
+                {
+                    _log.LogError(ex, "[Recorder] Re-finalize of {Id} failed", r.Id);
+                    try { await MarkMissedAsync(r.Id, "re-finalize failed: " + ex.Message); } catch { }
+                }
+                finally
+                {
+                    RecorderSupervisor.Finalizing.TryRemove(r.Id, out _);
+                    if (_active.TryRemove(r.Id, out var entry)) entry.cts.Dispose();
+                    done.TrySetResult();
+                }
+            }
+        }, CancellationToken.None);
     }
 
     public async Task MarkMissedAsync(int recordingId, string why)

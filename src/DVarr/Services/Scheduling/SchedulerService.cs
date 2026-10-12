@@ -175,6 +175,9 @@ public sealed class SchedulerService : BackgroundService
 
         foreach (var id in passedPending)
         {
+            // A row queued for a background re-finalize after a restart is registered as active — it has footage
+            // and is about to settle on its own; marking it Missed would strand the imported file on a Missed row.
+            if (_recorder.IsActive(id)) continue;
             await _recorder.MarkMissedAsync(id, "no free credential slot for the whole window (conflict) or never armed");
             missed++;
         }

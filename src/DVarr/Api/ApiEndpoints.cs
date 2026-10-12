@@ -82,6 +82,7 @@ public static class ApiEndpoints
         // ---- Source CRUD (set up / edit your own sources) ----
         app.MapPost("/api/sources", async (SourceUpsert req, DVarrDbContext db, DbWriteGate gate) =>
         {
+            if (IngestService.IsM3u(req.Type)) return Results.BadRequest(new { error = IngestService.M3uNotSupported });
             if (string.IsNullOrWhiteSpace(req.Host)) return Results.BadRequest(new { error = "host is required" });
             if (!ValidEpgUrl(req.EpgUrl)) return Results.BadRequest(new { error = "external EPG URL must be an absolute http(s) URL" });
             var label = string.IsNullOrWhiteSpace(req.Label) ? "source" : req.Label.Trim();
@@ -114,6 +115,7 @@ public static class ApiEndpoints
         {
             var s = await db.Sources.FindAsync(id);
             if (s is null) return Results.NotFound();
+            if (IngestService.IsM3u(req.Type) && !IngestService.IsM3u(s.Type)) return Results.BadRequest(new { error = IngestService.M3uNotSupported });
             if (!ValidEpgUrl(req.EpgUrl)) return Results.BadRequest(new { error = "external EPG URL must be an absolute http(s) URL" });
             // Reject a rename onto another source's (unique) label with a friendly 409 rather than a DB 500.
             if (!string.IsNullOrWhiteSpace(req.Label) && req.Label.Trim() != s.Label
@@ -613,6 +615,14 @@ public static class ApiEndpoints
             if (r is null) return Results.NotFound();
             var active = rec.IsActive(id);
             lf.CreateLogger("DVarr.Api").LogInformation("[Api] Stop requested for recording {Id} (state {State}, active {Active})", id, r.State, active);
+
+            // Already stopped capturing and being assembled into the final file. Stop can't speed that up, and on a
+            // finalize resumed after a restart it used to mark the row Cancelled while the finalize carried on —
+            // importing the file and deleting the segments with nothing recording that it had. Let it finish.
+            // (A Stopping/Finalizing row that NOTHING is running is an orphan, and still cancels below.)
+            if (DVarr.Services.Recording.RecorderSupervisor.Finalizing.ContainsKey(id)
+                || (active && r.State is RecordingState.Stopping or RecordingState.Finalizing))
+                return Results.Json(new { error = "this recording has already stopped and is being assembled into its final file — it will finish on its own", finalizing = true }, statusCode: 409);
 
             // Live capture → cancel; the supervisor stops ffmpeg and finalizes the partial recording to Done.
             if (active) { await rec.StopAsync(id); return Results.Json(new { stopping = true }); }

@@ -151,10 +151,10 @@ While you're there, set **Settings → Data sources → Display timezone** to yo
 | Field | What to enter |
 |---|---|
 | **Label** | Any name, e.g. `My IPTV (login 1)` |
-| **Type** | `xtream` for Xtream-codes providers (the common case), or `m3u` |
+| **Type** | `xtream` — DVarr reads Xtream-codes logins. Plain M3U playlist links aren't supported yet; until they are, put the playlist through Threadfin, Dispatcharr or Stationarr and add that as an Xtream source |
 | **Protocol / Host / Port** | From your provider's URL, e.g. `http` · `provider.example.com` · `8080` |
 | **Username / Password** | Your IPTV login |
-| **Max streams** | How many concurrent streams this login allows (usually **1**) |
+| **Max streams** | How many concurrent streams this login allows. DVarr currently records **one stream per login at a time** whatever this says — add a second login as a second source to record two games at once |
 | **External EPG URL** *(optional)* | A full XMLTV URL (`https://…/epg.xml.gz`) if you prefer an external guide over the provider's built-in one — tick the override checkbox to make it win |
 | **User-Agent** *(optional)* | Only if your provider requires a specific player UA |
 
@@ -251,6 +251,12 @@ dotnet run --project src/DVarr/DVarr.csproj
 ```
 
 On Windows, runtime data (SQLite DB, segments) goes to `src/DVarr/bin/Debug/net8.0/_localdata/` so it runs without the Linux `/config` mounts. The **Quick test recording** card records a public test stream — the provider is never contacted unless you explicitly ingest a source.
+
+Tests (the finalize integration tests need `ffmpeg`/`ffprobe` on PATH and are skipped without them):
+
+```powershell
+dotnet test DVarr.sln
+```
 
 Migrations (applied automatically on startup):
 

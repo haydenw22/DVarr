@@ -135,6 +135,9 @@ public sealed class SettingsService
         // scheduled end and EXTENDS the window while the event is still in play (extra time / penalties), closing it
         // once the guide reports a terminal status. Never shortens below the scheduled window. OFF = fixed windows only.
         ["auto_stop_enabled"] = "true",
+        // Opt-in: once the guide CONFIRMS the game is final, end the recording then (post-pad still runs) instead of
+        // riding out the rest of the scheduled window. Off by default — the scheduled window is the safe default.
+        ["auto_stop_early_on_final"] = "false",
         // Chapter markers: while a recording is live, AutoStopService also records the match's status transitions
         // (kick-off, half-time, extra time, penalties, full time) and finalize embeds them as MKV chapters that
         // Plex/Jellyfin/Kodi/VLC read natively. Independent of auto_stop_enabled (a "fixed" league still gets

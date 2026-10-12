@@ -7,6 +7,10 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{8232024F-C08
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DVarr", "src\DVarr\DVarr.csproj", "{E0BC3DC0-E8F2-4350-938F-8BD30DC4F519}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{36F83E66-BD51-4626-B728-0CD3DC596853}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DVarr.Tests", "tests\DVarr.Tests\DVarr.Tests.csproj", "{C92D8CBE-9A91-48AA-8F26-CCED7F5F11D1}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -20,8 +24,13 @@ Global
 		{E0BC3DC0-E8F2-4350-938F-8BD30DC4F519}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{E0BC3DC0-E8F2-4350-938F-8BD30DC4F519}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{E0BC3DC0-E8F2-4350-938F-8BD30DC4F519}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C92D8CBE-9A91-48AA-8F26-CCED7F5F11D1}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C92D8CBE-9A91-48AA-8F26-CCED7F5F11D1}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C92D8CBE-9A91-48AA-8F26-CCED7F5F11D1}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C92D8CBE-9A91-48AA-8F26-CCED7F5F11D1}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{E0BC3DC0-E8F2-4350-938F-8BD30DC4F519} = {8232024F-C08F-48D0-981D-B513F97289DE}
+		{C92D8CBE-9A91-48AA-8F26-CCED7F5F11D1} = {36F83E66-BD51-4626-B728-0CD3DC596853}
 	EndGlobalSection
 EndGlobal

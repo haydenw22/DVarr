@@ -37,11 +37,20 @@ public sealed class IngestService
     // ingest's ToDictionaryAsync(StreamId) then throws forever. Serialize per source; a second click just waits.
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, SemaphoreSlim> _ingestLocks = new();
 
+    /// <summary>Shown wherever an M3U source is refused. Real M3U support (playlist URL or a local file) is planned.</summary>
+    public const string M3uNotSupported =
+        "M3U playlist sources aren't supported yet — DVarr currently reads Xtream logins only. Until M3U support lands, run the playlist through Threadfin, Dispatcharr or Stationarr and add that here as an Xtream source.";
+
+    public static bool IsM3u(string? type) => string.Equals(type?.Trim(), "m3u", StringComparison.OrdinalIgnoreCase);
+
     public async Task<IngestResult> IngestSourceAsync(int sourceId, CancellationToken ct = default)
     {
         var s = await _db.Sources.FindAsync(new object?[] { sourceId }, ct);
         if (s is null) return new IngestResult(sourceId, false, 0, 0, 0, "source not found");
         if (!s.Enabled) return new IngestResult(sourceId, false, 0, 0, 0, "source is disabled — refusing to contact the provider");
+        // Plain M3U playlists aren't read yet — everything below speaks the Xtream API, which is why an M3U source
+        // 404'd on every ingest (GitHub #11). Say so plainly instead of contacting the provider with the wrong protocol.
+        if (IsM3u(s.Type)) return new IngestResult(sourceId, false, 0, 0, 0, M3uNotSupported);
 
         var gate = _ingestLocks.GetOrAdd(sourceId, _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(ct);

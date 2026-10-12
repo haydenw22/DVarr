@@ -66,7 +66,7 @@ public sealed class EpgRepickService
         // anyway — the next sweep after the refresh lands re-picks against the fresh guide.
         var src = await _db.Sources.AsNoTracking().FirstOrDefaultAsync(x => x.Id == rec.SourceId, ct);
         if (src is not null && (src.LastEpgSyncUtc is not { } last || now - last > StaleEpgS))
-            KickEpgRefresh(rec.SourceId, ev.Title);
+            KickEpgRefresh(rec.SourceId, ev.Title, "the guide is over 12 hours old");
 
         var res = await _resolver.ResolveAsync(eventId, ct, restrictSourceId: rec.SourceId);
 
@@ -74,7 +74,7 @@ public sealed class EpgRepickService
         // and the event is close, kick a background refresh of that source's guide (rate-limited; the next sweep then
         // re-picks against fresh data). Detected explicitly — a zero EPG score alone could just mean bad titles.
         if (ev.StartUtc > now && ev.StartUtc - now <= BlankRefreshWindowS && await GuideBlankAsync(rec.SourceId, ev, ct))
-            KickEpgRefresh(rec.SourceId, ev.Title);
+            KickEpgRefresh(rec.SourceId, ev.Title, "the guide is blank around it");
 
         if (!res.Ok || res.Primary is null) return false;
         var all = new List<ResolvedChannel> { res.Primary };
@@ -110,7 +110,7 @@ public sealed class EpgRepickService
         // …unless the channel it is ALREADY on shows the fixture (a previous national-fallback move landed it on an
         // unmapped channel, which the mapped ladder can't score) — warning "nothing lists this fixture" about a
         // recording sitting on a channel whose guide names both teams is just wrong.
-        if (best.EpgScore < MinEpgScore && currentShowsFixture != true) await WarnNoGuideCorroborationAsync(rec, ev, ct);
+        if (best.EpgScore < MinEpgScore && currentShowsFixture != true) await WarnNoGuideCorroborationAsync(rec, ev, cur is { Pinned: true }, ct);
 
         if (best.ChannelId == rec.ChannelId) return false;                       // already on the guide's pick
         if (best.EpgScore < MinEpgScore || best.EpgScore < curEpg + Hysteresis) return false; // move only for a real guide reason
@@ -271,7 +271,7 @@ public sealed class EpgRepickService
     /// capture that is about to run may record a blackout slate or studio filler instead of the game. Deliberately a
     /// warning and not a block: provider guides are patchy, and a missing listing must never cancel a recording that
     /// would have worked.</summary>
-    private async Task WarnNoGuideCorroborationAsync(Data.Entities.Recording rec, Event ev, CancellationToken ct)
+    private async Task WarnNoGuideCorroborationAsync(Data.Entities.Recording rec, Event ev, bool pinned, CancellationToken ct)
     {
         var now = EpochTime.Now();
         if (ev.StartUtc - now > CorroborationWarnWindowS) return;   // days out the guide may still firm up — don't cry wolf
@@ -280,9 +280,14 @@ public sealed class EpgRepickService
         // Name the networks when we know them (the fallback's TV lookup may just have populated ev.Broadcast) — "it's
         // on NBC and Peacock, which you don't carry" is actionable in a way the generic warning isn't.
         var nets = SplitNetworks(ev.Broadcast);
-        var msg = nets.Count > 0
-            ? $"'{ev.Title}' is listed on {NetList(nets)} — no channel in your lineup carries it; recording the mapped channel anyway"
-            : $"no channel in your lineup lists '{ev.Title}' — recording anyway, but it may be a national or streaming-only broadcast you don't receive";
+        // When the mapped channel is PINNED, the pin — not the lineup — is often what kept DVarr from following the
+        // broadcaster (a pin is never moved on a network-name match alone). Saying "no channel in your lineup carries
+        // it" sent people hunting for a channel they already had (12 August: ESPN was in the lineup; YES was pinned).
+        var msg = nets.Count > 0 && pinned
+            ? $"'{ev.Title}' is listed on {NetList(nets)}, but this recording's channel is pinned, so DVarr won't move it on a network name alone — recording the pinned channel. Unpin it on the Leagues page to let DVarr follow national broadcasts"
+            : nets.Count > 0
+                ? $"'{ev.Title}' is listed on {NetList(nets)} — no channel in your lineup could be matched to it; recording the mapped channel anyway"
+                : $"no channel in your lineup lists '{ev.Title}' — recording anyway, but it may be a national or streaming-only broadcast you don't receive";
         await _gate.WriteAsync(async () =>
         {
             _db.Notifications.Add(new Notification
@@ -292,8 +297,8 @@ public sealed class EpgRepickService
             });
             await _db.SaveChangesAsync(ct);
         }, ct);
-        _log.LogWarning("[EpgRepick] '{Title}': nothing in the lineup lists this fixture{Nets} — the capture may record the wrong programme",
-            ev.Title, nets.Count > 0 ? $" (listed on {NetList(nets)})" : "");
+        _log.LogWarning("[EpgRepick] '{Title}': no guide listing corroborates this fixture on the recorded channel{Nets}{Pin} — the capture may record the wrong programme",
+            ev.Title, nets.Count > 0 ? $" (listed on {NetList(nets)})" : "", pinned ? "; the channel is pinned, so a network-name move was not allowed" : "");
     }
 
     // Last decline CATEGORY logged per recording. The re-pick sweep re-runs on every schedule tick for a pending
@@ -649,12 +654,14 @@ public sealed class EpgRepickService
         return set;
     }
 
-    private void KickEpgRefresh(int sourceId, string eventTitle)
+    private void KickEpgRefresh(int sourceId, string eventTitle, string why)
     {
         var now = EpochTime.Now();
         var last = _lastRefresh.GetOrAdd(sourceId, 0);
         if (now - last < RefreshCooldownS || !_lastRefresh.TryUpdate(sourceId, now, last)) return;
-        _log.LogInformation("[EpgRepick] guide blank around '{Title}' — refreshing source {Id} EPG in the background", eventTitle, sourceId);
+        // Name the actual trigger: both the 12-hour staleness check and the blank-guide chase land here, and logging
+        // "guide blank" for a guide that was merely old pointed people at a problem they didn't have.
+        _log.LogInformation("[EpgRepick] refreshing source {Id}'s guide in the background for '{Title}' — {Why}", sourceId, eventTitle, why);
         _ = Task.Run(async () =>
         {
             try
