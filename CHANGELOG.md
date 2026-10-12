@@ -12,6 +12,12 @@ Dates are Brisbane (UTC+10). The version is reported on `/api/health` and comes 
 
 ---
 
+## [1.46.1] — 2026-10-12
+A wording fix to the M3U advice added in v1.46.0.
+
+### Fixed
+- **The M3U workaround no longer names Threadfin.** v1.46.0's "M3U isn't supported yet" message suggested putting the playlist through Threadfin, Dispatcharr or Stationarr and adding the result as an Xtream source. Threadfin doesn't offer an Xtream login, so that advice couldn't work. The message, the source form and the README now name the tools that do re-serve a playlist as an Xtream login: Stationarr (which can also import a local `.m3u` file) and Dispatcharr.
+
 ## [1.46.0] — 2026-10-12
 Recordings you can trust: every recording problem reported in the community since v1.45 has been traced to a cause in the code and fixed. Recordings no longer come out with the wrong length, overrun by hours, or let a replay take a live game's place, and the M3U and Jellyfin issues are sorted. This release also adds DVarr's first automated test suite.
 
@@ -28,7 +34,7 @@ Recordings you can trust: every recording problem reported in the community sinc
 
 ### Fixed — integrations and sources
 - **Jellyfin "delete after watched" works when there are two copies of a game.** Jellyfin sends a webhook on every progress save, so one viewing triggered dozens of "ambiguous" warnings, and a game with two files (for example the original capture plus a replay) was never marked watched. Progress saves are now ignored, copies of the same game are marked watched together, two different games sharing an episode number are told apart by title, and an ambiguous case is logged once instead of every few seconds.
-- **M3U sources now say plainly that they aren't supported yet**, instead of failing every refresh with "404 (Not Found)" (GitHub #11). DVarr reads Xtream logins only for now. Until M3U support arrives, put the playlist through Threadfin, Dispatcharr or Stationarr and add that as an Xtream source. Xtream sources that answer with a web page or have no API at the address now get a clear explanation instead of `'<' is an invalid start of a value`.
+- **M3U sources now say plainly that they aren't supported yet**, instead of failing every refresh with "404 (Not Found)" (GitHub #11). DVarr reads Xtream logins only for now. Until M3U support arrives, load the playlist into a tool that re-serves it as an Xtream login (Stationarr or Dispatcharr) and add that as an Xtream source. Xtream sources that answer with a web page or have no API at the address now get a clear explanation instead of `'<' is an invalid start of a value`.
 - **Clearer wrong-channel messages.** When a pinned channel is why DVarr didn't move a game to the national broadcaster, the notification now says that, and how to fix it. Previously it said no channel in your lineup carried the game. A routine guide refresh is no longer logged as "guide blank", and auto-stop log times are no longer labelled "Brisbane".
 
 ### Under the hood

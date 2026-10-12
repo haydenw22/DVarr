@@ -151,7 +151,7 @@ While you're there, set **Settings → Data sources → Display timezone** to yo
 | Field | What to enter |
 |---|---|
 | **Label** | Any name, e.g. `My IPTV (login 1)` |
-| **Type** | `xtream` — DVarr reads Xtream-codes logins. Plain M3U playlist links aren't supported yet; until they are, put the playlist through Threadfin, Dispatcharr or Stationarr and add that as an Xtream source |
+| **Type** | `xtream` — DVarr reads Xtream-codes logins. Plain M3U playlist links aren't supported yet; until they are, load the playlist into a tool that re-serves it as an Xtream login — [Stationarr](https://github.com/rroy676/Stationarr) (which also imports a local `.m3u` file) or [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr) — and add that as an Xtream source. If the tool's Xtream address includes a path, put the whole address (host, port and path) in **Host** and leave **Port** at 0 |
 | **Protocol / Host / Port** | From your provider's URL, e.g. `http` · `provider.example.com` · `8080` |
 | **Username / Password** | Your IPTV login |
 | **Max streams** | How many concurrent streams this login allows. DVarr currently records **one stream per login at a time** whatever this says — add a second login as a second source to record two games at once |

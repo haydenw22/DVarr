@@ -39,7 +39,7 @@ public sealed class IngestService
 
     /// <summary>Shown wherever an M3U source is refused. Real M3U support (playlist URL or a local file) is planned.</summary>
     public const string M3uNotSupported =
-        "M3U playlist sources aren't supported yet — DVarr currently reads Xtream logins only. Until M3U support lands, run the playlist through Threadfin, Dispatcharr or Stationarr and add that here as an Xtream source.";
+        "M3U playlist sources aren't supported yet — DVarr currently reads Xtream logins only. Until M3U support lands, load the playlist into a tool that re-serves it as an Xtream login (Stationarr, which also takes a local .m3u file, or Dispatcharr) and add that here as an Xtream source.";
 
     public static bool IsM3u(string? type) => string.Equals(type?.Trim(), "m3u", StringComparison.OrdinalIgnoreCase);
 

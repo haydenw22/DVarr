@@ -2445,7 +2445,7 @@ function openSourceModal(id) {
   modal(`<h2>${edit ? 'Edit' : 'Add'} source</h2>
     <div class="fields" style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
       <label class="field">Label<input id="sLabel" value="${esc(x?.label || '')}" placeholder="e.g. My IPTV (login 2)"/></label>
-      <label class="field">Type<select id="sType"><option ${sel(x?.type, 'm3u') ? '' : 'selected'}>xtream</option>${x?.type === 'm3u' ? `<option value="m3u" selected>m3u (not supported yet)</option>` : ''}</select><span class="muted" style="font-size:12px">M3U playlist links aren't supported yet — use your provider's Xtream login, or put the playlist through Threadfin / Dispatcharr / Stationarr.</span></label>
+      <label class="field">Type<select id="sType"><option ${sel(x?.type, 'm3u') ? '' : 'selected'}>xtream</option>${x?.type === 'm3u' ? `<option value="m3u" selected>m3u (not supported yet)</option>` : ''}</select><span class="muted" style="font-size:12px">M3U playlist links aren't supported yet — use your provider's Xtream login, or load the playlist into Stationarr or Dispatcharr and add their Xtream login here.</span></label>
       <label class="field">Protocol<select id="sProto"><option ${x?.protocol === 'https' ? '' : 'selected'}>http</option><option ${sel(x?.protocol, 'https')}>https</option></select></label>
       <label class="field">Host<input id="sHost" value="${esc(x?.host || '')}" placeholder="provider.example.com"/></label>
       <label class="field">Port<input id="sPort" type="number" value="${x?.port || 0}"/></label>
